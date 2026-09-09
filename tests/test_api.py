@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from dual_lobe.api import auth
+import pytest
+
+pytestmark = pytest.mark.usefixtures("postgres")
 
 
 def test_health(client):
@@ -116,7 +119,7 @@ def test_chat_upstream_failure_is_502_and_no_crash(client, tenant, monkeypatch):
         headers={"Authorization": f"Bearer {raw}"},
     )
     assert r.status_code == 502
-    assert "provider" in r.json()["detail"].lower()
+    assert r.json()["error"]["type"] == "upstream_error"
 
 
 def test_chat_stream_success(client, tenant, monkeypatch):
@@ -151,7 +154,8 @@ def test_chat_stream_incomplete(client, tenant, monkeypatch):
         headers={"Authorization": f"Bearer {raw}"},
     )
     assert r.status_code == 200
-    assert '"finish_reason": "INCOMPLETE"' in r.text
+    assert "upstream_stream_error" in r.text
+    assert '"finish_reason": "stop"' not in r.text
 
 
 def test_events_ingest_and_state_flow(client, tenant):

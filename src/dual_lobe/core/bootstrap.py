@@ -1,8 +1,7 @@
 """Seed a tenant + scoped API keys from ``DUAL_LOBE_BOOTSTRAP_KEYS``.
 
 Format (``;``-separated): ``<raw-key>|<scope1,scope2>|<tenant-slug>``.
-A default ``dual-lobe-local`` admin key for the ``default`` tenant is created
-when bootstrap runs and no key exists yet.
+No predictable default key is created. Re-running bootstrap is idempotent.
 """
 from __future__ import annotations
 
@@ -34,17 +33,22 @@ async def seed() -> list[str]:
         tenant = await ensure_tenant(session, s.seed_tenant_slug, s.seed_tenant_name)
         n_keys = (await session.execute(select(func.count()).select_from(ApiKey))).scalar_one()
         if n_keys == 0 and not s.bootstrap_keys:
-            raw = "dual-lobe-local"
-            session.add(ApiKey(tenant_id=tenant.id, key_hash=hash_key(raw), label="dev default", scopes=ALL_SCOPES))
-            created.append(raw)
-            await session.commit()
-            return created
+            raise ValueError("Set DUAL_LOBE_BOOTSTRAP_KEYS to an explicit secret before first startup")
         for entry in (p for p in s.bootstrap_keys.split(";") if p.strip()):
             parts = [x.strip() for x in entry.split("|")]
             raw = parts[0]
             scopes = parts[1].split(",") if len(parts) > 1 and parts[1] else ALL_SCOPES
             slug = parts[2] if len(parts) > 2 and parts[2] else s.seed_tenant_slug
             t = await ensure_tenant(session, slug, slug)
+            existing = (await session.execute(select(ApiKey).where(
+                ApiKey.key_hash == hash_key(raw)
+            ))).scalar_one_or_none()
+            if existing:
+                if existing.tenant_id != t.id:
+                    raise ValueError("Bootstrap key already belongs to a different tenant")
+                continue
+            if len(raw) < 24 or raw.startswith("REPLACE_"):
+                raise ValueError("Bootstrap API keys must contain at least 24 characters")
             session.add(ApiKey(tenant_id=t.id, key_hash=hash_key(raw), label="bootstrap", scopes=scopes))
             created.append(raw)
         await session.commit()
@@ -58,7 +62,7 @@ def main() -> None:
         return created
 
     created = asyncio.run(_run())
-    print("created keys:", created)
+    print(f"Bootstrap complete: {len(created)} key(s) created; secrets are not logged.")
 
 
 if __name__ == "__main__":

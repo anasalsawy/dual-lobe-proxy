@@ -1,8 +1,9 @@
 #!/bin/sh
 set -e
 
-# Apply migrations on start (idempotent), seed a default key if none exist,
-# then exec the container command.
-alembic upgrade head
-python -m dual_lobe.core.bootstrap || true
+# Compose uses one initialization service; workers never race migrations.
+if [ "${DUAL_LOBE_INITIALIZE:-false}" = "true" ]; then
+    alembic upgrade head
+    python -m dual_lobe.core.bootstrap
+fi
 exec "$@"

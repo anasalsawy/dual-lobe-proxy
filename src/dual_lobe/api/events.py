@@ -1,7 +1,9 @@
 """POST /v1/dual-lobe/events — external ledger ingestion (CrewAI tools etc.)."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, HTTPException
+from sqlalchemy import select
+from ..core.idgen import sha256_short
 
 from ..core.engine import tenant_session
 from ..core.redact import redact_payload
@@ -23,15 +25,26 @@ async def ingest_event(
         if run_id:
             run = await repo._get_run_or_none(session, principal.tenant_id, run_id)
             if run is None:
-                return {"status": "error", "error": f"run {run_id} not found in tenant"}
+                raise HTTPException(status_code=404, detail="run not found in tenant")
+            run_id = str(run.id)
+        key = (f"client:{principal.tenant_id}:{sha256_short(body.idempotency_key)}"
+               if body.idempotency_key else None)
+        if key:
+            existing = (await session.execute(select(repo.models.Event).where(
+                repo.models.Event.idempotency_key == key,
+                repo.models.Event.tenant_id == principal.tenant_id,
+            ))).scalar_one_or_none()
+            if existing:
+                return {"status": "ok", "event_id": str(existing.id), "duplicate": True}
         ev = await repo.append_event(
             session,
-            body.kind,
+            "client_event",
             principal.tenant_id,
             run_id=run_id,
-            actor=body.actor or "",
-            payload=redact_payload(body.payload),
-            idempotency_key=body.idempotency_key,
+            actor="client",
+            payload={"source": "client_reported", "kind": body.kind,
+                     "actor": body.actor, "data": redact_payload(body.payload)},
+            idempotency_key=key,
         )
         await session.commit()
     return {"status": "ok", "event_id": str(ev.id), "run_id": run_id, "kind": body.kind}

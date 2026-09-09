@@ -11,6 +11,7 @@ from .settings import get_settings
 def _secret_candidates() -> list[str]:
     s = get_settings()
     out = [v for v in (s.a_api_key, s.resolved_b_api_key) if v]
+    out += [entry.split("|", 1)[0].strip() for entry in s.bootstrap_keys.split(";") if entry]
     out += [v for k, v in os.environ.items() if k.endswith(("API_KEY", "TOKEN", "SECRET")) and v]
     return out
 
@@ -38,7 +39,12 @@ def _redact_node(node: Any) -> Any:
     if isinstance(node, list):
         return [_redact_node(x) for x in node]
     if isinstance(node, dict):
-        return {k: _redact_node(v) for k, v in node.items()}
+        return {
+            k: "[REDACTED]" if k.lower() in {
+                "api_key", "authorization", "password", "secret", "access_token"
+            } else _redact_node(v)
+            for k, v in node.items()
+        }
     return node
 
 

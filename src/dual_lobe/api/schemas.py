@@ -3,12 +3,13 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 EventKind = str
 
 
 class ChatCompletionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     model: str = "lobe-a"
     messages: list[dict[str, Any]] = Field(default_factory=list)
     stream: bool = False
@@ -21,6 +22,11 @@ class ChatCompletionRequest(BaseModel):
     response_format: Any = None
     seed: int | None = None
     reasoning_effort: Any = None
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
+    parallel_tool_calls: bool | None = None
+    stream_options: dict[str, Any] | None = None
+    max_completion_tokens: int | None = None
 
 
 class EventIngest(BaseModel):

@@ -1,165 +1,206 @@
-# dual_lobe — Inference Proxy with a Deep Verification "B-Lobe"
+# Dual-lobe proxy
 
-`dual_lobe` is the inference gateway that powers the deployed Forge project
-(a multi-floor research/builder pipeline). It exposes a single
-OpenAI-compatible API in front of upstream model providers (Gemini via the
-Google OpenAI-compatible endpoint, Featherless, etc.), and pairs every call
-with a **durable, asynchronous verification pipeline** so that no high-stakes
-output runs "unanchored".
+A text-only Chat Completions gateway with a small asynchronous observer.
+**A works. B asks better questions and flags evidence-linked concerns. B never holds A.**
 
-The name comes from the two-lobe architecture:
+B has no tools, browser, filesystem access, CrewAI tasks, or multi-agent debate.
+It cannot guarantee truth, infer intent from writing style, or prevent every fabricated
+statement. This is an advisory development implementation, not a verified production
+security boundary. Read [the research and design](docs/RESEARCH_AND_DESIGN.md) and
+[the validation record](docs/VALIDATION.md).
 
-- **A-Lobe (hot path):** serve the request fast, stream or return the model
-  response, hand the run off.
-- **B-Lobe (verification path):** after the fact, capture a *context shadow*
-  of what the model was given (the observation floor at that decision point),
-  run deep faithfulness / evidential checks against the response, classify the
-  outcome with a disposition + severity, and persist a versioned verdict the
-  caller can inspect.
+## What happens on a call
 
-Nothing Blies-blocking: failures on the B path are **fail-open** by design.
-The A-path never waits on verification; it commits its work transactionally and
-moves on.
+| Step | Input | Operation | Output / checks |
+|---|---|---|---|
+| Admission | Bearer key, request, correlation headers | Resolve tenant; validate supported fields; apply process-local budgets | Unauthorized requests rejected; images/audio rejected; unknown model aliases rejected |
+| Run context | Run/floor/attempt headers and first user objective | Resolve/create run; retain original goal | Internal run UUID; no database transaction held while A generates |
+| A context | Original messages, optional fresh B note | Add short honest observation reminder; put B suggestions in a separate user-role message before the conversation | Existing tool-call/result adjacency preserved; B text is not a system instruction |
+| A response | Provider completion or SSE | Relay response; stream each SSE event as it arrives | Tool fragments, choice indices, IDs, finish reasons and usage preserved; interrupted streams report an error |
+| Observation capture | Bounded original context, A output, call metadata | After response delivery, best-effort audit/outbox transaction | A never waits for a B model; a crash before this transaction can lose the observation |
+| B review | Original goal, context/output, recent reported events, prior fallible review | One bounded model call; no tool use or retries | Up to two useful questions, one next step, three concerns |
+| Review validation | B JSON | Check schema, lengths, allowed labels, exact quoted substrings | Malformed/ungrounded review becomes degraded, not “clean” or “verified” |
+| Later A call | Latest same-run, same-floor/attempt review | Use only a fresh advisory note | Expired or degraded notes are ignored; no guarantee the review finishes before the next call |
 
----
+The proxy does **not** implement Forge floors or CrewAI execution rules. Floor,
+attempt, worker, task and role headers correlate calls. A floor change prevents
+using an old floor's note. Analyst/Auditor/bypass calls get neither B injection nor
+new B jobs; their own review responsibilities remain outside this proxy.
 
-## What it does, exactly
+## Start locally
 
-### 1. OpenAI-compatible inference API
+Requires Docker Compose. This stack uses development database passwords and binds
+host ports to loopback. Do not publish it directly to the Internet.
 
-- `GET  /v1/models` — list configured models.
-- `POST /v1/chat/completions` — non-streaming and streaming (SSE) chat, requests
-  run against the configured upstream provider via per-tenant model routing.
-- Every run gets a **run id** (`X-Dual-Lobe-Run-Id` header), an idempotency gate,
-  and a durable trail of events: `run_started`, `context_ingested`,
-  `provider_attempt` (with per-attempt status and latency), `worker_error`.
+1. Copy `.env.example` to `.env`.
+2. Replace `REPLACE_WITH_A_RANDOM_SECRET` in `DUAL_LOBE_BOOTSTRAP_KEYS` with a
+   random secret of at least 24 characters; `openssl rand -hex 32` can generate one.
+   Keep the scope/tenant suffix. No predictable default API key is created.
+3. Set `DUAL_LOBE_A_MODEL`, `DUAL_LOBE_A_BASE_URL`, and `DUAL_LOBE_A_API_KEY`
+   for your actual OpenAI-compatible provider. The model ID must exist there.
+4. Optionally set `DUAL_LOBE_B_MODEL`, `DUAL_LOBE_B_BASE_URL`, and
+   `DUAL_LOBE_B_API_KEY`. Omit them to inherit A. An explicitly empty B key does
+   not inherit A's key. A separate quota/provider reduces resource contention.
+5. Run:
 
-### 2. Context Shadow + Integrity Sentinel (the B-Lobe)
-
-For a run that matters (flagged call sequences), the worker:
-
-1. **Reads the shadow record** — the exact context handed to the model at that
-   decision floor (`observation`), plus the model's response and per-floor state.
-2. **Builds a verification prompt** that asks a stronger/grounding model to check
-   the response against the evidence, flags fabricated URLs, distinguishes
-   observation from inference, and reports contradictions.
-3. **Writes a verifiable claim** (`b_claim`) that is either grounded (file-backed,
-   so a file-exists verifier can prove it) or left as an explicit `claimed` item.
-4. **Classifies the outcome** into a disposition with a severity weight:
-   corrected handoffs (`corrected_handoff`), suppressed writes
-   (`write_suppression`), mitigated outputs (`mitigation`), or a
-   `shadow_degraded` marker when the verifier could not run (fail-open).
-5. **Versions its verdict** in `b_state.rev` + `verdict_status`, so callers can
-   read `status_code == REVIEWABLE` and the exact disposition.
-
-### 3. Durable, correct execution
-
-- **Transactional outbox:** every workflow trigger enqueues an outbox row inside
-  the **same transaction** as the A-path commit. A durable job is *never* lost
-  to a crash between "model returned" and "verification enqueued".
-- **Deterministic job keys + `b_job` dedup:** the same event enqueued twice
-  produces one job (`unique(event_key)`), so redelivery is idempotent.
-- **Claim-free job steering:** workers claim only jobs they can complete; a claim
-  stays open while work proceeds and is closed when `b_state` is written.
-- **Versioned state:** each B verdict bumps `rev`; the pipeline can see
-  "revision 1 = still claimed, revision 2 = corrected handoff" and reconcile.
-
-### 4. Multi-tenant with Row-Level Security
-
-- Tenants authenticate with scoped API keys (`inference:invoke`,
-  `events:write`, `state:read`, etc.). Keys are stored **hashed** (SHA-256).
-- Postgres is the source of truth. The API connects through two roles:
-  - `DATABASE_URL` — privileged role used by workers/migrations/auth.
-  - `RLS_DATABASE_URL` — `dual_lobe_rls` role; every request sets
-    `SET app.tenant_id = <id>`, and **every row is invisible unless your
-    tenant header matches** (RLS policies + `WITH CHECK` on inserts).
-- Reading another tenant's state returns zero rows; writing to another
-  tenant's rows is rejected by the database itself — never by application code.
-
-### 5. Observability
-
-- `/healthz` (liveness) and `/readyz` (DB+Redis readiness) for orchestration.
-- Structlog correlation IDs across gateway and worker.
-- `POST /v1/dual-lobe/events` for ingest of client-observed events.
-- `GET  /v1/dual-lobe/state/{run_id}` — full event trail + B-verdicts.
-- `POST /v1/verify` — on-demand evidence verification against a caller-supplied
-  artifact path.
-
----
-
-## Architecture
-
-```
- client
-   │  OpenAI-compatible calls (Bearer <scoped api key>)
-   ▼
-┌──────────────────────────────────────────────────────────────┐
-│ gateway (FastAPI)                                           │
-│  auth(api_keys) → push to provider (A-lobe)                 │
-│  → outbox row in SAME tx → 200/stream to client             │
-└──────────────┬───────────────────────────────────────────────┘
-               │ transactional outbox (Postgres)
-               ▼
-┌──────────────────────────────────────────────────────────────┐
-│ b-worker                                                      │
-│  claim job → context shadow → integrity checks → classify    │
-│  → write b_state (verdict + disposition + severity)          │
-│  fail-open: shadow_degraded if verification can't run        │
-└───────────────────────────────────────────────────────────────┘
+```sh
+docker compose up --build -d
+docker compose logs initialize gateway b-worker
+curl http://localhost:8801/healthz
+curl http://localhost:8801/readyz
 ```
 
-- **gateway** — FastAPI app, auth, limits (Redis-backed), routing, SSE.
-- **b-worker** — async loop polling the outbox, deduping via `event_key`,
-  running the B-pipeline.
-- **db** — Postgres 18; source of truth for runs, events, outbox, jobs,
-  claims, evidence, b_state, tenants, api_keys. RLS enforced via
-  `dual_lobe_rls` role.
-- **redis** — rate-limit / coordination state (valkey image).
+Only the `initialize` service runs migrations/bootstrap. It must succeed before
+the gateway and worker start. Re-running bootstrap does not duplicate existing
+keys or reactivate revoked keys. Existing development keys from older versions
+are not automatically revoked: rotate them before sharing the service.
 
----
+`/healthz` checks process liveness. `/readyz` checks the database and enabled A
+registry entry; it does not test provider credentials, B worker liveness, or
+end-to-end model availability. Inspect state timestamps and worker logs for B.
 
-## Running it
+## Connect your application
 
-```bash
-cp .env.example .env        # fill DUAL_LOBE_A_API_KEY, GEMINI_API_KEY, etc.
-docker compose up -d --build gateway b-worker
-curl localhost:8811/healthz
+Point a Chat Completions client at `http://localhost:8801/v1`, use your **proxy**
+API key (not the upstream provider key), and select model `lobe-a`.
+No CrewAI observer agent or tools need to be added.
+
+Set a stable `X-DL-Run-ID` for one conversation/task. Without it, each request is
+a new run, so B cannot help subsequent calls. You can reuse the returned internal
+`X-Dual-Lobe-Run-Id` as the next request's `X-DL-Run-ID`.
+
+```sh
+curl -N http://localhost:8801/v1/chat/completions \
+  -H 'Authorization: Bearer YOUR_PROXY_SECRET' \
+  -H 'Content-Type: application/json' \
+  -H 'X-DL-Run-ID: example-task-1' \
+  -H 'X-DL-Floor-ID: implementation' \
+  -H 'X-DL-Attempt: 1' \
+  -d '{"model":"lobe-a","stream":true,"messages":[{"role":"user","content":"Explain the smallest next step for this task."}]}'
 ```
 
-Secrets needed per provider you route to (`DUAL_LOBE_A_API_KEY`,
-`GEMINI_API_KEY`, Featherless/`OPENAI_API_KEY`). The bootstrap seeds a default
-tenant + key; override with `DUAL_LOBE_BOOTSTRAP_KEYS="<key>|<scope1,scope2>|<slug>"`.
+Send normal conversation history, including tool calls and their actual results.
+B sees only what the proxy receives; it cannot discover unreported execution.
 
-Database is migrated automatically on start (Alembic `0001_initial` creates all
-tables, the `dual_lobe_rls` role, grants, and RLS policies).
+Optional correlation headers: `X-DL-Worker-ID`, `X-DL-Task-ID`,
+`X-DL-Call-Seq`, `X-DL-Agent-Role`. Roles `analyst`, `auditor`, `lobe-b`,
+and `b`, or `X-Dual-Lobe-Mode: bypass`, bypass observation/injection.
+This bypass is a caller preference, not a security permission.
 
----
+Read B's latest state:
 
-## Tests
-
-Integration tests run against a real Postgres 18 (Testcontainers), no mocks for
-the storage layer:
-
-```bash
-uv run pytest   # 20 tests: schema+RLS isolation, auth/scopes,
-                # chat (stream/non-stream/INCOMPLETE/502), events+state,
-                # outbox idempotency, worker cycle, fail-open, verifier
+```sh
+curl http://localhost:8801/v1/dual-lobe/state/example-task-1 \
+  -H 'Authorization: Bearer YOUR_PROXY_SECRET'
 ```
 
----
+`payload.oversight_status` is `reviewed`, `degraded`, or `stale`; an empty
+payload means no stored review. “Reviewed” means the output contract passed,
+not that A's answer is true. Response header `X-Dual-Lobe-Observer` describes
+the note lookup for that A call, not the success of a future background review.
 
-## Repository layout
+Optional external results can be posted to `/v1/dual-lobe/events` with
+`kind`, `run_id`, `payload`, and `idempotency_key`. They are stored as
+`client_event` / `client_reported`, even if the caller labels them “verified.”
+They enrich the next scheduled review; event ingestion does not itself call B.
 
+## B's exact job
+
+The editable prompt lives in [prompts.py](src/dual_lobe/b/prompts.py).
+The output contract and freshness rules live in
+[protocol.py](src/dual_lobe/b/protocol.py).
+
+For a blocker, B asks what goal was replaced by a tactic, which prerequisite is
+missing, what alternative explains the evidence, and what small authorized check
+would distinguish the alternatives. It does not seek permission bypasses.
+
+For integrity, B inspects material completion/action claims, inconsistencies,
+missing receipts, and unsupported shifts in certainty. Labels are:
+
+- `UNSUPPORTED`: a material claim lacks matching evidence in the supplied record.
+- `CONTRADICTION`: B identifies incompatible supplied statements and quotes both.
+- `SUSPICIOUS_SHIFT`: a change lacks an explanation in the supplied record.
+
+All three are **model assessments**, not verdicts. Missing evidence is not proof
+of fabrication. Confidence or tone alone is not a trigger for an accusation.
+
+## Main controls
+
+| Setting | Default | Actual meaning |
+|---|---:|---|
+| `DUAL_LOBE_B_ENABLED` | true | Enable background observation and B context |
+| `DUAL_LOBE_OBSERVATION_REMINDER` | true | Short reminder on observed A calls; independently switchable |
+| `DUAL_LOBE_ROLLOUT_STAGE` | context | `context` injects fresh suggestions; `observation` only adds reminder |
+| `DUAL_LOBE_PULSE_EVERY` | 1 | Eligible calls per run between enqueues; default every call |
+| `DUAL_LOBE_B_COOLDOWN_SECONDS` | 5 | Skip closely spaced reviews after the previous completed review |
+| `DUAL_LOBE_B_RPM_LIMIT` | 20 | Per-tenant, per-worker-process B call budget |
+| `DUAL_LOBE_WORKER_MAX_CONCURRENCY` | 2 | Maximum concurrent jobs in one worker process |
+| `DUAL_LOBE_B_TIMEOUT` | 20 s | Whole B model operation deadline; one attempt |
+| `DUAL_LOBE_B_MAX_OUTPUT_TOKENS` | 1400 | Requested B output-token cap |
+| `DUAL_LOBE_MAX_SHADOW_INPUT_CHARS` | 18000 | Complete B user-prompt cap, plus fixed system prompt |
+| `DUAL_LOBE_MAX_INJECTION_CHARS` | 1200 | Total generated advisory-message cap |
+| `DUAL_LOBE_B_STATE_TTL_SECONDS` | 180 s | Maximum age of the observation underlying a note |
+| `DUAL_LOBE_B_STATE_READ_TIMEOUT` | 0.025 s | Optional state-read deadline; cancellation cleanup can add overhead |
+| `DUAL_LOBE_A_RETRIES` | 1 | Total buffered A attempts; streams are never replayed |
+
+See [.env.example](.env.example) for provider, admission, and startup settings.
+Legacy `integrity-observe`, `integrity-intervene`, and `enforcement` stage
+names now mean advisory context. They do not hold, block or force verification.
+Old B retry, fail-closed, spend-unit, enriched-bootstrap and Firecrawl settings
+are retired/ignored. Redis and LiteLLM are no longer dependencies.
+
+## Compatibility and limitations
+
+Supports the explicitly declared request fields in
+[schemas.py](src/dual_lobe/api/schemas.py): messages, streaming, tools, tool choice,
+parallel tool calls, standard sampling/token limits, response format, seed and
+reasoning effort. Unknown fields return 422 instead of silently disappearing.
+Provider support for any forwarded option still varies. The Responses API,
+image/audio processing and public inference via `lobe-b` are disabled.
+
+`POST /v1/verify` returns 410. The old file checker is not connected to the
+runtime. Legacy claim/evidence tables remain readable for existing data; B no
+longer creates final verdicts or runs artifact checks. Existing B state uses the
+old schema and will not be injected; a fresh v2 review replaces it.
+
+No B model wait does not mean literally zero overhead: authentication, database
+run lookup, optional 25 ms state lookup, network/proxy work and additional prompt
+tokens still cost time. Shared upstream capacity can also slow A. A response
+already delivered cannot be retracted or corrected by a later B review.
+
+Observation capture is best effort after delivery, not lossless audit logging.
+A process crash/disconnect or failed background transaction may lose it. Durable
+outbox jobs are idempotent once committed. Stale jobs and close-together reviews
+may be skipped; B does not review every claim or necessarily every call.
+
+Deploy one gateway and one B worker for the documented process-local budgets.
+For public/multi-process production use, separately validate rate limits, tenant
+roles, request ingress limits, data retention, secrets, backup/recovery and TLS.
+Known-secret redaction is not comprehensive data-loss prevention. Configuring a
+different B provider sends the bounded observed context to that provider.
+
+## Development and tests
+
+```sh
+uv sync --locked --extra dev
+uv run --locked pytest tests/unit -q
+# Requires a permitted, functioning Docker daemon; creates a disposable Postgres:
+uv run --locked pytest -q
 ```
-alembic/            migrations (schema, roles, RLS policies)
-docker/             Dockerfile + entrypoint (migrate → seed → run)
-src/dual_lobe/
-  api/              FastAPI app: chat, events, state, health, verify, auth
-  b/                B-lobe: prompts, outbox, context_shadow, worker
-  core/             settings, engine (admin+RLS sessions), models, bootstrap
-  evidence/         verifier (file-grounding checks), classifier (dispositions)
-  provider/         upstream adapters (buffered + streaming) + registry
-  state/            async repositories over the Postgres schema
-  obs/              structlog + tracer setup
-tests/              conftest (Testcontainers PG18) + integration suites
+
+Native execution requires Postgres, explicit `DATABASE_URL` and
+`RLS_DATABASE_URL`, `alembic upgrade head`, and
+`python -m dual_lobe.core.bootstrap`. Then start
+`uvicorn dual_lobe.api.app:app --port 8801` and
+`python -m dual_lobe.b.worker` in separate processes.
+
+`uv.lock` captures the resolved environment. Docker installs the pinned, hashed
+runtime packages in `requirements.lock`. To intentionally refresh the export:
+
+```sh
+uv lock
+uv export --no-dev --no-emit-project --format requirements-txt --output-file requirements.lock
 ```
+
+Do not interpret passing deterministic tests as measured hallucination reduction.
+The research report includes a separate real-model evaluation plan.

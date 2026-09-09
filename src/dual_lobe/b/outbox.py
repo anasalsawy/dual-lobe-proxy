@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any
+import time
 
 from ..core.idgen import sha256_short
 
@@ -28,7 +29,7 @@ def shadow_payload(
     floor_id: str = "",
     attempt_id: int = 1,
     stage: str = "observation",
-    max_attempts: int = 5,
+    max_attempts: int = 1,
 ) -> dict[str, Any]:
     return {
         "kind": "context_shadow",
@@ -42,4 +43,5 @@ def shadow_payload(
         "response_text": response_text,
         "stage": stage,
         "max_attempts": max_attempts,
+        "observed_at": time.time(),
     }

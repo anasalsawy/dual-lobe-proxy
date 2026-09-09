@@ -35,7 +35,9 @@ class FakeAdapter:
         if self.fail is not None:
             raise self.fail
         for d in self.stream_deltas:
-            yield d
+            yield {"id": "fake-stream", "object": "chat.completion.chunk",
+                   "created": 0, "model": "fake",
+                   "choices": [{"index": 0, **d}]}
 
 
 def fake_target(alias: str = "lobe-a", model: str = "fake") -> SimpleNamespace:

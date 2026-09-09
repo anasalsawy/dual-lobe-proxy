@@ -7,6 +7,8 @@ from ..core.engine import tenant_session
 from ..state import repositories as repo
 from . import auth
 from .schemas import StateResponse
+from ..b.protocol import usable_state
+from ..core.settings import get_settings
 
 router = APIRouter()
 
@@ -26,11 +28,17 @@ async def run_state(
         claims = [repo.claim_to_dict(c) for c in await repo.list_claims(session, run_id=internal, limit=50)]
         evidence = [repo.evidence_to_dict(e) for e in await repo.list_evidence(session, run_id=internal, limit=50)]
         events = [repo.event_to_dict(e) for e in await repo.list_events(session, run_id=internal, limit=25)]
+    state_payload = dict(latest["payload"]) if latest else {}
+    if state_payload.get("oversight_status") == "reviewed" and not usable_state(
+        state_payload, run.current_floor, run.current_attempt,
+        get_settings().b_state_ttl_seconds,
+    ):
+        state_payload["oversight_status"] = "stale"
     return StateResponse(
         run_id=internal,
         revision=latest["revision"] if latest else None,
         pulse=latest["pulse"] if latest else None,
-        payload=latest["payload"] if latest else {},
+        payload=state_payload,
         claims=claims,
         evidence=evidence,
         recent_events=events,

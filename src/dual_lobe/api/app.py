@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 from ..core.engine import dispose_engines
 from ..core.settings import get_settings
+from ..provider.adapters import close_http_client
 from ..obs.telemetry import TRACER
 from . import chat, events, health, state
 
@@ -22,12 +23,13 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await close_http_client()
         await dispose_engines()
 
 
 app = FastAPI(
     title="Dual-Lobe Inference Proxy",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 

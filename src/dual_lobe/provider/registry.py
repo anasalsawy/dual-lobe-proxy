@@ -74,9 +74,7 @@ class Registry:
             self.register(target)
 
     def target(self, alias: str | None = None) -> ProviderTarget:
-        if not alias or alias not in self._targets:
-            return self._targets.get("lobe-a") or list(self._targets.values())[0]
-        return self._targets[alias]
+        return self._targets[alias or "lobe-a"]
 
     def adapter(self, alias: str | None = None):
         target = self.target(alias)

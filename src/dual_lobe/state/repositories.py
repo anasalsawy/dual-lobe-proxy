@@ -56,29 +56,25 @@ async def get_or_create_run(
     attempt: int = 1,
     goal: str = "",
 ) -> models.Run:
-    res = await session.execute(
-        select(models.Run).where(
-            models.Run.tenant_id == tenant_id, models.Run.external_run_id == external_run_id
-        )
-    )
-    run = res.scalar_one_or_none()
+    run = await _get_run_or_none(session, tenant_id, external_run_id) if external_run_id else None
     if run is not None:
         if floor_id or goal:
             run.current_floor = floor_id or run.current_floor
             run.current_attempt = attempt or run.current_attempt
-            run.goal = goal or run.goal
+            run.goal = run.goal or goal
             await session.flush()
         return run
-    run = models.Run(
-        tenant_id=tenant_id,
-        external_run_id=external_run_id or str(uuid.uuid4()),
-        current_floor=floor_id,
-        current_attempt=attempt,
-        goal=goal,
+    from sqlalchemy.dialects.postgresql import insert
+
+    external = external_run_id or str(uuid.uuid4())
+    res = await session.execute(
+        insert(models.Run).values(
+            tenant_id=tenant_id, external_run_id=external, current_floor=floor_id,
+            current_attempt=attempt, goal=goal,
+        ).on_conflict_do_nothing(constraint="uq_runs_tenant_external").returning(models.Run)
     )
-    session.add(run)
-    await session.flush()
-    return run
+    created = res.scalar_one_or_none()
+    return created or await _get_run_or_none(session, tenant_id, external)
 
 
 async def append_event(
@@ -90,6 +86,25 @@ async def append_event(
     payload: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
 ) -> models.Event:
+    if idempotency_key:
+        from sqlalchemy.dialects.postgresql import insert
+
+        result = await session.execute(
+            insert(models.Event).values(
+                tenant_id=tenant_id, run_id=uuid.UUID(run_id) if run_id else None,
+                kind=kind, actor=actor, payload=payload or {},
+                idempotency_key=idempotency_key,
+            ).on_conflict_do_nothing(index_elements=["idempotency_key"])
+            .returning(models.Event)
+        )
+        inserted = result.scalar_one_or_none()
+        if inserted is not None:
+            return inserted
+        result = await session.execute(select(models.Event).where(
+            models.Event.tenant_id == tenant_id,
+            models.Event.idempotency_key == idempotency_key,
+        ))
+        return result.scalar_one()
     ev = models.Event(
         tenant_id=tenant_id,
         run_id=uuid.UUID(run_id) if run_id else None,
@@ -260,13 +275,15 @@ async def enqueue_outbox(
     event_key: str,
     payload: dict[str, Any],
 ) -> models.Outbox | None:
-    existing = await session.execute(select(models.Outbox).where(models.Outbox.event_key == event_key))
-    if existing.scalar_one_or_none() is not None:
-        return None
-    row = models.Outbox(tenant_id=tenant_id, aggregate=aggregate, event_key=event_key, payload=payload)
-    session.add(row)
-    await session.flush()
-    return row
+    from sqlalchemy.dialects.postgresql import insert
+
+    result = await session.execute(
+        insert(models.Outbox).values(tenant_id=tenant_id, aggregate=aggregate,
+                                    event_key=event_key, payload=payload)
+        .on_conflict_do_nothing(constraint="uq_outbox_event_key")
+        .returning(models.Outbox)
+    )
+    return result.scalar_one_or_none()
 
 
 async def record_provider_attempt(
@@ -298,7 +315,7 @@ async def record_provider_attempt(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
     )
-    if status == "FAILED":
+    if status in ("FAILED", "INCOMPLETE"):
         attempt.error_kind = error_kind
     attempt.finished_at = func.now()
     session.add(attempt)

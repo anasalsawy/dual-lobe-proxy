@@ -11,17 +11,18 @@ os.environ.setdefault("DUAL_LOBE_A_BASE_URL", "https://fake.local/v1")
 os.environ.setdefault("DUAL_LOBE_ROLLOUT_STAGE", "observation")
 os.environ.setdefault("DUAL_LOBE_PULSE_EVERY", "3")
 
-from testcontainers.postgres import PostgresContainer  # noqa: E402
+from testcontainers.community.postgres import PostgresContainer  # noqa: E402
 
 from dual_lobe.core.settings import get_settings  # noqa: E402
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="session")
 def postgres() -> PostgresContainer:
     with PostgresContainer("postgres:18") as pg:
         host, port = pg.get_container_host_ip(), pg.get_exposed_port(5432)
         user, password, db = pg.username, pg.password, pg.dbname
         os.environ["DATABASE_URL"] = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{db}"
+        os.environ["RLS_DATABASE_URL"] = f"postgresql+asyncpg://dual_lobe_rls:dual_lobe_rls@{host}:{port}/{db}"
         get_settings.cache_clear()
         _apply_migrations()
         yield pg
@@ -37,7 +38,7 @@ def _apply_migrations() -> None:
 
 
 @pytest.fixture(scope="session")
-def db_url() -> str:
+def db_url(postgres) -> str:
     return os.environ["DATABASE_URL"]
 
 

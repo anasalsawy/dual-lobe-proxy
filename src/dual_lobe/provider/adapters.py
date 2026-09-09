@@ -1,24 +1,35 @@
-"""Provider adapters. The gateway never assumes every upstream speaks
-``/v1/chat/completions``; an adapter turns a normalized request into the
-upstream dialect and back into an OpenAI-compatible shape.
-"""
+"""Async Chat Completions transport; no sync iterator on the event loop."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass, field, fields
 from typing import Any, AsyncIterator
 
-from litellm import completion
+import httpx
 
 CHAT_COMPLETIONS = "chat_completions"
 RESPONSES = "responses"
-
 BLOCKED_UNIFIED_KWARGS = {"api_base", "api_key", "base_url", "custom_llm_provider"}
+_client: httpx.AsyncClient | None = None
+
+
+def get_http_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None:
+        # One connection pool per process. No implicit retries or redirects.
+        _client = httpx.AsyncClient(follow_redirects=False)
+    return _client
+
+
+async def close_http_client() -> None:
+    global _client
+    if _client is not None:
+        await _client.aclose()
+        _client = None
 
 
 @dataclass
 class ProviderTarget:
-    """Resolved upstream connection for one lobe / logical alias."""
-
     alias: str
     base_url: str
     api_key: str
@@ -28,48 +39,39 @@ class ProviderTarget:
     enabled: bool = True
 
     def supports(self, feature: str) -> bool:
-        if not self.enabled:
-            return False
-        if feature not in self.capabilities:
-            return True
-        return bool(self.capabilities[feature])
+        return self.enabled and bool(self.capabilities.get(feature, True))
 
 
 @dataclass
 class NormalizedRequest:
-    """Provider-independent conversation/tool request."""
-
     messages: list[dict[str, Any]]
     temperature: float | None = None
     max_tokens: int | None = None
+    max_completion_tokens: int | None = None
     top_p: float | None = None
     stop: Any = None
     tools: list[dict[str, Any]] | None = None
     tool_choice: Any = None
+    parallel_tool_calls: bool | None = None
     stream: bool = False
+    stream_options: dict[str, Any] | None = None
     response_format: Any = None
     seed: Any = None
     timeout: float | None = None
     reasoning_effort: Any = None
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
 
     def to_kwargs(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"messages": self.messages}
-        for k in (
-            "temperature",
-            "max_tokens",
-            "top_p",
-            "stop",
-            "tools",
-            "tool_choice",
-            "response_format",
-            "seed",
-            "timeout",
-            "reasoning_effort",
-        ):
-            v = getattr(self, k)
-            if v is not None:
-                out[k] = v
-        return out
+        return {f.name: getattr(self, f.name) for f in fields(self)
+                if f.name != "stream" and getattr(self, f.name) is not None
+                and (f.name != "stream_options" or self.stream)}
+
+
+def response_dict(response: Any) -> dict[str, Any]:
+    if isinstance(response, dict):
+        return dict(response)
+    return response.model_dump(exclude_none=True)
 
 
 class ChatCompletionsAdapter:
@@ -79,99 +81,75 @@ class ChatCompletionsAdapter:
         self.target = target
 
     def _base_kwargs(self, req: NormalizedRequest) -> dict[str, Any]:
-        return {
-            "model": f"openai/{self.target.model}",
-            "api_base": self.target.base_url,
-            "api_key": self.target.api_key,
-            **req.to_kwargs(),
-        }
+        body = req.to_kwargs()
+        body.pop("timeout", None)
+        return {"model": self.target.model, **body}
+
+    def _endpoint(self) -> str:
+        return self.target.base_url.rstrip("/") + "/chat/completions"
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.target.api_key}"}
 
     async def buffered(self, req: NormalizedRequest):
-        import asyncio
-
-        return await asyncio.to_thread(completion, **self._base_kwargs(req))
+        response = await get_http_client().post(
+            self._endpoint(), headers=self._headers(),
+            json={**self._base_kwargs(req), "stream": False}, timeout=req.timeout,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def stream(self, req: NormalizedRequest) -> AsyncIterator[dict[str, Any]]:
-        """Yield normalized delta chunks from a litellm streaming completion.
-
-        Each yield is {"delta": {...}, "finish_reason": str|None}. If the upstream
-        collapses to a buffered response, a single terminal delta is produced.
-        """
-        import asyncio
-
-        kwargs = {**self._base_kwargs(req), "stream": True}
-        gen = await asyncio.to_thread(completion, **kwargs)
-        finish = None
-        for chunk in gen:
-            try:
-                choices = chunk.choices or []
-                if not choices:
-                    continue
-                choice = choices[0]
-                delta = getattr(choice, "delta", None)
-                f = getattr(choice, "finish_reason", None)
-                d: dict[str, Any] = {}
-                content = getattr(delta, "content", None)
-                if content:
-                    d["content"] = content
-                tc = getattr(delta, "tool_calls", None)
-                if tc:
-                    d["tool_calls"] = [tc[0].__dict__ if not isinstance(tc[0], dict) else tc[0]]
-                if delta and (getattr(delta, "role", None) or d):
-                    if d or getattr(delta, "role", None):
-                        yield {"delta": d, "finish_reason": f}
-                finish = f
-            except Exception:
-                continue
-        yield {"delta": {}, "finish_reason": finish or "stop"}
+        async with get_http_client().stream(
+            "POST", self._endpoint(), headers=self._headers(),
+            json={**self._base_kwargs(req), "stream": True}, timeout=req.timeout,
+        ) as response:
+            response.raise_for_status()
+            data_lines: list[str] = []
+            event_size = 0
+            async for line in response.aiter_lines():
+                if line.startswith("data:"):
+                    value = line[5:].lstrip(" ")
+                    event_size += len(value)
+                    if event_size > 2 * 1024 * 1024:
+                        raise ValueError("upstream SSE event exceeds size limit")
+                    data_lines.append(value)
+                elif not line and data_lines:
+                    data = "\n".join(data_lines)
+                    data_lines, event_size = [], 0
+                    if data.strip() == "[DONE]":
+                        return
+                    chunk = json.loads(data)
+                    if not isinstance(chunk, dict) or "error" in chunk:
+                        raise ValueError("invalid upstream SSE chunk")
+                    # Forward every choice/tool fragment without reconstruction.
+                    yield chunk
+            if data_lines:
+                raise ValueError("upstream SSE ended in a partial event")
 
 
 class ResponsesAdapter:
-    """Guarded stub for the OpenCode Zen Responses dialect (not yet validated)."""
-
     dialect = RESPONSES
 
     def __init__(self, target: ProviderTarget) -> None:
         self.target = target
 
     async def buffered(self, req: NormalizedRequest):
-        raise NotImplementedError(
-            "OpenCode Zen Responses adapter is not validated in this project yet. "
-            "Refusing to guess. Configure an OpenAI-compatible dialect, or add and "
-            "verify the /zen/v1/responses translation first."
-        )
+        raise NotImplementedError("Responses dialect is not implemented; use chat_completions")
 
-    async def stream(self, req: NormalizedRequest) -> AsyncIterator[dict[str, Any]]:
-        raise NotImplementedError(
-            "OpenCode Zen Responses adapter is not validated in this project yet."
-        )
+    async def stream(self, req: NormalizedRequest):
+        raise NotImplementedError("Responses dialect is not implemented; use chat_completions")
+        yield  # async generator contract
 
 
 def make_adapter(target: ProviderTarget):
     if target.kind == RESPONSES:
         return ResponsesAdapter(target)
+    if target.kind != CHAT_COMPLETIONS:
+        raise ValueError(f"unsupported provider dialect: {target.kind}")
     return ChatCompletionsAdapter(target)
 
 
 def resolve_request(payload: dict[str, Any]) -> NormalizedRequest:
-    """Extract a normalized request from the Worker-facing Chat Completions body."""
-    allowed = {
-        "temperature",
-        "top_p",
-        "max_tokens",
-        "stop",
-        "presence_penalty",
-        "frequency_penalty",
-        "tools",
-        "tool_choice",
-        "response_format",
-        "seed",
-        "timeout",
-        "reasoning_effort",
-    }
-    kwargs = {k: payload[k] for k in allowed if payload.get(k) is not None}
-    return NormalizedRequest(
-        messages=payload.get("messages") or [],
-        stream=bool(payload.get("stream", False)),
-        **kwargs,
-    )
+    allowed = {f.name for f in fields(NormalizedRequest)}
+    return NormalizedRequest(**{k: v for k, v in payload.items() if k in allowed})

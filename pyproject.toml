@@ -1,7 +1,7 @@
 [project]
 name = "dual-lobe"
-version = "0.1.0"
-description = "Production-ready Dual-Lobe inference proxy: OpenAI-compatible gateway with an async Lobe-B (Context Shadow + Integrity Sentinel) and Postgres-backed source of truth."
+version = "0.2.0"
+description = "Text inference gateway with a bounded asynchronous context and claim observer."
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115,<1",
@@ -9,12 +9,10 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0,<3",
     "asyncpg>=0.29,<1",
     "alembic>=1.13,<2",
-    "redis>=5,<6",
     "structlog>=24,<25",
     "pydantic>=2.7,<3",
     "pydantic-settings>=2.4,<3",
     "httpx>=0.27,<1",
-    "litellm>=1.82,<1.83",
 ]
 
 [project.optional-dependencies]

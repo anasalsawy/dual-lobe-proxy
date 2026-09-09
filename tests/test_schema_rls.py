@@ -6,11 +6,14 @@ import asyncio
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
+
+pytestmark = pytest.mark.usefixtures("postgres")
 
 
 @pytest.fixture(scope="module")
 def admin_engine_conn(db_url):
-    engine = create_async_engine(db_url)
+    engine = create_async_engine(db_url, poolclass=NullPool)
     yield engine
     asyncio.run(engine.dispose())
 

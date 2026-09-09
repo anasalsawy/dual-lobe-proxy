@@ -67,12 +67,13 @@ async def tenant_session(tenant_id: int):
     """Yield an RLS-enforced session bound to ``tenant_id`` via the GUC."""
     factory = rls_session_factory()
     async with factory() as session:
-        await session.execute(text(f"SET app.tenant_id = {int(tenant_id)}"))
-        await session.commit()
-        try:
-            yield session
-        finally:
-            pass
+        # Transaction-local: no pooled connection can retain another tenant's ID.
+        # Callers must finish this context after commit; no query may follow it.
+        await session.execute(
+            text("SELECT set_config('app.tenant_id', :tenant, true)"),
+            {"tenant": str(int(tenant_id))},
+        )
+        yield session
 
 
 async def dispose_engines() -> None:

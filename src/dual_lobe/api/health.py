@@ -6,7 +6,6 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from ..core.engine import admin_session_factory, tenant_session
-from ..evidence.verifier import verify_claim
 from ..provider.registry import get_registry
 from ..state import repositories as repo
 from . import auth
@@ -47,16 +46,7 @@ async def verify(
     request: Request,
     principal: auth.Principal = Depends(auth.require_scope(auth.SCOPE_STATE_READ)),
 ):
-    run_id = request.headers.get("X-DL-Run-ID") or ""
-    async with admin_session_factory()() as session:
-        verdict = await verify_claim(
-            session,
-            principal.tenant_id,
-            body.claim_id,
-            body.check,
-            body.artifact,
-            needle=body.needle,
-            cwd=body.cwd,
-            run_id=run_id or None,
-        )
-    return {"status": "ok", "claim_id": body.claim_id, "verdict": verdict}
+    raise HTTPException(status_code=410, detail=(
+        "Automatic file verification is retired. B is tool-free and advisory; "
+        "send caller-reported results to /v1/dual-lobe/events."
+    ))
