@@ -37,3 +37,8 @@ without reporting its block rate.
 The last two profiles are prompt-policy comparisons, not implementations of the
 research repository's full planner/executor lock state machine or a same-turn
 second-answer synthesis.
+
+Strict responses expose `X-Dual-Lobe-Gate` and `X-Dual-Lobe-Proof-Coverage` as
+receipts. A blocked response is never reported as an approved answer; an A tool
+call may still be handed to the connected runtime because a request to act is not
+itself proof that the action completed.
