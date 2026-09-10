@@ -14,6 +14,7 @@ from dual_lobe.b.channels import ObserverContext
 from dual_lobe.api.auth import Principal
 from dual_lobe.api.schemas import ChatCompletionRequest
 from dual_lobe.core.settings import Settings
+from dual_lobe.b import prompts
 from dual_lobe.provider.adapters import ChatCompletionsAdapter, NormalizedRequest, ProviderTarget
 
 
@@ -218,6 +219,55 @@ async def test_latest_user_text_reaches_the_observation_payload(request_path, mo
         ChatCompletionRequest(messages=[{"role": "user", "content": "latest ask"}]), request, principal)
     await response.background()
     assert captured["latest_user_text"] == "latest ask"
+
+
+async def test_b_receives_the_same_canonical_context_and_tools_as_a(request_path, monkeypatch):
+    """The observer cannot be given a narrower, reconstructed A context."""
+    from dual_lobe.b.channels import ObserverContext
+
+    monkeypatch.setattr(chat, "_read_context", AsyncMock(return_value=ObserverContext(
+        memory_text="remember the deployment constraint",
+        claims_text="claim finding",
+        deception_text="GREEN: no deception detected",
+        deception_status="GREEN",
+    )))
+    request, principal, persist, adapter = request_path
+    tools = [{"type": "function", "function": {
+        "name": "workspace_read", "parameters": {"type": "object"}}}]
+    response = await chat.chat_completions(
+        ChatCompletionRequest(messages=[{"role": "user", "content": "continue"}], tools=tools),
+        request, principal,
+    )
+    await response.background()
+    observed = persist.call_args.kwargs["peer_snapshot"]
+    a_request = adapter.buffered.call_args.args[0]
+    assert observed["messages"] == a_request.messages
+    assert observed["tools"] == (a_request.tools or [])
+    assert any(m.get("name") == "observer_memory" for m in observed["messages"])
+    assert any(m.get("name") == "observer_claims" for m in observed["messages"])
+
+
+async def test_strict_gatekeeper_withholds_unproved_a_answer(request_path, monkeypatch):
+    from dual_lobe.b.protocol import Review
+
+    settings = Settings(_env_file=None, design_variant="strict-gatekeeper")
+    monkeypatch.setattr(chat, "get_settings", lambda: settings)
+    monkeypatch.setattr(chat, "_strict_gate", AsyncMock(return_value=(Review.model_validate({
+        "goal": "g", "questions": [], "next_step": "", "context_notes": [],
+        "knowledge_notes": [], "concerns": [], "deception_level": "YELLOW",
+        "deception_reason": "no direct proof", "gate_decision": "BLOCK",
+        "proof_coverage": "incomplete",
+    }), prompts.build_gatekeeper_prompt("context", "answer", "", "{}"))))
+    request, principal, persist, adapter = request_path
+    response = await chat.chat_completions(
+        ChatCompletionRequest(messages=[{"role": "user", "content": "do it"}]),
+        request, principal,
+    )
+    assert response.status_code == 412
+    assert b"gate_blocked" in response.body
+    assert b"result" not in response.body
+    assert response.headers["x-dual-lobe-variant"] == "strict-gatekeeper"
+    await response.background()
 
 
 async def test_tenant_context_is_transaction_local(monkeypatch):

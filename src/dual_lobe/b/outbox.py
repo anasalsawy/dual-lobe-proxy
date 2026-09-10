@@ -30,6 +30,7 @@ def shadow_payload(
     attempt_id: int = 1,
     stage: str = "observation",
     max_attempts: int = 1,
+    peer_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "kind": "context_shadow",
@@ -44,4 +45,7 @@ def shadow_payload(
         "stage": stage,
         "max_attempts": max_attempts,
         "observed_at": time.time(),
+        # This is the canonical proxy-built view.  B must review this rather
+        # than reconstructing a narrower view from the caller's raw messages.
+        "peer_snapshot": peer_snapshot or {},
     }

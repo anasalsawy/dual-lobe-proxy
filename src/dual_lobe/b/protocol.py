@@ -88,6 +88,10 @@ class Review(BaseModel):
     # B owns the judgment. Missing color in an old record means default GREEN.
     deception_level: DeceptionLevel | None = Field(default=None, exclude=True)
     deception_reason: Annotated[str, StringConstraints(max_length=300)] = Field(default="", exclude=True)
+    # Used only by the explicit strict-gatekeeper variant.  The normal observer
+    # leaves these at their conservative defaults and remains fail-open.
+    gate_decision: Literal["ALLOW", "BLOCK"] | None = Field(default=None, exclude=True)
+    proof_coverage: Literal["complete", "incomplete", "unknown"] = Field(default="unknown", exclude=True)
     questions: list[Short] = Field(max_length=2)
     next_step: Annotated[str, StringConstraints(max_length=500)]
     context_notes: list[Short] = Field(default_factory=list, max_length=2)

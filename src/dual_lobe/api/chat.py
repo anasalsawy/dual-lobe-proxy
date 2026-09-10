@@ -18,8 +18,10 @@ from sqlalchemy.exc import InterfaceError, OperationalError
 from ..b.outbox import shadow_job_key, shadow_payload
 from ..b.channels import ObserverContext, prepare_context
 from ..b.artifacts import bounded_artifacts
-from ..b.host_tools import injector, offered_tools
-from ..b.prompts import OBSERVATION_REMINDER, head_tail
+from ..b.host_tools import candidates, injector, make_plan, offered_tools
+from ..b.prompts import EVIDENCE_MARKER, OBSERVATION_REMINDER, build_gatekeeper_prompt, head_tail
+from ..b.peer_snapshot import make_peer_snapshot
+from ..b.variant_policy import gate_allows, policy
 from ..core import stage as stage_mod
 from ..core.engine import tenant_session
 from ..core.redact import redact_payload
@@ -130,6 +132,31 @@ def _is_retryable(exc: Exception) -> bool:
     )
 
 
+async def _strict_gate(snapshot: dict[str, Any], output: str, events: str,
+                      latest_request: str, tenant_id: int, max_chars: int):
+    """Ask B for the explicit fail-closed release decision.
+
+    This path is opt-in and synchronous.  A missing/invalid B decision blocks
+    release rather than being silently treated as approval.
+    """
+    from ..b.context_shadow import _obtain_review
+
+    messages = snapshot.get("messages") if isinstance(snapshot, dict) else []
+    tools = snapshot.get("tools") if isinstance(snapshot, dict) else []
+    artifacts = snapshot.get("artifacts") if isinstance(snapshot, dict) else []
+    tool_results = snapshot.get("tool_results") if isinstance(snapshot, dict) else []
+    context = json.dumps(messages if isinstance(messages, list) else [], ensure_ascii=False)
+    prompt = build_gatekeeper_prompt(
+        context, output, events, "{}", max_chars=max_chars,
+        latest_request=latest_request,
+        host_tools=tools if isinstance(tools, list) else [],
+        artifacts=artifacts if isinstance(artifacts, list) else [],
+        tool_results=tool_results if isinstance(tool_results, list) else [],
+    )
+    review = await _obtain_review("lobe-b", prompt, tenant_id)
+    return review, prompt
+
+
 async def _call_a_with_retry(fn, retries: int):
     for attempt in range(max(1, retries)):
         try:
@@ -181,7 +208,8 @@ async def _persist_observation(tenant_id: int, run_id: str, external_run: str,
                                audit: dict, observe: bool,
                                latest_user_text: str = "", host_tools: list[dict] | None = None,
                                artifacts: list[dict] | None = None,
-                               tool_results: list[dict] | None = None) -> None:
+                               tool_results: list[dict] | None = None,
+                               peer_snapshot: dict | None = None) -> None:
     """After response delivery. Failures cannot change an already-sent A answer."""
     s = get_settings()
     try:
@@ -208,7 +236,8 @@ async def _persist_observation(tenant_id: int, run_id: str, external_run: str,
                 )
                 # Default observes every completed call. Sampling is opt-in.
                 count = await repo.count_attempts(session, run_id) if observe else 0
-                if observe and (count - 1) % s.pulse_every == 0:
+                if (observe and not (audit.get("observer_delivery") or {}).get("synchronous_gate")
+                        and (count - 1) % s.pulse_every == 0):
                     payload = shadow_payload(
                         tenant_id, run_id, external_run, int(corr.get("call_seq", 0)),
                         context_text, audit["output"],
@@ -220,6 +249,7 @@ async def _persist_observation(tenant_id: int, run_id: str, external_run: str,
                                    host_tools=redact_payload(host_tools or []),
                                    artifacts=bounded_artifacts(artifacts, s.max_artifact_chars),
                                    tool_results=redact_payload(tool_results or []),
+                                   peer_snapshot=redact_payload(peer_snapshot or {}),
                                    memory_space=(audit.get("observer_delivery") or {}).get("shared_memory_space"))
                     scope_context = context_text + latest_user_text + f"\nSCOPE:{corr.get('floor', '')}:{corr.get('attempt', 1)}"
                     key = shadow_job_key(tenant_id, run_id, 0, scope_context, audit["output"])
@@ -401,14 +431,38 @@ async def chat_completions(
         raise HTTPException(503, "Shared memory is unavailable; no model was invoked.") from None
     req.messages = _effective_messages(messages, context, monitoring, s.monitoring_role, shared_text=shared.text)
     req.timeout = s.a_timeout
+    variant = policy(s.design_variant)
+    if variant.synchronous_gate and req.stream:
+        raise HTTPException(400, "strict-gatekeeper requires stream=false so B can gate the complete A response.")
+    # A and B must receive one canonical tool view.  If the caller offers a
+    # very large list, keep only complete definitions that fit the shared
+    # observer budget and give that same list to A; otherwise A could silently
+    # have tools that B cannot see.  With normal tool lists this preserves every
+    # definition unchanged.
+    canonical_tools = list(req.tools or [])
+    if observe and s.b_host_tools_enabled and len(json.dumps(canonical_tools, ensure_ascii=False)) > s.max_shadow_input_chars // 3:
+        canonical_tools = offered_tools(canonical_tools, s.max_shadow_input_chars // 4)
+        req.tools = canonical_tools
     adapter = get_registry().adapter(alias)
+    canonical_tool_results = _tool_results(req.messages, s.max_shadow_input_chars)
     context_text = head_tail(
         "Original run goal (caller-reported): " + redact_payload(run.goal) + "\n" +
-        _messages_text(redact_payload(messages), s.max_shadow_input_chars),
+        _messages_text(redact_payload(req.messages), s.max_shadow_input_chars),
         s.max_shadow_input_chars,
     )
     latest_user_text = _latest_user_text(messages)
     artifacts = bounded_artifacts(payload.get("artifacts"), s.max_artifact_chars)
+    peer_snapshot = make_peer_snapshot(
+        messages=req.messages,
+        tools=canonical_tools,
+        artifacts=artifacts,
+        tool_results=canonical_tool_results,
+        run_id=run_id,
+        floor_id=floor,
+        attempt_id=attempt,
+        memory_space=memory_space,
+        artifact_budget=s.max_artifact_chars,
+    )
     audit = {"call_id": str(uuid.uuid4()), "logical_model": target.model,
              "stream": req.stream, "status": "INCOMPLETE", "output": "",
              "latency_ms": 0, "observed_at": time.time(),
@@ -416,6 +470,7 @@ async def chat_completions(
     audit["observer_delivery"].update(shared_memory_space=memory_space,
                                        shared_entry_ids=list(shared.entry_ids),
                                        artifact_count=len(artifacts))
+    audit["observer_delivery"].update(peer_tool_count=len(canonical_tools))
     async def save_memory(responses):
         await record_memory(principal.tenant_id, memory_space, run_id, audit["call_id"], messages, responses)
     background = BackgroundTask(_persist_observation, principal.tenant_id, run_id,
@@ -424,8 +479,13 @@ async def chat_completions(
                                 host_tools=offered_tools(req.tools, s.max_shadow_input_chars // 4)
                                 if observe and s.b_host_tools_enabled else [],
                                 artifacts=artifacts,
-                                tool_results=_tool_results(messages, s.max_shadow_input_chars))
-    inject_tools = injector(context, req, messages, principal.tenant_id, run_id, floor, attempt, s, audit)
+                                tool_results=canonical_tool_results,
+                                peer_snapshot=peer_snapshot)
+    # The strict variant performs its B decision before release.  It must not
+    # also run the normal asynchronous injector, which would create a second
+    # competing tool plan for the same answer.
+    inject_tools = (None if variant.synchronous_gate else
+                    injector(context, req, messages, principal.tenant_id, run_id, floor, attempt, s, audit))
     headers = {"X-Dual-Lobe-Run-Id": run_id, "X-Dual-Lobe-Observer": context.status,
                "X-Dual-Lobe-Call-Id": audit["call_id"],
                "X-Dual-Lobe-Memory": (f"v{context.memory_version}" if context.memory_text else context.memory_status),
@@ -433,7 +493,8 @@ async def chat_completions(
                "X-Dual-Lobe-Deception": context.deception_status,
                "X-Dual-Lobe-Monitoring": "on" if monitoring else "off",
                "X-Dual-Lobe-Memory-Space": memory_space or "off",
-               "X-Dual-Lobe-Shared-Entries": str(len(shared.entry_ids))}
+               "X-Dual-Lobe-Shared-Entries": str(len(shared.entry_ids)),
+               "X-Dual-Lobe-Variant": variant.name}
     if context.review_source_call:
         headers["X-Dual-Lobe-Review-Call-Id"] = context.review_source_call
         headers["X-Dual-Lobe-Review-Age-Seconds"] = str(context.review_age_seconds)
@@ -448,9 +509,76 @@ async def chat_completions(
         async with asyncio.timeout(s.a_timeout):
             data = await _call_a_with_retry(lambda: adapter.buffered(req), s.a_retries)
         data["model"] = alias
-        audit["output"] = _messages_text(
-            [c["message"] for c in data["choices"]], s.max_shadow_input_chars
-        )
+        if "choices" in data:
+            audit["output"] = _messages_text(
+                [c["message"] for c in data["choices"]], s.max_shadow_input_chars
+            )
+        original_a_output = audit["output"]
+        gate_blocked = False
+        gate_calls = []
+        a_tool_calls = [
+            (choice.get("message") or {}).get("tool_calls") or []
+            for choice in (data.get("choices") or [])
+        ]
+        if variant.synchronous_gate:
+            audit["observer_delivery"].update(synchronous_gate=True, gate_variant=variant.name)
+            try:
+                review, gate_prompt = await _strict_gate(
+                    peer_snapshot, audit["output"], context_text,
+                    latest_user_text, principal.tenant_id, s.max_shadow_input_chars,
+                )
+                audit["observer_delivery"].update(
+                    gate_decision=review.gate_decision,
+                    proof_coverage=review.proof_coverage,
+                    gate_deception_level=review.deception_level or "GREEN",
+                )
+                gate_blocked = not gate_allows(review)
+                if gate_blocked:
+                    offered = json.loads(gate_prompt.split(EVIDENCE_MARKER, 1)[1])["HOST_TOOLS"]
+                    gate_calls = candidates(
+                        make_plan(review, offered, audit["call_id"]), req,
+                        {"role": "assistant", "content": None},
+                    )
+            except Exception as exc:
+                # Strict mode fails closed when B is unavailable or its output
+                # is malformed.  No A answer is released as if approved.
+                LOG.warning("Strict gate unavailable error_type=%s", type(exc).__name__)
+                audit["observer_delivery"].update(
+                    gate_decision="BLOCK", proof_coverage="unknown",
+                    gate_error=type(exc).__name__,
+                )
+                gate_blocked = True
+        if gate_blocked:
+            if gate_calls:
+                # Return only B's evidence requests as ordinary tool calls.  A's
+                # unapproved text is not exposed to the caller.
+                data = {"id": data.get("id"), "model": alias, "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": None, "tool_calls": gate_calls},
+                    "finish_reason": "tool_calls",
+                }]}
+                audit["observer_delivery"]["gate_action"] = "request_evidence"
+            elif any(a_tool_calls):
+                # A tool request is an action handoff, not a completion claim.
+                # Let the connected runtime execute it so that a later turn can
+                # supply the direct result B needs.  Any accompanying A prose is
+                # removed while the strict gate remains unresolved.
+                original_choices = data.get("choices") or []
+                data = {"id": data.get("id"), "model": alias, "choices": []}
+                for choice in original_choices:
+                    message = dict(choice.get("message") or {})
+                    message["content"] = None
+                    data["choices"].append({
+                        "index": choice.get("index", 0), "message": message,
+                        "finish_reason": "tool_calls",
+                    })
+                gate_blocked = False
+                audit["observer_delivery"]["gate_action"] = "pass_action_tool_calls"
+            else:
+                data = {"error": {"type": "gate_blocked",
+                                   "message": "B did not establish direct proof for every material claim in A's response."}}
+                audit["observer_delivery"]["gate_action"] = "block"
+                status_code = 412
         if inject_tools and len(data["choices"]) == 1:
             choice = data["choices"][0]
             if choice.get("finish_reason") in ("stop", "tool_calls"):
@@ -458,13 +586,22 @@ async def chat_completions(
                 if calls:
                     choice["message"]["tool_calls"] = [*(choice["message"].get("tool_calls") or []), *calls]
                     choice["finish_reason"] = "tool_calls"
-        audit["output"] = _messages_text(
-            [c["message"] for c in data["choices"]], s.max_shadow_input_chars
-        )
-        await save_memory([c["message"] for c in data["choices"]])
+        # For a blocked strict response, retain A's original text in the audit
+        # target even though it was deliberately withheld from the caller.
+        if gate_blocked:
+            audit["output"] = original_a_output
+        elif "choices" in data:
+            audit["output"] = _messages_text(
+                [c["message"] for c in data["choices"]], s.max_shadow_input_chars
+            )
+        if "choices" in data:
+            await save_memory([c["message"] for c in data["choices"]])
         audit["usage"] = data.get("usage")
         audit["status"] = "SUCCESS"
-        status_code = 200
+        if not gate_blocked:
+            status_code = 200
+        elif gate_calls:
+            status_code = 200
     except Exception as exc:
         audit["status"], audit["error_type"] = "FAILED", type(exc).__name__
         data = {"error": {"type": "upstream_error", "message": "Upstream request failed."}}
