@@ -22,15 +22,14 @@ from .protocol import Review, ground_review, parse_review, usable_state
 LOG = logging.getLogger("dual_lobe.b.context_shadow")
 
 
-async def _call_b(target_alias: str, prompt: str) -> dict[str, Any]:
+async def _call_b(target_alias: str, prompt: str) -> str:
     s = get_settings()
     instructions = prompts.B_SYSTEM
     if not s.context_memory_enabled:
         instructions += "\nContext memory is disabled: return empty goal, questions, next_step and context_notes."
     if not s.claim_checks_enabled:
         instructions += "\nClaim checking is disabled: return an empty concerns array."
-    # One attempt, including the transport layer. No search, tools, repair loop,
-    # or model debate. Timeout includes the entire provider operation.
+    # No search or tools. Timeout includes the entire provider operation.
     async with asyncio.timeout(s.b_timeout):
         response = await get_registry().adapter(target_alias).buffered(
             NormalizedRequest(
@@ -42,8 +41,31 @@ async def _call_b(target_alias: str, prompt: str) -> dict[str, Any]:
             )
         )
     data = response_dict(response)
-    content = data["choices"][0]["message"].get("content") or ""
-    return parse_review(content).model_dump()
+    return data["choices"][0]["message"].get("content") or ""
+
+
+CORRECTION_NOTE = (
+    "\n\nYour previous output was rejected: {error}.\n"
+    "Return ONLY the JSON contract above, complete and valid, with no prose or fences."
+)
+
+
+async def _obtain_review(target_alias: str, prompt: str) -> Review:
+    """One bounded review with at most one corrective worker-side retry.
+
+    Retries only parse/grounding failures (ValueError) because a re-ask can fix
+    them. Transport errors (429/5xx/timeouts) are honest provider failures and
+    must not double-fire against limits; they degrade immediately.
+    """
+    raw = await _call_b(target_alias, prompt)
+    try:
+        return ground_review(parse_review(raw), prompt)
+    except ValueError as exc:
+        LOG.warning("Observer review invalid once; corrective retry error_type=%s",
+                    type(exc).__name__)
+        # Runs only between turns; A is never blocked on this second attempt.
+        raw = await _call_b(target_alias, prompt + CORRECTION_NOTE.format(error=str(exc)[:300]))
+        return ground_review(parse_review(raw), prompt)
 
 
 async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
@@ -99,19 +121,25 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
         events_preview,
         json.dumps({"context_memory": prior_memory, "claim_review": prior_claims}, ensure_ascii=False),
         max_chars=s.max_shadow_input_chars,
+        latest_request=str(payload.get("latest_user_text") or ""),
     )
     try:
-        data = await _call_b("lobe-b", prompt)
-        review = ground_review(Review.model_validate(data), prompt)
+        review = await _obtain_review("lobe-b", prompt)
+        if review.deception_level == "RED" and not review.concerns:
+            # RED must always ship explicit wording; degrade the meter, never hide it.
+            LOG.warning("Deception RED without wording downgraded to YELLOW run=%s", run_id)
+            review = review.model_copy(update={"deception_level": "YELLOW"})
     except Exception as exc:
         # Do not leak provider errors/keys or mislabel invalid JSON as success.
-        LOG.warning("Observer degraded run=%s error_type=%s", run_id, type(exc).__name__)
+        LOG.warning("Observer degraded run=%s error_type=%s after_retry",
+                    run_id, type(exc).__name__)
         memory = completed_memory(previous)
         await repo.save_b_state(session, tenant_id, run_id, {
             "schema_version": 3, "run_id": run_id,
             "oversight_status": "degraded", "observed_at": observed_at,
             "reviewed_at": time.time(), "floor_id": payload.get("floor_id", ""),
             "attempt_id": payload.get("attempt_id", 1),
+            "deception_level": previous.get("deception_level"),
             "context_memory": memory.model_dump() if memory else None,
             "claim_review": None,
             "reason": type(exc).__name__,
@@ -134,6 +162,7 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
     await repo.append_event(session, "b_context_shadow", tenant_id, run_id=run_id,
                             actor="lobe-b", payload={
                                 "n_concerns": len(concerns),
+                                "deception_level": state.get("deception_level"),
                                 "source_call": state["source_call"],
                                 "assessment_only": True,
                             })

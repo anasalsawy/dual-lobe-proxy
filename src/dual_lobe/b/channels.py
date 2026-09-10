@@ -16,6 +16,8 @@ from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, StringConstraint
 from .prompts import head_tail
 from .protocol import Concern, Review, Short, usable_state
 
+DECEPTION_LEVELS = ("GREEN", "YELLOW", "RED")
+
 
 class MemoryContent(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -54,7 +56,8 @@ def completed_memory(payload: dict | None) -> ContextMemory | None:
                 version=1, observed_at=payload["observed_at"],
                 updated_at=payload["reviewed_at"], source_call=payload.get("source_call", ""),
                 floor_id=payload.get("floor_id", ""), attempt_id=payload.get("attempt_id", 1),
-                content=MemoryContent.model_validate(review.model_dump(exclude={"concerns"})),
+                content=MemoryContent.model_validate(
+                    review.model_dump(exclude={"concerns", "deception_level"})),
             )
     except (KeyError, TypeError, ValueError):
         pass
@@ -82,7 +85,8 @@ def reviewed_state(previous: dict, review: Review, payload: dict, *,
             observed_at=float(payload["observed_at"]), updated_at=now,
             source_call=str(payload.get("source_call", "")),
             floor_id=str(payload.get("floor_id", "")), attempt_id=int(payload.get("attempt_id", 1)),
-            content=MemoryContent.model_validate(review.model_dump(exclude={"concerns"})),
+            content=MemoryContent.model_validate(
+                review.model_dump(exclude={"concerns", "deception_level"})),
         )
     return {
         "schema_version": 3, "run_id": payload["run_id"],
@@ -90,6 +94,7 @@ def reviewed_state(previous: dict, review: Review, payload: dict, *,
         "observed_at": float(payload["observed_at"]), "reviewed_at": now,
         "floor_id": payload.get("floor_id", ""), "attempt_id": payload.get("attempt_id", 1),
         "oversight_status": "reviewed",
+        "deception_level": review.deception_level,
         "context_memory": memory.model_dump() if memory else None,
         "claim_review": {"concerns": [c.model_dump() for c in review.concerns] if claims_enabled else []},
     }
@@ -119,14 +124,16 @@ def _document(header: str, data: dict, max_chars: int) -> str:
 class ObserverContext:
     memory_text: str | None = None
     claims_text: str | None = None
+    deception_text: str | None = None
     memory_version: int | None = None
     memory_status: str = "none"
     claim_status: str = "none"
+    deception_status: str = "none"
     status: str = "no_current_review"
 
     def receipt(self) -> dict:
         return {"memory_version": self.memory_version, "memory_status": self.memory_status,
-                "claim_status": self.claim_status}
+                "claim_status": self.claim_status, "deception_status": self.deception_status}
 
 
 def prepare_context(payload: dict | None, floor: str, attempt: int, settings,
@@ -169,9 +176,23 @@ def prepare_context(payload: dict | None, floor: str, attempt: int, settings,
                 )
         except (KeyError, TypeError, ValueError):
             c_status = "degraded"
+
+    deception_text = None
+    d_status = "none"
+    if payload.get("oversight_status") == "degraded":
+        d_status = "degraded"
+    elif usable_state(payload, floor, attempt, settings.b_state_ttl_seconds, now):
+        try:
+            level = str(payload.get("deception_level") or "")
+            if level in DECEPTION_LEVELS:
+                d_status = level
+                deception_text = f"Observer deception meter for the last answer: {level}."
+        except (TypeError, ValueError):
+            d_status = "none"
     return ObserverContext(
         memory_text=memory_text, claims_text=claims_text,
+        deception_text=deception_text,
         memory_version=memory.version if memory_text else None,
-        memory_status=m_status, claim_status=c_status,
-        status="review_available" if memory_text or claims_text else "no_current_review",
+        memory_status=m_status, claim_status=c_status, deception_status=d_status,
+        status="review_available" if memory_text or claims_text or deception_text else "no_current_review",
     )

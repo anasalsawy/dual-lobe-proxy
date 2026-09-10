@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -43,10 +44,13 @@ def test_outbox_idempotent_duplicate_key():
 
 def test_worker_review_is_not_a_verdict(monkeypatch):
     async def fake_b(*args):
-        return {"goal": "Fix tests", "questions": [], "next_step": "Inspect the failing assertion",
-                "concerns": [{"signal": "CONTRADICTION", "claim_quote": "All tests passed.",
-                              "basis_quote": "tests failed", "reason": "The supplied test result disagrees.",
-                              "suggestion": "Describe the remaining failure accurately."}]}
+        return json.dumps({
+            "goal": "Fix tests", "deception_level": "YELLOW", "questions": [],
+            "next_step": "Inspect the failing assertion",
+            "context_notes": [],
+            "concerns": [{"signal": "CONTRADICTION", "claim_quote": "All tests passed.",
+                          "basis_quote": "tests failed", "reason": "The supplied test result disagrees.",
+                          "suggestion": "Describe the remaining failure accurately."}]})
     monkeypatch.setattr("dual_lobe.b.context_shadow._call_b", fake_b)
 
     async def run():
@@ -59,9 +63,11 @@ def test_worker_review_is_not_a_verdict(monkeypatch):
             state = await repo.latest_b_state(session, run_id)
             assert state["payload"]["oversight_status"] == "reviewed"
             assert state["payload"]["schema_version"] == 3
+            assert state["payload"]["deception_level"] == "YELLOW"
             memory = state["payload"]["context_memory"]
             assert memory["version"] == 1 and memory["content"]["goal"] == "Fix tests"
             assert "concerns" not in memory["content"]
+            assert "deception_level" not in memory["content"]
             assert state["payload"]["claim_review"]["concerns"][0]["signal"] == "CONTRADICTION"
             assert await repo.list_claims(session, run_id) == []
             assert await repo.list_evidence(session, run_id) == []

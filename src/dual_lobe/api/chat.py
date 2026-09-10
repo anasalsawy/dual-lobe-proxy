@@ -54,6 +54,17 @@ def _original_goal(messages: list[dict]) -> str:
     return head_tail(str(content or ""), 1000)
 
 
+def _latest_user_text(messages: list[dict]) -> str:
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content", "")
+        if isinstance(content, list):
+            content = "\n".join(str(p.get("text", "")) for p in content)
+        return head_tail(str(content or ""), 1600)
+    return ""
+
+
 def _effective_messages(messages: list[dict], context: ObserverContext, reminder: bool,
                         monitoring_role: str = "system", *,
                         reminder_text: str = OBSERVATION_REMINDER, shared_text: str | None = None) -> list[dict]:
@@ -68,7 +79,9 @@ def _effective_messages(messages: list[dict], context: ObserverContext, reminder
         index += 1
     # Two separately stored/delivered paths. Model-generated material stays at
     # user-message priority; only the fixed monitoring instruction is privileged.
-    for name, content in (("shared_memory", shared_text), ("observer_memory", context.memory_text),
+    for name, content in (("shared_memory", shared_text),
+                          ("observer_deception", context.deception_text),
+                          ("observer_memory", context.memory_text),
                           ("observer_claims", context.claims_text)):
         if content:
             effective.insert(index, {"role": "user", "name": name, "content": content})
@@ -107,17 +120,26 @@ async def _read_context(tenant_id: int, run_id: str, floor: str, attempt: int) -
     try:
         async with asyncio.timeout(s.b_state_read_timeout):
             async with tenant_session(tenant_id) as session:
-                latest = await repo.latest_b_state(session, run_id)
+                try:
+                    latest = await repo.latest_b_state(session, run_id)
+                except asyncio.TimeoutError:
+                    raise
+                except Exception:
+                    # One immediate retry for a transient read failure, still bounded
+                    # by the same overall deadline below which A fails open.
+                    latest = await repo.latest_b_state(session, run_id)
         return prepare_context((latest or {}).get("payload"), floor, attempt, s)
-    except Exception:
-        LOG.warning("Observer state unavailable run=%s; A continues", run_id)
+    except Exception as exc:
+        LOG.warning("Observer state unavailable run=%s error_type=%s; A continues",
+                    run_id, type(exc).__name__)
         return ObserverContext(memory_status="unavailable", claim_status="unavailable",
                                status="state_unavailable")
 
 
 async def _persist_observation(tenant_id: int, run_id: str, external_run: str,
                                corr: dict, target_alias: str, context_text: str,
-                               audit: dict, observe: bool) -> None:
+                               audit: dict, observe: bool,
+                               latest_user_text: str = "") -> None:
     """After response delivery. Failures cannot change an already-sent A answer."""
     s = get_settings()
     try:
@@ -149,7 +171,8 @@ async def _persist_observation(tenant_id: int, run_id: str, external_run: str,
                         floor_id=str(corr.get("floor", "")),
                         attempt_id=int(corr.get("attempt", 1)), stage=s.rollout_stage,
                     )
-                    payload.update(source_call=audit["call_id"], observed_at=audit["observed_at"])
+                    payload.update(source_call=audit["call_id"], observed_at=audit["observed_at"],
+                                   latest_user_text=latest_user_text)
                     scope_context = context_text + f"\nSCOPE:{corr.get('floor', '')}:{corr.get('attempt', 1)}"
                     key = shadow_job_key(tenant_id, run_id, 0, scope_context, audit["output"])
                     await repo.enqueue_outbox(session, tenant_id, "b", key, payload)
@@ -297,6 +320,7 @@ async def chat_completions(
         _messages_text(redact_payload(messages), s.max_shadow_input_chars),
         s.max_shadow_input_chars,
     )
+    latest_user_text = _latest_user_text(messages)
     audit = {"call_id": str(uuid.uuid4()), "logical_model": target.model,
              "stream": req.stream, "status": "INCOMPLETE", "output": "",
              "latency_ms": 0, "observed_at": time.time(),
@@ -305,11 +329,13 @@ async def chat_completions(
     async def save_memory(responses):
         await record_memory(principal.tenant_id, memory_space, run_id, audit["call_id"], messages, responses)
     background = BackgroundTask(_persist_observation, principal.tenant_id, run_id,
-                                external_run, corr, alias, context_text, audit, observe)
+                                external_run, corr, alias, context_text, audit, observe,
+                                latest_user_text=latest_user_text)
     headers = {"X-Dual-Lobe-Run-Id": run_id, "X-Dual-Lobe-Observer": context.status,
                "X-Dual-Lobe-Call-Id": audit["call_id"],
                "X-Dual-Lobe-Memory": (f"v{context.memory_version}" if context.memory_text else context.memory_status),
                "X-Dual-Lobe-Claims": context.claim_status,
+               "X-Dual-Lobe-Deception": context.deception_status,
                "X-Dual-Lobe-Monitoring": "on" if monitoring else "off",
                "X-Dual-Lobe-Memory-Space": memory_space or "off",
                "X-Dual-Lobe-Shared-Entries": str(len(shared.entry_ids))}

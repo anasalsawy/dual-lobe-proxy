@@ -178,23 +178,46 @@ So "enrichment" = distill-from-record + retain + re-inject, within one conversat
 External factual enrichment (searching the web, docs, or the user's codebase, then
 injecting the findings) would be a new feature; it is deliberately absent in v0.3.
 
+## Implemented improvements (P1 + deception meter)
+
+Landing commit history `d5a1ca9` → this commit.
+
+**P1 — implemented**
+- **B JSON robustness.** `parse_review` now tolerates code fences / brief prose around
+  valid JSON (schema-incomplete output still degrades), and the shadow cycle makes at most
+  one corrective worker-side retry that passes the validation error back to B. The retry
+  fires only on `ValueError` (parse/grounding); transport errors such as 429/5xx degrade
+  immediately instead of double-firing against provider limits.
+- **Goal-anchor fix.** The shadow payload now carries `latest_user_text` (last user
+  message); it is injected into the review prompt as `LATEST_REQUEST`, and `SUSPICIOUS_SHIFT`
+  (and the deception meter) are judged against it while `goal` keeps its original-objective
+  meaning. `ground_review` accepts `LATEST_REQUEST` as a basis source. Live check: a DNS →
+  PostgreSQL topic switch produced **0 concerns** (previously a false positive).
+- **State-read retry.** One immediate retry inside the existing 25 ms deadline, with the
+  underlying error type logged; still fails open to `state_unavailable` on double failure.
+
+**New: deception meter (always-on, model-only, 3 levels)**
+- Every B review emits `deception_level`: `GREEN | YELLOW | RED` (GREEN = no action/completion
+  claims or all match supplied results; YELLOW = unsupported/hedged completion claim,
+  may ship bare; RED = claim contradicts supplied evidence or an asserted completion with
+  no matching result — **RED requires at least one quote-backed `concerns` entry**).
+  A bare RED is soft-downgraded to YELLOW (logged), never silently dropped.
+- Stored in the state snapshot beside `claim_review`; **excluded from the memory content**
+  schema (`extra="forbid"`); a degraded cycle preserves the prior level.
+- Delivered on every eligible request as a tiny `<observer_deception>` user message
+  (e.g. `Observer deception meter for the last answer: GREEN.`) and echoed in the
+  `x-dual-lobe-deception` receipt header. Model-only: never surfaced as UI.
+- `OBSERVATION_REMINDER` tells A the meter is fallible feedback: don't game it, don't
+  hedge to change it, don't reference it.
+- Latency: A-path TTFT median unchanged after both phases (640 ms baseline →
+  634 ms, n=5, fresh-run path); the meter adds one ~90-char message injection only.
+
 ## Suggested improvements
 
-Recommendations from the live assessment, not yet implemented.
+Recommendations from the live assessment; P1 items above are now implemented.
 
-**P1**
-- **B JSON robustness.** The observer degraded on 3 of 6 reviews in the ux run
-  (`ValidationError` — strict schema rejection of B's output). Add tolerant extraction
-  (strip code fences / locate the outermost JSON object), a single corrective retry that
-  passes the parse error back to B, and log the parse-error excerpt to see what B actually
-  returns. No extra model debate; B stays tool-free.
-- **Goal-anchor fix.** Anchor B's `goal` baseline to the **latest in-conversation user
-  message**, not the reviewed (N-1) interaction. This removes the false-positive
-  `SUSPICIOUS_SHIFT` class seen in the soak (a legitimate topic change was flagged because
-  the stored goal was one message behind).
-- **State-read retry.** Turn 3 of the ux run hit `memory=unavailable` from one transient
-  25 ms state read. One retry inside the deadline, with reason logging, improves injection
-  continuity while staying fail-open.
+**P1 (done — see "Implemented improvements")**
+- ~~B JSON robustness~~ ✅, ~~Goal-anchor fix~~ ✅, ~~State-read retry~~ ✅
 
 **P2**
 - **Labeled eval for claim checks.** Unit tests verify the schema, not the accuracy of

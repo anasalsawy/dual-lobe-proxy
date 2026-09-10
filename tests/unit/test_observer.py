@@ -28,6 +28,13 @@ def test_invalid_review_rejected(raw):
         parse_review(raw)
 
 
+def test_review_tolerates_fences_and_prose_but_not_schema_incompleteness():
+    assert parse_review("```json\n" + json.dumps(review()) + "\n```").concerns == []
+    assert parse_review("Here you go:\n" + json.dumps(review())).concerns == []
+    with pytest.raises(ValueError):  # found JSON object but missing required keys.
+        parse_review('prefix {"goal": "only"} suffix')
+
+
 def test_empty_but_well_formed_review_is_valid():
     assert parse_review(json.dumps(review())).concerns == []
 
@@ -35,10 +42,20 @@ def test_empty_but_well_formed_review_is_valid():
 @pytest.mark.parametrize("change", [
     {"questions": ["a", "b", "c"]}, {"next_step": "x" * 501},
     {"goal": "x" * 401}, {"verdict": "PASS"}, {"goal": 7},
+    {"deception_level": "ORANGE"}, {"deception_level": 1},
 ])
 def test_bounded_schema(change):
     with pytest.raises(ValidationError):
         Review.model_validate(review(**change))
+
+
+@pytest.mark.parametrize("level", ["GREEN", "YELLOW", "RED"])
+def test_all_deception_levels_are_valid(level):
+    assert Review.model_validate(review(deception_level=level)).deception_level == level
+
+
+def test_default_level_is_green_for_legacy_rows():
+    assert Review.model_validate(review()).deception_level == "GREEN"
 
 
 def concern(**kwargs):
@@ -63,6 +80,18 @@ def test_missing_evidence_can_be_unsupported_not_false():
         concerns=[concern(signal="UNSUPPORTED", basis_quote="")]
     )), prompt)
     assert result.concerns[0].signal == "UNSUPPORTED"
+
+
+def test_shift_basis_may_come_from_latest_request_not_original_goal():
+    prompt = prompts.build_cycle_prompt(
+        "original goal: DNS round-robin", "PostgreSQL works now.", "",
+        "", latest_request="Fix the PostgreSQL migration error.")
+    data = json.loads(prompt.split(prompts.EVIDENCE_MARKER)[1])
+    assert "LATEST_REQUEST" in data and "Fix the PostgreSQL migration error." in data["LATEST_REQUEST"]
+    shift = Review.model_validate(review(concerns=[concern(
+        signal="CONTRADICTION", claim_quote="PostgreSQL works now.",
+        basis_quote="Fix the PostgreSQL migration error.")]))
+    assert ground_review(shift, prompt) is shift
 
 
 def test_complete_prompt_budget_and_goal_retention():
@@ -260,7 +289,7 @@ async def test_b_call_has_no_tools_one_attempt_and_output_cap(monkeypatch):
     monkeypatch.setattr(context_shadow, "get_settings", lambda: settings)
     monkeypatch.setattr(context_shadow, "get_registry",
                         lambda: SimpleNamespace(adapter=lambda _: SimpleNamespace(buffered=completion)))
-    assert await context_shadow._call_b("lobe-b", "input") == review()
+    assert await context_shadow._call_b("lobe-b", "input") == json.dumps(review())
     req = completion.call_args.args[0]
     assert req.tools is None and req.max_tokens == 800
     completion.side_effect = RuntimeError("down")
@@ -277,10 +306,78 @@ async def test_review_failure_records_degraded_not_clean(monkeypatch):
     saved = AsyncMock()
     monkeypatch.setattr(context_shadow.repo, "save_b_state", saved)
     monkeypatch.setattr(context_shadow.repo, "append_event", AsyncMock())
-    monkeypatch.setattr(context_shadow, "_call_b", AsyncMock(return_value={}))
+    monkeypatch.setattr(context_shadow, "_call_b", AsyncMock(return_value="not json"))
     result = await context_shadow.run_shadow_cycle(None, {"payload": payload}, 777)
     assert result["degraded"]
     assert saved.call_args.args[3]["oversight_status"] == "degraded"
+
+
+async def test_corrective_retry_salvages_invalid_first_review(monkeypatch):
+    calls = []
+    prompt = prompts.build_cycle_prompt("record incomplete", "All tests passed.", "", "")
+
+    async def flaky_b(target, prompt):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return "```\n{\n  \"goal\": \"Fix tests\"\n}\n```"  # schema-incomplete, fixed on retry.
+        return json.dumps({**review(), "concerns": [{
+            "signal": "UNSUPPORTED", "claim_quote": "All tests passed.",
+            "basis_quote": "", "reason": "no result in record", "suggestion": "report it"}]})
+    monkeypatch.setattr(context_shadow, "_call_b", flaky_b)
+    result = await context_shadow._obtain_review("lobe-b", prompt)
+    assert result.goal == "Fix tests"
+    assert len(calls) == 2 and "rejected" not in calls[0] and "rejected" in calls[1]
+
+
+async def test_corrective_retry_still_fails_open_after_two_attempts(monkeypatch):
+    monkeypatch.setattr(context_shadow, "_call_b",
+                        AsyncMock(return_value="not json at all"))
+    with pytest.raises(ValueError):
+        await context_shadow._obtain_review("lobe-b", "input")
+
+
+async def test_transport_error_is_not_double_fired(monkeypatch):
+    calls = []
+
+    async def failing_b(target, prompt):
+        calls.append(prompt)
+        raise RuntimeError("429 rate limit")
+    monkeypatch.setattr(context_shadow, "_call_b", failing_b)
+    with pytest.raises(RuntimeError):
+        await context_shadow._obtain_review("lobe-b", "input")
+    assert len(calls) == 1  # no corrective retry on transport/provider errors
+
+
+async def test_red_without_wording_is_downgraded_not_silently_kept(monkeypatch):
+    payload = {"run_id": "run", "observed_at": time.time(), "context_text": "ctx",
+               "response_text": "out"}
+    monkeypatch.setattr(context_shadow.repo, "latest_b_state", AsyncMock(return_value=None))
+    monkeypatch.setattr(context_shadow.repo, "list_events", AsyncMock(return_value=[]))
+    saved = AsyncMock()
+    monkeypatch.setattr(context_shadow.repo, "save_b_state", saved)
+    monkeypatch.setattr(context_shadow.repo, "append_event", AsyncMock())
+    red_bare = json.dumps({**review(deception_level="RED"), "concerns": []})
+    monkeypatch.setattr(context_shadow, "_call_b", AsyncMock(return_value=red_bare))
+    result = await context_shadow.run_shadow_cycle(None, {"payload": payload}, 777)
+    assert result["ok"]
+    state = saved.call_args.args[3]
+    assert state["deception_level"] == "YELLOW"
+
+
+async def test_degraded_cycle_preserves_prior_deception_level(monkeypatch):
+    payload = {"run_id": "run", "observed_at": time.time(), "context_text": "ctx",
+               "response_text": "out"}
+    previous = {"deception_level": "RED", "context_memory": None}
+    monkeypatch.setattr(context_shadow.repo, "latest_b_state",
+                        AsyncMock(return_value={"payload": previous}))
+    monkeypatch.setattr(context_shadow.repo, "list_events", AsyncMock(return_value=[]))
+    saved = AsyncMock()
+    monkeypatch.setattr(context_shadow.repo, "save_b_state", saved)
+    monkeypatch.setattr(context_shadow.repo, "append_event", AsyncMock())
+    monkeypatch.setattr(context_shadow, "_call_b", AsyncMock(return_value="not json"))
+    result = await context_shadow.run_shadow_cycle(None, {"payload": payload}, 777)
+    assert result["degraded"]
+    assert saved.call_args.args[3]["deception_level"] == "RED"
 
 
 def test_legacy_enforcement_is_advisory_and_rls_is_required():

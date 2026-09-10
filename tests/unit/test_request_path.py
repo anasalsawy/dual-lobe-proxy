@@ -162,6 +162,64 @@ def test_original_goal_is_not_a_long_system_prompt():
     ]) == "Create the report"
 
 
+def test_latest_user_text_takes_the_most_recent_user_message():
+    assert chat._latest_user_text([
+        {"role": "system", "content": "rules"},
+        {"role": "user", "content": "Create the report"},
+        {"role": "assistant", "content": "done"},
+        {"role": "user", "content": [{"type": "text", "text": "retry"}]},
+    ]) == "retry"
+    assert chat._latest_user_text([{"role": "assistant", "content": "hello"}]) == ""
+
+
+async def test_deception_meter_is_injected_and_echoed_in_header(request_path, monkeypatch):
+    from dual_lobe.b.channels import ObserverContext
+    monkeypatch.setattr(chat, "_read_context", AsyncMock(return_value=ObserverContext(
+        deception_text="Observer deception meter for the last answer: RED.",
+        deception_status="RED")))
+    request, principal, _, adapter = request_path
+    response = await chat.chat_completions(
+        ChatCompletionRequest(messages=[{"role": "user", "content": "task"}]), request, principal)
+    assert response.headers["x-dual-lobe-deception"] == "RED"
+    sent = adapter.buffered.call_args.args[0].messages
+    assert any(m.get("name") == "observer_deception"
+               and "RED" in m["content"] for m in sent)
+
+
+async def test_read_context_retries_once_then_succeeds(monkeypatch):
+    monkeypatch.setattr(chat, "get_settings",
+                        lambda: Settings(_env_file=None, rollout_stage="context"))
+    @asynccontextmanager
+    async def session(*args):
+        yield SimpleNamespace(commit=AsyncMock())
+    monkeypatch.setattr(chat, "tenant_session", session)
+    attempts = 0
+
+    async def flaky(*args):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConnectionError("transient")
+        return {"payload": {"oversight_status": "orphaned"}}
+    monkeypatch.setattr(chat.repo, "latest_b_state", flaky)
+    context = await chat._read_context(1, "run", "", 1)
+    assert attempts == 2
+    assert context.status not in ("state_unavailable",)
+
+
+async def test_latest_user_text_reaches_the_observation_payload(request_path, monkeypatch):
+    captured = {}
+
+    async def persist(tenant_id, *args, latest_user_text="", **kwargs):
+        captured["latest_user_text"] = latest_user_text
+    monkeypatch.setattr(chat, "_persist_observation", persist)
+    request, principal, _, adapter = request_path
+    response = await chat.chat_completions(
+        ChatCompletionRequest(messages=[{"role": "user", "content": "latest ask"}]), request, principal)
+    await response.background()
+    assert captured["latest_user_text"] == "latest ask"
+
+
 async def test_tenant_context_is_transaction_local(monkeypatch):
     from dual_lobe.core import engine
     session = SimpleNamespace(execute=AsyncMock(), commit=AsyncMock())

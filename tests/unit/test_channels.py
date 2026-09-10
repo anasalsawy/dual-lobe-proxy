@@ -47,9 +47,11 @@ def test_three_paths_are_distinct_and_user_input_is_unchanged():
     result = chat._effective_messages(messages, context, True)
     assert result[0] == messages[0] and result[-1] == messages[-1] and messages == original
     assert result[1] == {"role": "system", "content": prompts.OBSERVATION_REMINDER}
-    memory, claims = result[2:4]
+    deception, memory, claims = result[2:5]
+    assert deception["name"] == "observer_deception"
+    assert deception["content"].startswith("Observer deception meter")
     assert memory["name"] == "observer_memory" and claims["name"] == "observer_claims"
-    assert memory["role"] == claims["role"] == "user"
+    assert memory["role"] == claims["role"] == deception["role"] == "user"
     assert "Windows" in memory["content"] and "All tests passed." not in memory["content"]
     assert "All tests passed." in claims["content"] and "Windows" not in claims["content"]
 
@@ -109,6 +111,19 @@ def test_legacy_state_converts_without_mutating_or_renewing_it():
     memory = completed_memory(legacy)
     assert memory.version == 1 and memory.observed_at == 1000 and legacy == original
     assert "concerns" not in memory.content.model_dump()
+    assert "deception_level" not in memory.content.model_dump()
+
+
+def test_deception_level_lives_outside_memory_and_is_delivered():
+    state = reviewed_state({}, Review.model_validate({
+        "goal": "g", "deception_level": "YELLOW", "questions": [], "next_step": "",
+        "context_notes": [], "concerns": []}), {"run_id": "run", "observed_at": time.time()})
+    assert state["deception_level"] == "YELLOW"
+    assert "deception_level" not in state["context_memory"]["content"]
+    context = prepare_context(state, "", 1, Settings(_env_file=None))
+    assert context.deception_status == "YELLOW"
+    assert context.deception_text == "Observer deception meter for the last answer: YELLOW."
+    assert context.receipt()["deception_status"] == "YELLOW"
 
 
 async def test_degraded_worker_preserves_completed_memory_without_renewal(monkeypatch):
@@ -136,7 +151,8 @@ async def test_successful_worker_stores_two_channels_atomically(monkeypatch):
     monkeypatch.setattr(context_shadow.repo, "list_events", AsyncMock(return_value=[]))
     monkeypatch.setattr(context_shadow.repo, "save_b_state", saved)
     monkeypatch.setattr(context_shadow.repo, "append_event", event)
-    monkeypatch.setattr(context_shadow, "_call_b", AsyncMock(return_value=example_review().model_dump()))
+    monkeypatch.setattr(context_shadow, "_call_b",
+                        AsyncMock(return_value=json.dumps(example_review().model_dump())))
     result = await context_shadow.run_shadow_cycle(None, {"payload": {
         "run_id": "run", "observed_at": time.time(), "context_text": "tests failed",
         "response_text": "All tests passed.",

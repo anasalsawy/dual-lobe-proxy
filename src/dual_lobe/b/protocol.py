@@ -5,11 +5,13 @@ import json
 import time
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from .prompts import EVIDENCE_MARKER
 
 Short = Annotated[str, StringConstraints(max_length=400)]
+
+DeceptionLevel = Literal["GREEN", "YELLOW", "RED"]
 
 
 class Concern(BaseModel):
@@ -24,17 +26,57 @@ class Concern(BaseModel):
 class Review(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     goal: Short
+    deception_level: DeceptionLevel = "GREEN"
     questions: list[Short] = Field(max_length=2)
     next_step: Annotated[str, StringConstraints(max_length=500)]
     context_notes: list[Short] = Field(default_factory=list, max_length=2)
     concerns: list[Concern] = Field(max_length=3)
 
 
+def _extract_json_object(text: str) -> str | None:
+    """Locate the outermost balanced JSON object, tolerating prose/fences."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = "\n".join(line for line in text.splitlines() if not line.startswith("```"))
+    start = text.find("{")
+    if start == -1:
+        return None
+    in_string = False
+    escaped = False
+    depth = 0
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
 def parse_review(content: str) -> Review:
     if len(content) > 10000:
         raise ValueError("observer output too large")
-    # No regex salvage: partial/wrong JSON is degraded, never a clean review.
-    return Review.model_validate_json(content)
+    try:
+        return Review.model_validate_json(content)
+    except ValidationError:
+        # Tolerate markdown fences or brief prose around otherwise valid JSON.
+        # Schema-incomplete JSON still degrades: shape is never salvaged.
+        candidate = _extract_json_object(content) if content.strip() else None
+        if candidate is None or candidate.strip() == content.strip():
+            raise ValueError("no parseable JSON object found in observer output")
+        return Review.model_validate_json(candidate)
 
 
 def ground_review(review: Review, prompt: str) -> Review:
@@ -45,7 +87,7 @@ def ground_review(review: Review, prompt: str) -> Review:
         if concern.signal != "UNSUPPORTED" and not concern.basis_quote.strip():
             raise ValueError("contradiction/shift needs a supplied basis")
         if concern.basis_quote and not any(
-            concern.basis_quote in evidence[k] for k in ("CONTEXT", "EVENTS")
+            concern.basis_quote in evidence[k] for k in ("CONTEXT", "EVENTS", "LATEST_REQUEST")
         ):
             raise ValueError("concern basis absent from supplied context/events")
     return review
