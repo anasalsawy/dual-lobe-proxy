@@ -193,7 +193,8 @@ delivers that choice; it does not calculate it from concern counts or keywords.
 | `DUAL_LOBE_CONTEXT_ENRICHMENT_ENABLED` | true | Generate/load attributed knowledge notes and peripheral questions; false suppresses stored notes without deleting them |
 | `DUAL_LOBE_CLAIM_CHECKS_ENABLED` | true | Review material claims and deliver findings directly in the request |
 | `DUAL_LOBE_DECEPTION_METER_ENABLED` | true | Deliver B's selected color; also suppressed when claim checks are off |
-| `DUAL_LOBE_B_HOST_TOOLS_ENABLED` | true | Allow B to request bounded information calls from tools already supplied by the app; never gives B an executor |
+| `DUAL_LOBE_B_HOST_TOOLS_ENABLED` | true | Allow B to request bounded read-only information calls from tools already supplied by the app; never gives B an executor |
+| `DUAL_LOBE_B_READ_ONLY_TOOL_NAMES` | empty | Comma-separated allowlist for ambiguous read-only tool names; definitions may set `x-dual-lobe-read-only: true` |
 | `DUAL_LOBE_CONTEXT_MEMORY_TTL_SECONDS` | 86400 s | Memory's independent observation-age limit; reads/failures do not renew it |
 | `DUAL_LOBE_MAX_MEMORY_CHARS` | 1600 | Maximum loaded broadening-memory message size |
 | `DUAL_LOBE_ROLLOUT_STAGE` | context | `context` loads both routes; `observation` only adds the monitoring instruction |
