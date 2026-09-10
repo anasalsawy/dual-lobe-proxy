@@ -1,13 +1,14 @@
-# Director mode and persistent memory (v0.5)
+# Director mode and persistent memory (v0.6)
 
 Director mode automates the back-and-forth you previously carried between an
 advisor chat and your agent. B reads A's answer and writes the next question or
 direction in your conversational place. The proxy calls A again with that turn.
-B does not execute A's work directly. It may request an information-gathering
-tool already supplied by the connected app; the app executes it and returns the
-result through the normal tool loop. No connector or extra application is added.
+B does not execute A's work directly. It may request any permitted tool already
+supplied by the connected app, including the complete specific artifact needed to
+check an action claim; the app executes it and returns the result through the
+normal tool loop. No connector or extra application is added.
 
-In v0.5, B uses the same explicit tunnel vision / “open sesame” enrichment role
+In v0.6, B uses the same explicit tunnel vision / “open sesame” enrichment role
 in both modes. See [the editable prompt and meter guide](OBSERVER_GUIDANCE.md).
 Upgrade with migration 0004 before starting updated gateway/worker code; it adds
 attributed observer notes without resetting existing memory.
@@ -68,7 +69,7 @@ calls. `DUAL_LOBE_B_ENABLED` controls the background observer;
 | Event | What the proxy does | What the application sees |
 |---|---|---|
 | New director request | Loads stored context and calls A with the caller's tools/settings | A's labelled text streams |
-| A finishes a text answer | Calls B with the observed context, answer, and bounded host-tool definitions | B's short question, correction, stop message, or optional information-call request |
+| A finishes a text answer | Calls B with the observed context, answer, bounded host-tool definitions and artifact inventory | B's short question, correction, stop message, or optional host/evidence-call request |
 | B continues | Adds a user-role message named `director_b`, then calls A | A's next answer in the same growing response |
 | A requests tools | Validates complete IDs/arguments; commits memory and session; ends the response with `finish_reason: tool_calls` | Ordinary function tool calls with their original IDs and arguments |
 | Host executes tools | The proxy waits for the host's next request; it executes nothing | The existing application's usual execution/approval interface |
@@ -84,7 +85,11 @@ execution. A consumes actual host-reported results before B's next review.
 
 Tool schemas and tool-choice settings come from the host and are retained for A;
 B receives bounded definitions for any tools supplied by the host. It can request
-reads or mutations, but the proxy never executes tools itself: the host application
+reads, mutations or execution. If a claim needs checking, the proxy preserves the
+original target response and asks B for its final assessment after the host returns
+the requested result. An `artifacts` inventory may be supplied on every request;
+an `artifact_full` request asks for the complete specific artifact, not just its
+name or metadata. The proxy never executes tools itself: the host application
 retains permission, approval and execution control. Forced tool choice can keep A producing tools, so
 those calls also count toward the invocation budget. Host permissions remain in
 effect. An inference proxy cannot create new native user bubbles or promise that
