@@ -1,6 +1,6 @@
 # Function assessment: broadening and anti-deception
 
-Updated 2026-09-10 for v0.5. Implemented behavior, deterministic validation and
+Updated 2026-09-10 for v0.6 peer-tool/artifact extension. Implemented behavior, deterministic validation and
 historical live reports are distinguished below. New prompt intent is not a
 demonstration of improved judgment.
 
@@ -9,7 +9,7 @@ demonstration of improved judgment.
 | Purpose | What is implemented | What still depends on model judgment |
 |---|---|---|
 | Broadening | Explicit tunnel vision / “open sesame” role; optional learned knowledge and peripheral questions | Correctness, relevance and whether A's next decision improves |
-| Anti-deception | Fixed monitoring instruction, quote-anchored concerns, separate findings route | Whether the account is misleading or missing history explains it |
+| Anti-deception | Fixed monitoring instruction, quote-anchored concerns, separate findings route, and host-relayed evidence requests for action claims | Whether the account is misleading or missing history explains it; host evidence may be unavailable |
 | Meter | B chooses GREEN/YELLOW/RED from the whole supplied record; GREEN default = no deception detected; no UNKNOWN color | B's substantive classification can be wrong |
 | Memory | Versioned run snapshots and attributed notes attached to shared journal entries | Which historical guidance A should use or discard |
 | Director | Visible B guidance uses the same enrichment role; A retains host tools and handoff/resume | Direction quality and whether to continue or stop |
@@ -30,9 +30,11 @@ tool boundaries. The five thinking angles are optional, not a checklist.
 3. Observation contains redacted context/output/latest real user request, source
    call, time, scope and memory space. Synthetic director turns do not replace
    the real user's latest request.
-4. B returns bounded JSON and may name optional information calls from the host's
-   supplied tool definitions. The app executes those calls; B never executes them.
-   One corrective re-ask is allowed for invalid
+4. B returns bounded JSON and may name calls from the host's supplied tool
+   definitions. The app executes those calls; B never executes them. For an
+   action/completion claim involving an artifact, B can request the complete
+   specific artifact (`artifact_full`); the original A response remains the
+   grading target until the host result arrives. One corrective re-ask is allowed for invalid
    parse/grounding output. Both attempts share one total deadline and each is
    charged to the per-process B budget. Transport failures are not retried.
 5. Invalid required reviews produce degraded status. Malformed optional knowledge
@@ -55,7 +57,9 @@ Shared retrieval reuses the notebook/recent/first/lexical-match journal queries.
 It adds at most one snapshot containing at most two notes, favoring a matched
 conversation, otherwise recent context. Generated note wording is not separately
 indexed. A judges relevance. Storage is durable; injected context is bounded and
-age-limited. This is not perfect recall, neural memory or live workspace access.
+age-limited. This is not perfect recall or neural memory; workspace/artifact
+access exists only when the connected host supplies an inventory or executes B's
+relayed request.
 
 ## Corrected defects from starting commit 5023d94
 
