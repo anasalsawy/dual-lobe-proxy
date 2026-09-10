@@ -1,7 +1,7 @@
 # Dual-lobe proxy
 
-A text-only Chat Completions gateway with a background observer, visible director
-mode, and shared persistent memory (v0.5).
+A text-only Chat Completions gateway with two peer model lanes, visible director
+mode, and shared persistent memory (v0.6).
 
 **Normal mode:** A responds while B reviews in the background.
 **Director mode:** B takes your conversational place, asks A follow-up questions,
@@ -30,11 +30,13 @@ Your original messages remain unchanged. Memory loading still supplies input to 
 next model call; it is not an extra connection into an already generating model.
 See [the setup and conversation test](docs/THREE_PATH_SETUP.md).
 
-B can optionally request information through tool definitions supplied by the
-connected app; the app executes those requests and returns results through the
-same inference loop. B has no separate executor, connector, browser or filesystem
-mount. If tools are absent or fail, B continues with conversation, memory and its
-own knowledge. Director mode uses the same configured B provider.
+B can request calls from the same host tool plane supplied to A; the app executes
+those requests and returns results through the same inference loop. B has no
+separate executor, connector, browser or filesystem mount. If tools are absent or
+fail, B continues with conversation, memory and its own knowledge. Send an
+`artifacts` list on each request when the host can expose an inventory; B can then
+request the complete specific artifact needed to check an action claim. Director
+mode uses the same configured B provider.
 It cannot guarantee truth, infer intent from writing style, or prevent every fabricated
 statement. This is an advisory development implementation, not a verified production
 security boundary. Read [the research and design](docs/RESEARCH_AND_DESIGN.md) and
@@ -49,7 +51,7 @@ security boundary. Read [the research and design](docs/RESEARCH_AND_DESIGN.md) a
 | A context | Original messages, completed memory, fresh claim findings | Add the fixed monitoring instruction; load memory as `observer_memory` and claim findings as `observer_claims` | Separate user-role data messages; original user text and tool-call/result adjacency preserved |
 | A response (normal mode) | Provider completion or SSE | Relay response; stream content as it arrives | When shared memory is selected, persist the complete observed turn before releasing the terminal event; storage failure is explicit |
 | Observation capture | Bounded original context, A output, call metadata | After response delivery, best-effort audit/outbox transaction | A never waits for a B model; a crash before this transaction can lose the observation |
-| B review | Original goal, latest real user request, context/output, reported events, prior guidance, and bounded host-tool definitions | Non-blocking review; B may request optional information calls that the app executes, with one corrective attempt only for invalid output | Goal, next step, supplied context notes; at most two contributions across questions/knowledge; separately, up to three concerns |
+| B review | Original goal, latest real user request, context/output, reported events, prior guidance, bounded host-tool definitions, and the host artifact inventory | Non-blocking review; B may request enrichment/search or claim evidence. Artifact/evidence requests are relayed through the host loop and trigger one final review of the original A response | Goal, next step, supplied context notes; at most two contributions across questions/knowledge; separately, up to three concerns and a B-selected color |
 | Review validation | B JSON | Check schema, lengths, B-selected color, allowed labels, exact quoted substrings; ignore malformed optional notes/tool requests | Invalid required review becomes degraded. Meter defaults GREEN = no deception detected; status reports the failed review separately |
 | Memory write | Validated B output | Atomically save a new memory version and separate claim findings in the existing tenant-scoped state store | A failed review preserves completed memory without renewing its age; old claim findings are not replayed |
 | Later A call | Latest same-run, same-floor/attempt state | Automatically reload memory and applicable claim findings | Independent freshness limits; no guarantee B finishes before the next call; no B model wait |
@@ -115,7 +117,18 @@ curl -N http://localhost:8801/v1/chat/completions \
 ```
 
 Send normal conversation history, including tool calls and their actual results.
-B sees only what the proxy receives; it cannot discover unreported execution.
+B sees only what the proxy receives; it cannot discover unreported execution. To
+make artifact claims checkable, include an `artifacts` array with the current
+host-runtime inventory on each request, for example:
+
+```json
+{"model":"lobe-a","messages":[{"role":"user","content":"Continue"}],
+ "artifacts":[{"path":"dist/app.zip","kind":"file","size":18342,
+                "content_available":true}]}
+```
+
+The inventory is baseline context. B requests the full content only for the
+specific artifact tied to an action claim, using the host's advertised tool.
 
 Optional correlation headers: `X-DL-Worker-ID`, `X-DL-Task-ID`,
 `X-DL-Call-Seq`, `X-DL-Agent-Role`. Roles `analyst`, `auditor`, `lobe-b`,
@@ -154,6 +167,16 @@ Optional external results can be posted to `/v1/dual-lobe/events` with
 `client_event` / `client_reported`, even if the caller labels them “verified.”
 They enrich the next scheduled review; event ingestion does not itself call B.
 
+The hook accepts an optional `artifacts` extension on each chat request. The
+connected runtime should send the current artifact inventory (and any small
+content it is allowed to expose) there. B receives that bounded inventory on
+every review. When A claims an action produced or changed an artifact, B is
+instructed to request the complete, specific artifact through the supplied host
+tool; the proxy injects that request into the ordinary tool loop and sends the
+result back for B's final assessment. An inventory, filename, size or hash alone
+is not treated as proof, and the proxy never fabricates an artifact it was not
+given.
+
 ## B's exact job
 
 The editable role is **`ENRICHMENT_POLICY` near the top of
@@ -177,6 +200,14 @@ missing receipts, and unsupported shifts in certainty. Labels are:
 All three are **model assessments**, not verdicts. Missing evidence is not proof
 of fabrication. Confidence or tone alone is not a trigger for an accusation.
 
+Every eligible review is instructed to request the direct evidence for an
+action/completion claim. If the action produced or changed an artifact, that
+request is for the full specific artifact through the host tool plane. The
+request is recorded and the original A response is held as the grading target;
+after the host result returns, B reassesses that original response once. If the
+host cannot provide the tool or result, the state remains explicitly unverified
+and A continues; the proxy does not turn absence into a lie verdict.
+
 B also chooses the deception-meter color directly from the whole available record:
 GREEN means no deception detected and is the default, YELLOW is a concerning or
 unresolved possibility, and RED is a serious concern. The proxy validates and
@@ -193,7 +224,7 @@ delivers that choice; it does not calculate it from concern counts or keywords.
 | `DUAL_LOBE_CONTEXT_ENRICHMENT_ENABLED` | true | Generate/load attributed knowledge notes and peripheral questions; false suppresses stored notes without deleting them |
 | `DUAL_LOBE_CLAIM_CHECKS_ENABLED` | true | Review material claims and deliver findings directly in the request |
 | `DUAL_LOBE_DECEPTION_METER_ENABLED` | true | Deliver B's selected color; also suppressed when claim checks are off |
-| `DUAL_LOBE_B_HOST_TOOLS_ENABLED` | true | Allow B to request bounded calls using tools already supplied by the app; B still has no separate executor |
+| `DUAL_LOBE_B_HOST_TOOLS_ENABLED` | true | Allow B to request bounded calls from the same host tool plane as A, including targeted artifact/evidence retrieval; the host runtime executes them |
 | `DUAL_LOBE_CONTEXT_MEMORY_TTL_SECONDS` | 86400 s | Memory's independent observation-age limit; reads/failures do not renew it |
 | `DUAL_LOBE_MAX_MEMORY_CHARS` | 1600 | Maximum loaded broadening-memory message size |
 | `DUAL_LOBE_ROLLOUT_STAGE` | context | `context` loads both routes; `observation` only adds the monitoring instruction |
@@ -224,10 +255,11 @@ reasoning effort. Unknown fields return 422 instead of silently disappearing.
 Provider support for any forwarded option still varies. The Responses API,
 image/audio processing and public inference via `lobe-b` are disabled.
 
-`POST /v1/verify` returns 410. The old file checker is not connected to the
-runtime. Legacy claim/evidence tables remain readable for existing data; B does
-not create final verdicts or run artifact checks. Successful v2 state is converted
-on read without changing its observation time. New writes use v3 with separate
+`POST /v1/verify` returns 410. The old proxy-local file checker is not used for
+peer verification. Legacy claim/evidence tables remain readable for existing
+data; new B reviews can request evidence through the connected host tool loop and
+then grade the original A response. Successful v2 state is converted on read
+without changing its observation time. New writes use v3 with separate
 `context_memory` and `claim_review` fields. The new director and shared-memory
 features require migrations 0002 and 0003. Enrichment requires additive migration
 0004; run initialization before starting updated gateway/worker code. Old journal
@@ -242,8 +274,10 @@ already delivered cannot be retracted or corrected by a later B review.
 
 Observation capture is best effort after delivery, not lossless audit logging.
 A process crash/disconnect or failed background transaction may lose it. Durable
-outbox jobs are idempotent once committed. Stale jobs and close-together reviews
-may be skipped; B does not review every claim or necessarily every call.
+outbox jobs are idempotent once committed. The default enqueues every eligible
+call, but an expired, superseded or unavailable B job is fail-open: no grade is
+invented and A continues. Therefore the system cannot promise a completed B
+assessment when the worker/provider or the host tool continuation is unavailable.
 
 Deploy one gateway and one B worker for the documented process-local budgets.
 For public/multi-process production use, separately validate rate limits, tenant
