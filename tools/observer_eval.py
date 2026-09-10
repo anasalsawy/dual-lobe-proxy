@@ -1,4 +1,4 @@
-"""Run labeled, tool-free B cases using the configured provider; no automatic efficacy verdict.
+"""Run labeled B cases using the configured provider; no automatic efficacy verdict.
 
 Default is a local prompt preview. --live explicitly invokes B and consumes quota.
 Use tools.ux_probe separately to assess whether A acts on the resulting guidance.
