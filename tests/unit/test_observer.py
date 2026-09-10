@@ -11,14 +11,15 @@ from pydantic import ValidationError
 
 from dual_lobe.api import chat
 from dual_lobe.b import context_shadow, prompts
-from dual_lobe.b.protocol import Review, advisory_text, ground_review, parse_review, usable_state
+from dual_lobe.b.protocol import Review, ground_review, parse_review, usable_state
+from dual_lobe.b.channels import ObserverContext, prepare_context, reviewed_state
 from dual_lobe.core.settings import Settings
 from dual_lobe.provider.adapters import ChatCompletionsAdapter, NormalizedRequest, ProviderTarget, resolve_request
 from dual_lobe.provider.registry import Registry
 
 
 def review(**kwargs):
-    return {"goal": "Fix tests", "questions": [], "next_step": "", "concerns": [], **kwargs}
+    return {"goal": "Fix tests", "questions": [], "next_step": "", "context_notes": [], "concerns": [], **kwargs}
 
 
 @pytest.mark.parametrize("raw", ["", "{}", "[]", "not json", '{"goal":', 'prose {"goal":"x"}'])
@@ -86,14 +87,15 @@ def test_stale_wrong_floor_or_degraded_state_not_injected(changes):
 
 
 def test_fresh_notes_are_bounded_advisory_not_system_data():
-    state = {"review": review(questions=["What prerequisite is missing?"],
-                             next_step="Read the supplied configuration.")}
-    notes = advisory_text(state, 300)
-    assert notes and len(notes) <= 300 and "untrusted" in notes
+    state = reviewed_state({}, Review.model_validate(review(
+        questions=["What prerequisite is missing?"], next_step="Read the supplied configuration.")),
+        {"run_id": "run", "observed_at": time.time()})
+    context = prepare_context(state, "", 1, Settings(_env_file=None, max_memory_chars=600))
+    assert context.memory_text and len(context.memory_text) <= 600 and "untrusted" in context.memory_text
     messages = [{"role": "system", "content": "rules"}, {"role": "user", "content": "task"},
                 {"role": "assistant", "tool_calls": [{"id": "t1"}]},
                 {"role": "tool", "tool_call_id": "t1", "content": "failed"}]
-    effective = chat._effective_messages(messages, notes, True)
+    effective = chat._effective_messages(messages, context, True)
     assert effective[2]["role"] == "user"
     assert effective[-2:] == messages[-2:]
     assert len(messages) == 4
@@ -236,8 +238,9 @@ async def test_slow_state_read_fails_open(monkeypatch):
         await asyncio.Event().wait()
     monkeypatch.setattr(chat, "tenant_session", session)
     monkeypatch.setattr(chat.repo, "latest_b_state", slow)
-    notes, status = await asyncio.wait_for(chat._read_notes(1, "run", "", 1), .3)
-    assert notes is None and status == "state_unavailable"
+    context = await asyncio.wait_for(chat._read_context(1, "run", "", 1), .3)
+    assert context.memory_text is None and context.claims_text is None
+    assert context.status == "state_unavailable"
 
 
 async def test_persistence_failure_does_not_raise(monkeypatch):

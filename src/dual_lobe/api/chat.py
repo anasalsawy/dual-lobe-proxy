@@ -15,8 +15,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 from ..b.outbox import shadow_job_key, shadow_payload
+from ..b.channels import ObserverContext, prepare_context
 from ..b.prompts import OBSERVATION_REMINDER, head_tail
-from ..b.protocol import advisory_text, usable_state
 from ..core import stage as stage_mod
 from ..core.engine import tenant_session
 from ..core.redact import redact_payload
@@ -52,7 +52,8 @@ def _original_goal(messages: list[dict]) -> str:
     return head_tail(str(content or ""), 1000)
 
 
-def _effective_messages(messages: list[dict], notes: str | None, reminder: bool) -> list[dict]:
+def _effective_messages(messages: list[dict], context: ObserverContext, reminder: bool,
+                        monitoring_role: str = "system") -> list[dict]:
     effective = list(messages)
     # Insert only before the conversation, never between an assistant tool call
     # and its results. B's generated text is NOT promoted into a system message.
@@ -60,10 +61,15 @@ def _effective_messages(messages: list[dict], notes: str | None, reminder: bool)
     while index < len(effective) and effective[index].get("role") in ("system", "developer"):
         index += 1
     if reminder:
-        effective.insert(index, {"role": "system", "content": OBSERVATION_REMINDER})
+        effective.insert(index, {"role": monitoring_role, "content": OBSERVATION_REMINDER})
         index += 1
-    if notes:
-        effective.insert(index, {"role": "user", "content": notes})
+    # Two separately stored/delivered paths. Model-generated material stays at
+    # user-message priority; only the fixed monitoring instruction is privileged.
+    for name, content in (("observer_memory", context.memory_text),
+                          ("observer_claims", context.claims_text)):
+        if content:
+            effective.insert(index, {"role": "user", "name": name, "content": content})
+            index += 1
     return effective
 
 
@@ -93,19 +99,17 @@ async def _call_a_with_retry(fn, retries: int):
             await asyncio.sleep(min(.25 * (attempt + 1), 1))
 
 
-async def _read_notes(tenant_id: int, run_id: str, floor: str, attempt: int):
+async def _read_context(tenant_id: int, run_id: str, floor: str, attempt: int) -> ObserverContext:
     s = get_settings()
     try:
         async with asyncio.timeout(s.b_state_read_timeout):
             async with tenant_session(tenant_id) as session:
                 latest = await repo.latest_b_state(session, run_id)
-        payload = (latest or {}).get("payload")
-        if usable_state(payload, floor, attempt, s.b_state_ttl_seconds):
-            return advisory_text(payload, s.max_injection_chars), "review_available"
-        return None, "no_current_review"
+        return prepare_context((latest or {}).get("payload"), floor, attempt, s)
     except Exception:
         LOG.warning("Observer state unavailable run=%s; A continues", run_id)
-        return None, "state_unavailable"
+        return ObserverContext(memory_status="unavailable", claim_status="unavailable",
+                               status="state_unavailable")
 
 
 async def _persist_observation(tenant_id: int, run_id: str, external_run: str,
@@ -130,6 +134,7 @@ async def _persist_observation(tenant_id: int, run_id: str, external_run: str,
                     payload={"source": "proxy_observed", "call_id": audit["call_id"],
                              "status": audit["status"], "latency_ms": audit["latency_ms"],
                              "correlation": corr, "error_type": audit.get("error_type", ""),
+                             "observer_delivery": audit.get("observer_delivery", {}),
                              "output_excerpt": audit["output"][:1500]},
                 )
                 # Default observes every completed call. Sampling is opt-in.
@@ -228,7 +233,8 @@ async def chat_completions(
         raise HTTPException(status_code=429, detail="rate limit exceeded",
                             headers={"Retry-After": str(int(limit.retry_after + 1))})
     corr = correlation.parse_headers(request.headers)
-    observe = s.b_enabled and not correlation.is_bypass(corr)
+    observe = (s.b_enabled and (s.context_memory_enabled or s.claim_checks_enabled)
+               and not correlation.is_bypass(corr))
     external_run = str(corr.get("run") or uuid.uuid4())
     floor, attempt = str(corr.get("floor", "")), int(corr.get("attempt", 1))
     async with tenant_session(principal.tenant_id) as session:
@@ -239,11 +245,14 @@ async def chat_completions(
         run_id = str(run.id)
         await session.commit()
     # No transaction or B model call is held across A's provider operation.
-    notes, observer_status = None, "disabled" if not observe else "no_current_review"
+    context = ObserverContext(memory_status="disabled", claim_status="disabled", status="disabled")
     if observe and stage_mod.injection_enabled(s.rollout_stage):
-        notes, observer_status = await _read_notes(principal.tenant_id, run_id, floor, attempt)
+        # Forced runtime hook, on EVERY eligible call, including calls after tools.
+        # It reloads completed memory even when the client omits it from history.
+        context = await _read_context(principal.tenant_id, run_id, floor, attempt)
     req = resolve_request(payload)
-    req.messages = _effective_messages(messages, notes, observe and s.observation_reminder)
+    monitoring = observe and s.observation_reminder
+    req.messages = _effective_messages(messages, context, monitoring, s.monitoring_role)
     req.timeout = s.a_timeout
     adapter = get_registry().adapter(alias)
     context_text = head_tail(
@@ -253,11 +262,15 @@ async def chat_completions(
     )
     audit = {"call_id": str(uuid.uuid4()), "logical_model": target.model,
              "stream": req.stream, "status": "INCOMPLETE", "output": "",
-             "latency_ms": 0, "observed_at": time.time()}
+             "latency_ms": 0, "observed_at": time.time(),
+             "observer_delivery": {**context.receipt(), "monitoring": monitoring}}
     background = BackgroundTask(_persist_observation, principal.tenant_id, run_id,
                                 external_run, corr, alias, context_text, audit, observe)
-    headers = {"X-Dual-Lobe-Run-Id": run_id, "X-Dual-Lobe-Observer": observer_status,
-               "X-Dual-Lobe-Call-Id": audit["call_id"]}
+    headers = {"X-Dual-Lobe-Run-Id": run_id, "X-Dual-Lobe-Observer": context.status,
+               "X-Dual-Lobe-Call-Id": audit["call_id"],
+               "X-Dual-Lobe-Memory": (f"v{context.memory_version}" if context.memory_text else context.memory_status),
+               "X-Dual-Lobe-Claims": context.claim_status,
+               "X-Dual-Lobe-Monitoring": "on" if monitoring else "off"}
     if req.stream:
         return StreamingResponse(
             _stream_body(adapter, req, alias, audit), media_type="text/event-stream",

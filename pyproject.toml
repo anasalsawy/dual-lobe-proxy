@@ -1,6 +1,6 @@
 [project]
 name = "dual-lobe"
-version = "0.2.0"
+version = "0.3.0"
 description = "Text inference gateway with a bounded asynchronous context and claim observer."
 requires-python = ">=3.11"
 dependencies = [

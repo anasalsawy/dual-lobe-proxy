@@ -1,5 +1,11 @@
 # A minimal, nonblocking Lobe B
 
+This report records the v0.2 design and research. The v0.3 implementation separates
+durable broadening memory, direct claim findings, and the standing monitoring
+instruction. See [the current setup and test](THREE_PATH_SETUP.md) for current
+storage, timing, settings and limitations; the research below is not a new
+evaluation of v0.3's model effectiveness.
+
 ## Recommendation
 
 Use B as a bounded observer with two responsibilities: widen the problem framing

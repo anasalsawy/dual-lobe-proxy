@@ -58,6 +58,11 @@ def test_worker_review_is_not_a_verdict(monkeypatch):
         async with admin_session_factory()() as session:
             state = await repo.latest_b_state(session, run_id)
             assert state["payload"]["oversight_status"] == "reviewed"
+            assert state["payload"]["schema_version"] == 3
+            memory = state["payload"]["context_memory"]
+            assert memory["version"] == 1 and memory["content"]["goal"] == "Fix tests"
+            assert "concerns" not in memory["content"]
+            assert state["payload"]["claim_review"]["concerns"][0]["signal"] == "CONTRADICTION"
             assert await repo.list_claims(session, run_id) == []
             assert await repo.list_evidence(session, run_id) == []
         await dispose_engines()

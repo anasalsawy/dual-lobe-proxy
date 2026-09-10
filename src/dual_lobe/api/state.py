@@ -8,6 +8,7 @@ from ..state import repositories as repo
 from . import auth
 from .schemas import StateResponse
 from ..b.protocol import usable_state
+from ..b.channels import completed_memory, memory_status
 from ..core.settings import get_settings
 
 router = APIRouter()
@@ -29,11 +30,21 @@ async def run_state(
         evidence = [repo.evidence_to_dict(e) for e in await repo.list_evidence(session, run_id=internal, limit=50)]
         events = [repo.event_to_dict(e) for e in await repo.list_events(session, run_id=internal, limit=25)]
     state_payload = dict(latest["payload"]) if latest else {}
+    memory = completed_memory(state_payload)
+    settings = get_settings()
     if state_payload.get("oversight_status") == "reviewed" and not usable_state(
         state_payload, run.current_floor, run.current_attempt,
-        get_settings().b_state_ttl_seconds,
+        settings.b_state_ttl_seconds,
     ):
         state_payload["oversight_status"] = "stale"
+    # Memory remains independently usable after claim findings expire or a later
+    # review degrades. Inspection never refreshes timestamps or starts a model.
+    state_payload["context_memory_status"] = memory_status(
+        memory, run.current_floor, run.current_attempt,
+        settings.context_memory_ttl_seconds,
+    )
+    if memory is not None:
+        state_payload["context_memory"] = memory.model_dump()
     return StateResponse(
         run_id=internal,
         revision=latest["revision"] if latest else None,

@@ -10,6 +10,7 @@ import pytest
 from starlette.requests import Request
 
 from dual_lobe.api import chat
+from dual_lobe.b.channels import ObserverContext
 from dual_lobe.api.auth import Principal
 from dual_lobe.api.schemas import ChatCompletionRequest
 from dual_lobe.core.settings import Settings
@@ -27,7 +28,7 @@ def request_path(monkeypatch):
     monkeypatch.setattr(chat.repo, "get_or_create_run", AsyncMock(return_value=SimpleNamespace(
         id="81c93c4c-e7d5-47c6-8e45-e0a859f677bc", goal="Do useful work",
     )))
-    monkeypatch.setattr(chat, "_read_notes", AsyncMock(return_value=(None, "no_current_review")))
+    monkeypatch.setattr(chat, "_read_context", AsyncMock(return_value=ObserverContext()))
     persist = AsyncMock()
     monkeypatch.setattr(chat, "_persist_observation", persist)
     monkeypatch.setattr(chat.limits, "check_limits", AsyncMock(return_value=SimpleNamespace(allowed=True)))
@@ -66,6 +67,18 @@ async def test_bypass_does_not_inject_or_enqueue_b(request_path):
     messages = [{"role": "user", "content": "task"}]
     response = await chat.chat_completions(ChatCompletionRequest(messages=messages), request, principal)
     assert adapter.buffered.call_args.args[0].messages == messages
+    await response.background()
+    assert persist.call_args.args[-1] is False
+
+
+async def test_both_paths_disabled_does_not_pretend_to_monitor(request_path, monkeypatch):
+    request, principal, persist, adapter = request_path
+    monkeypatch.setattr(chat, "get_settings", lambda: Settings(
+        _env_file=None, context_memory_enabled=False, claim_checks_enabled=False))
+    messages = [{"role": "user", "content": "task"}]
+    response = await chat.chat_completions(ChatCompletionRequest(messages=messages), request, principal)
+    assert adapter.buffered.call_args.args[0].messages == messages
+    assert response.headers["x-dual-lobe-monitoring"] == "off"
     await response.background()
     assert persist.call_args.args[-1] is False
 
