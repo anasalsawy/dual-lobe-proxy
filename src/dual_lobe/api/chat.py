@@ -17,7 +17,7 @@ from sqlalchemy.exc import InterfaceError, OperationalError
 
 from ..b.outbox import shadow_job_key, shadow_payload
 from ..b.channels import ObserverContext, prepare_context
-from ..b.host_tools import injector, offered_tools
+from ..b.host_tools import injector, offered_read_only_tools
 from ..b.prompts import OBSERVATION_REMINDER, head_tail
 from ..core import stage as stage_mod
 from ..core.engine import tenant_session
@@ -384,7 +384,8 @@ async def chat_completions(
     background = BackgroundTask(_persist_observation, principal.tenant_id, run_id,
                                 external_run, corr, alias, context_text, audit, observe,
                                 latest_user_text=latest_user_text,
-                                host_tools=offered_tools(req.tools, s.max_shadow_input_chars // 4)
+                                host_tools=offered_read_only_tools(req.tools, s.max_shadow_input_chars // 4,
+                                                                    s.b_read_only_tool_names)
                                 if observe and s.b_host_tools_enabled else [])
     inject_tools = injector(context, req, messages, principal.tenant_id, run_id, floor, attempt, s, audit)
     headers = {"X-Dual-Lobe-Run-Id": run_id, "X-Dual-Lobe-Observer": context.status,

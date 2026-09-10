@@ -163,7 +163,8 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
                            source_model=prompts.head_tail(get_registry().target("lobe-b").model, 256))
     offered = json.loads(prompt.split(prompts.EVIDENCE_MARKER, 1)[1])["HOST_TOOLS"]
     try:
-        state["host_tool_plan"] = make_plan(review, offered) if s.b_host_tools_enabled else []
+        state["host_tool_plan"] = (make_plan(review, offered, s.b_read_only_tool_names)
+                                    if s.b_host_tools_enabled else [])
     except (KeyError, TypeError, ValueError):
         state["host_tool_plan"] = []
     concerns = state["claim_review"]["concerns"]

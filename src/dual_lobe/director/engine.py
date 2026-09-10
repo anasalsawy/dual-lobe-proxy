@@ -11,7 +11,7 @@ from contextlib import aclosing
 from dataclasses import replace
 
 from ..b.prompts import COLOR_POLICY, ENRICHMENT_POLICY, head_tail
-from ..b.host_tools import offered_tools, make_plan, candidates
+from ..b.host_tools import offered_read_only_tools, make_plan, candidates
 from ..core.redact import redact_payload
 from ..provider.adapters import NormalizedRequest, response_dict
 from .protocol import (B_INSTRUCTIONS, Completion, byte_size, observed_messages,
@@ -161,7 +161,9 @@ class DirectorLoop:
             # Review the goal and visible transcript, retaining the first user
             # request and latest output. Long history is explicitly excerpted.
             data = observed_messages(messages) + [message]
-            exposed = offered_tools(self.req.tools, self.s.max_shadow_input_chars // 4) if self.s.b_host_tools_enabled else []
+            exposed = (offered_read_only_tools(self.req.tools, self.s.max_shadow_input_chars // 4,
+                                                self.s.b_read_only_tool_names)
+                       if self.s.b_host_tools_enabled else [])
             observation = {"TRANSCRIPT": head_tail(json.dumps(redact_payload(data), ensure_ascii=False),
                 self.s.max_shadow_input_chars // 2), "HOST_TOOLS": redact_payload(exposed)}
             while len(json.dumps(observation, ensure_ascii=False)) > self.s.max_shadow_input_chars:
@@ -197,7 +199,8 @@ class DirectorLoop:
             extra = []
             if exposed and not self.state.get("b_tool_batches", 0):
                 try:
-                    extra = candidates(make_plan(decision, exposed), self.req, {"content": ""})
+                    extra = candidates(make_plan(decision, exposed, self.s.b_read_only_tool_names),
+                                       self.req, {"content": ""}, self.s.b_read_only_tool_names)
                 except Exception:
                     pass
             if extra:
