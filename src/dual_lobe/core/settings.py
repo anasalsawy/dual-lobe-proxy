@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     b_rpm_limit: int = Field(default=20, ge=1, validation_alias="DUAL_LOBE_B_RPM_LIMIT")
     max_injection_chars: int = Field(default=1200, ge=300, le=4000, validation_alias="DUAL_LOBE_MAX_INJECTION_CHARS")
     max_shadow_input_chars: int = Field(default=18000, ge=4000, le=60000, validation_alias="DUAL_LOBE_MAX_SHADOW_INPUT_CHARS")
+    max_artifact_chars: int = Field(default=12000, ge=1000, le=60000, validation_alias="DUAL_LOBE_MAX_ARTIFACT_CHARS")
 
     rpm_limit: int = Field(default=600, validation_alias="DUAL_LOBE_RPM_LIMIT")
     tpm_limit: int = Field(default=120000, validation_alias="DUAL_LOBE_TPM_LIMIT")
