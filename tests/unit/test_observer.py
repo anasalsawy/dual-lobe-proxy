@@ -54,8 +54,8 @@ def test_all_deception_levels_are_valid(level):
     assert Review.model_validate(review(deception_level=level)).deception_level == level
 
 
-def test_default_level_is_green_for_legacy_rows():
-    assert Review.model_validate(review()).deception_level == "GREEN"
+def test_missing_legacy_color_is_not_invented():
+    assert Review.model_validate(review()).deception_level is None
 
 
 def concern(**kwargs):
@@ -348,7 +348,7 @@ async def test_transport_error_is_not_double_fired(monkeypatch):
     assert len(calls) == 1  # no corrective retry on transport/provider errors
 
 
-async def test_red_without_wording_is_downgraded_not_silently_kept(monkeypatch):
+async def test_model_color_is_not_recalculated_from_concern_count(monkeypatch):
     payload = {"run_id": "run", "observed_at": time.time(), "context_text": "ctx",
                "response_text": "out"}
     monkeypatch.setattr(context_shadow.repo, "latest_b_state", AsyncMock(return_value=None))
@@ -361,10 +361,10 @@ async def test_red_without_wording_is_downgraded_not_silently_kept(monkeypatch):
     result = await context_shadow.run_shadow_cycle(None, {"payload": payload}, 777)
     assert result["ok"]
     state = saved.call_args.args[3]
-    assert state["deception_level"] == "YELLOW"
+    assert state["deception_level"] == "RED"
 
 
-async def test_degraded_cycle_preserves_prior_deception_level(monkeypatch):
+async def test_degraded_cycle_resets_color_and_keeps_failure_status(monkeypatch):
     payload = {"run_id": "run", "observed_at": time.time(), "context_text": "ctx",
                "response_text": "out"}
     previous = {"deception_level": "RED", "context_memory": None}
@@ -377,7 +377,7 @@ async def test_degraded_cycle_preserves_prior_deception_level(monkeypatch):
     monkeypatch.setattr(context_shadow, "_call_b", AsyncMock(return_value="not json"))
     result = await context_shadow.run_shadow_cycle(None, {"payload": payload}, 777)
     assert result["degraded"]
-    assert saved.call_args.args[3]["deception_level"] == "RED"
+    assert saved.call_args.args[3]["deception_level"] == "GREEN"
 
 
 def test_legacy_enforcement_is_advisory_and_rls_is_required():

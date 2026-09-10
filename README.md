@@ -1,7 +1,7 @@
 # Dual-lobe proxy
 
 A text-only Chat Completions gateway with a background observer, visible director
-mode, and shared persistent memory (v0.4).
+mode, and shared persistent memory (v0.5).
 
 **Normal mode:** A responds while B reviews in the background.
 **Director mode:** B takes your conversational place, asks A follow-up questions,
@@ -15,12 +15,14 @@ A call, even when an app sends no prior chat history. It does not transfer tools
 permissions, or a running agent's execution state between apps.
 
 See [director mode, memory, and the test commands](docs/DIRECTOR_AND_MEMORY.md).
+For B's editable role, tunnel vision / "open sesame" definitions, and the meter,
+see [observer guidance](docs/OBSERVER_GUIDANCE.md).
 
 The three paths are now separate:
 
 | Purpose | Implementation |
 |---|---|
-| Broadening and tunnel vision | B maintains versioned context memory in Postgres. The gateway automatically reloads the latest completed snapshot before every eligible A call. |
+| Broadening and tunnel vision | B contributes useful knowledge and peripheral questions, maintains versioned Postgres memory, and can attach attributed notes to shared history. A automatically loads completed feedback. |
 | Anti-deception findings | Evidence-linked claim concerns are stored separately from broadening content and attached directly to A's request. |
 | Awareness of monitoring | A fixed system/developer instruction states that the proxy and background observer exist, tells A to address the user, and requires accurate reporting of execution evidence. |
 
@@ -28,8 +30,11 @@ Your original messages remain unchanged. Memory loading still supplies input to 
 next model call; it is not an extra connection into an already generating model.
 See [the setup and conversation test](docs/THREE_PATH_SETUP.md).
 
-B has no tools, browser, filesystem access, or CrewAI tasks. Director mode uses
-the same configured B provider with a separate short conversational prompt.
+B can optionally request information through tool definitions supplied by the
+connected app; the app executes those requests and returns results through the
+same inference loop. B has no separate executor, connector, browser or filesystem
+mount. If tools are absent or fail, B continues with conversation, memory and its
+own knowledge. Director mode uses the same configured B provider.
 It cannot guarantee truth, infer intent from writing style, or prevent every fabricated
 statement. This is an advisory development implementation, not a verified production
 security boundary. Read [the research and design](docs/RESEARCH_AND_DESIGN.md) and
@@ -44,8 +49,8 @@ security boundary. Read [the research and design](docs/RESEARCH_AND_DESIGN.md) a
 | A context | Original messages, completed memory, fresh claim findings | Add the fixed monitoring instruction; load memory as `observer_memory` and claim findings as `observer_claims` | Separate user-role data messages; original user text and tool-call/result adjacency preserved |
 | A response (normal mode) | Provider completion or SSE | Relay response; stream content as it arrives | When shared memory is selected, persist the complete observed turn before releasing the terminal event; storage failure is explicit |
 | Observation capture | Bounded original context, A output, call metadata | After response delivery, best-effort audit/outbox transaction | A never waits for a B model; a crash before this transaction can lose the observation |
-| B review | Original goal, context/output, recent reported events, relevant prior memory/findings | One bounded model call; no tool use or retries | Goal, two questions, one next step, two context notes; separately, three concerns |
-| Review validation | B JSON | Check schema, lengths, allowed labels, exact quoted substrings | Malformed/ungrounded review becomes degraded, not “clean” or “verified” |
+| B review | Original goal, latest real user request, context/output, reported events, prior guidance, and bounded host-tool definitions | Non-blocking review; B may request optional information calls that the app executes, with one corrective attempt only for invalid output | Goal, next step, supplied context notes; at most two contributions across questions/knowledge; separately, up to three concerns |
+| Review validation | B JSON | Check schema, lengths, B-selected color, allowed labels, exact quoted substrings; ignore malformed optional notes/tool requests | Invalid required review becomes degraded. Meter defaults GREEN = no deception detected; status reports the failed review separately |
 | Memory write | Validated B output | Atomically save a new memory version and separate claim findings in the existing tenant-scoped state store | A failed review preserves completed memory without renewing its age; old claim findings are not replayed |
 | Later A call | Latest same-run, same-floor/attempt state | Automatically reload memory and applicable claim findings | Independent freshness limits; no guarantee B finishes before the next call; no B model wait |
 
@@ -78,7 +83,7 @@ curl http://localhost:8801/readyz
 ```
 
 Only the `initialize` service runs migrations/bootstrap, including v0.4 migrations
-0002 (director sessions) and 0003 (shared memory). It must succeed before
+0002 (director sessions), 0003 (shared memory), and 0004 (observer knowledge notes). It must succeed before
 the gateway and worker start. Re-running bootstrap does not duplicate existing
 keys or reactivate revoked keys. Existing development keys from older versions
 are not automatically revoked: rotate them before sharing the service.
@@ -95,7 +100,8 @@ No CrewAI observer agent or tools need to be added. Choose `lobe-a-director` for
 the visible director loop. Both routes load shared memory by default.
 
 Set a stable `X-DL-Run-ID` for one conversation/task. Without it, each request is
-a new run, so B cannot help subsequent calls. You can reuse the returned internal
+a new run, so run-scoped memory and claim feedback cannot follow that conversation;
+shared-space retrieval can still supply stored guidance. You can reuse the returned internal
 `X-Dual-Lobe-Run-Id` as the next request's `X-DL-Run-ID`.
 
 ```sh
@@ -137,6 +143,11 @@ receipt or that the model followed the notes. `X-Dual-Lobe-Observer` retains the
 `X-Dual-Lobe-Memory-Space` names the shared space or `off`;
 `X-Dual-Lobe-Shared-Entries` counts the selected journal entries. Director mode
 reloads memory per internal A turn and reports `per-turn` for observer channels.
+`X-Dual-Lobe-Deception` is GREEN (default, no deception detected), YELLOW, RED,
+or `disabled`; there is no UNKNOWN color. Review availability remains separate.
+When a current completed review exists, `X-Dual-Lobe-Review-Call-Id` and
+`X-Dual-Lobe-Review-Age-Seconds` identify the reviewed answer and its age.
+The meter never certifies honesty and is not necessarily about the last answer.
 
 Optional external results can be posted to `/v1/dual-lobe/events` with
 `kind`, `run_id`, `payload`, and `idempotency_key`. They are stored as
@@ -145,7 +156,10 @@ They enrich the next scheduled review; event ingestion does not itself call B.
 
 ## B's exact job
 
-The editable prompt lives in [prompts.py](src/dual_lobe/b/prompts.py).
+The editable role is **`ENRICHMENT_POLICY` near the top of
+[prompts.py](src/dual_lobe/b/prompts.py)**. `B_SYSTEM` defines B's broader role and
+evidence boundaries; `CYCLE_PROMPT` defines its output format. Director B uses
+the same enrichment policy. See [the editing guide](docs/OBSERVER_GUIDANCE.md).
 The output contract and freshness rules live in
 [protocol.py](src/dual_lobe/b/protocol.py).
 
@@ -163,6 +177,11 @@ missing receipts, and unsupported shifts in certainty. Labels are:
 All three are **model assessments**, not verdicts. Missing evidence is not proof
 of fabrication. Confidence or tone alone is not a trigger for an accusation.
 
+B also chooses the deception-meter color directly from the whole available record:
+GREEN means no deception detected and is the default, YELLOW is a concerning or
+unresolved possibility, and RED is a serious concern. The proxy validates and
+delivers that choice; it does not calculate it from concern counts or keywords.
+
 ## Main controls
 
 | Setting | Default | Actual meaning |
@@ -171,15 +190,18 @@ of fabrication. Confidence or tone alone is not a trigger for an accusation.
 | `DUAL_LOBE_OBSERVATION_REMINDER` | true | Fixed monitoring instruction on observed A calls; independently switchable |
 | `DUAL_LOBE_MONITORING_ROLE` | system | `system` or `developer`; use a role supported by the provider |
 | `DUAL_LOBE_CONTEXT_MEMORY_ENABLED` | true | Maintain and automatically load broadening memory |
+| `DUAL_LOBE_CONTEXT_ENRICHMENT_ENABLED` | true | Generate/load attributed knowledge notes and peripheral questions; false suppresses stored notes without deleting them |
 | `DUAL_LOBE_CLAIM_CHECKS_ENABLED` | true | Review material claims and deliver findings directly in the request |
+| `DUAL_LOBE_DECEPTION_METER_ENABLED` | true | Deliver B's selected color; also suppressed when claim checks are off |
+| `DUAL_LOBE_B_HOST_TOOLS_ENABLED` | true | Allow B to request bounded information calls from tools already supplied by the app; never gives B an executor |
 | `DUAL_LOBE_CONTEXT_MEMORY_TTL_SECONDS` | 86400 s | Memory's independent observation-age limit; reads/failures do not renew it |
 | `DUAL_LOBE_MAX_MEMORY_CHARS` | 1600 | Maximum loaded broadening-memory message size |
 | `DUAL_LOBE_ROLLOUT_STAGE` | context | `context` loads both routes; `observation` only adds the monitoring instruction |
 | `DUAL_LOBE_PULSE_EVERY` | 1 | Eligible calls per run between enqueues; default every call |
 | `DUAL_LOBE_B_COOLDOWN_SECONDS` | 0 | Optional skipping of closely spaced reviews; disabled by default |
-| `DUAL_LOBE_B_RPM_LIMIT` | 20 | Per-tenant, per-worker-process B call budget |
+| `DUAL_LOBE_B_RPM_LIMIT` | 20 | Per-tenant, per-process B attempt budget, including corrective attempts and director B calls |
 | `DUAL_LOBE_WORKER_MAX_CONCURRENCY` | 2 | Maximum concurrent jobs in one worker process |
-| `DUAL_LOBE_B_TIMEOUT` | 20 s | Whole B model operation deadline; one attempt |
+| `DUAL_LOBE_B_TIMEOUT` | 20 s | Total background review deadline across at most two attempts; transport failures are not retried |
 | `DUAL_LOBE_B_MAX_OUTPUT_TOKENS` | 1400 | Requested B output-token cap |
 | `DUAL_LOBE_MAX_SHADOW_INPUT_CHARS` | 18000 | Complete B user-prompt cap, plus fixed system prompt |
 | `DUAL_LOBE_MAX_INJECTION_CHARS` | 1200 | Maximum direct claim-finding message size, separate from memory |
@@ -207,7 +229,9 @@ runtime. Legacy claim/evidence tables remain readable for existing data; B does
 not create final verdicts or run artifact checks. Successful v2 state is converted
 on read without changing its observation time. New writes use v3 with separate
 `context_memory` and `claim_review` fields. The new director and shared-memory
-features require migrations 0002 and 0003; run initialization when upgrading.
+features require migrations 0002 and 0003. Enrichment requires additive migration
+0004; run initialization before starting updated gateway/worker code. Old journal
+rows and v2/v3 observer records continue loading without a memory reset.
 
 Normal mode's lack of a B model wait does not mean literally zero overhead: authentication, database
 run lookup, optional 25 ms state lookup, network/proxy work and additional prompt

@@ -94,6 +94,8 @@ class MemoryEntry(Base):
     run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False)
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
     search_text: Mapped[str] = mapped_column(Text, nullable=False)
+    # Small, separate generated guidance. Never part of the raw evidence journal.
+    observer_notes: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 

@@ -1,5 +1,48 @@
 # Validation record
 
+## v0.5 observer repairs and enrichment — 2026-09-10
+
+Starting point: main `5023d944ec5c627d12bf744944affcfbf48553da`. Its existing
+[CI run 34441080808](https://github.com/anasalsawy/dual-lobe-proxy/actions/runs/34441080808)
+passed 149 tests, including 22 real Postgres cases. That is baseline evidence,
+not a result for the changes below.
+
+Current local Python 3.12 validation:
+
+- **158 unit tests passed**; 184 cases collected, including 26 database cases.
+- New regressions cover secret redaction through normal observation/B input,
+  B-selected GREEN/YELLOW/RED delivery, default GREEN with separate review
+  status, source-call/age attribution, disabling saved feedback, retry accounting
+  and deadline, fresh state-read transactions, director latest-user wiring,
+  optional knowledge validation, host-tool schema/reservation fail-open behavior,
+  and strict UX probe completion handling.
+- The labeled B evaluation driver passed with a scripted provider through the
+  actual production prompt/validation path. The eight-case offline prompt preview
+  ran successfully. These are not real-model quality measurements.
+- Existing five-check offline observer demo, source/test/migration/tool
+  compilation, lock consistency, installed dependency compatibility, entrypoint
+  shell syntax and whitespace checks passed. Runtime dependencies are unchanged.
+- The new Postgres cases cover worker-to-journal guidance attachment, reconnect
+  retrieval, tenant/space/run/call boundaries, suppression of saved notes,
+  old-record compatibility and additive migration 0004 on pre-existing rows.
+  Their execution is pending CI at this checkpoint; collection is not a pass.
+
+No real provider credentials or running deployment are configured in the authoring
+environment. The live three-arm comparison has not run. Both assessments now
+label previous live reports as historical and distinguish delivery tests from
+semantic efficacy. The [evaluation guide](UX_ASSESSMENT_WITH_VS_WITHOUT.md)
+specifies retained redacted inputs, outputs, settings, source IDs and timing.
+
+GREEN means **no deception detected** and is the default; B selects the color from
+the whole available record; there is no UNKNOWN
+color. A failed/unavailable review retains an explicit operational status and
+does not become a completed review. No test establishes verified honesty or
+the absence of every design flaw. Normal mode adds no B model wait, while the
+existing database/prompt costs still preclude a zero-latency guarantee.
+
+Apply migration 0004 before updated gateway/worker code. The Compose initializer
+runs it once before those services; existing journal/state data need no reset.
+
 ## v0.4 director mode and shared persistent memory — 2026-09-10
 
 Local Python 3.12 validation:

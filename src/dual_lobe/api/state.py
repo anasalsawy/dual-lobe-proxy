@@ -8,7 +8,7 @@ from ..state import repositories as repo
 from . import auth
 from .schemas import StateResponse
 from ..b.protocol import usable_state
-from ..b.channels import completed_memory, memory_status
+from ..b.channels import completed_memory, memory_status, prepare_context
 from ..core.settings import get_settings
 
 router = APIRouter()
@@ -32,6 +32,10 @@ async def run_state(
     state_payload = dict(latest["payload"]) if latest else {}
     memory = completed_memory(state_payload)
     settings = get_settings()
+    delivery = prepare_context(state_payload, run.current_floor, run.current_attempt, settings)
+    state_payload["deception_status"] = delivery.deception_status
+    state_payload["deception_level"] = delivery.deception_status if delivery.deception_status in ("GREEN", "YELLOW", "RED") else None
+    state_payload["observer_delivery"] = delivery.receipt()
     if state_payload.get("oversight_status") == "reviewed" and not usable_state(
         state_payload, run.current_floor, run.current_attempt,
         settings.b_state_ttl_seconds,

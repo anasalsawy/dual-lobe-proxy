@@ -51,7 +51,7 @@ async def test_second_app_gets_saved_memory_without_sending_old_history(request_
     saved = []
     async def record(tenant, space, run, call, messages, responses):
         saved.append({"tenant": tenant, "space": space, "messages": messages, "responses": responses})
-    async def load(tenant, space, messages):
+    async def load(tenant, space, messages, **kwargs):
         matching = [e for e in saved if e["tenant"] == tenant and e["space"] == space]
         entries = [{"id": i, "excerpt": json.dumps(e)} for i, e in enumerate(matching)]
         return memory.LoadedMemory(space, memory.compose(space, "", entries, 6000), tuple(range(len(entries))))

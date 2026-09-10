@@ -1,10 +1,16 @@
-# Director mode and persistent memory (v0.4)
+# Director mode and persistent memory (v0.5)
 
 Director mode automates the back-and-forth you previously carried between an
 advisor chat and your agent. B reads A's answer and writes the next question or
 direction in your conversational place. The proxy calls A again with that turn.
-B does not execute A's work and has no tools. No connectors or extra applications
-are part of this implementation.
+B does not execute A's work directly. It may request an information-gathering
+tool already supplied by the connected app; the app executes it and returns the
+result through the normal tool loop. No connector or extra application is added.
+
+In v0.5, B uses the same explicit tunnel vision / “open sesame” enrichment role
+in both modes. See [the editable prompt and meter guide](OBSERVER_GUIDANCE.md).
+Upgrade with migration 0004 before starting updated gateway/worker code; it adds
+attributed observer notes without resetting existing memory.
 
 ## Start and watch it
 
@@ -62,7 +68,7 @@ calls. `DUAL_LOBE_B_ENABLED` controls the background observer;
 | Event | What the proxy does | What the application sees |
 |---|---|---|
 | New director request | Loads stored context and calls A with the caller's tools/settings | A's labelled text streams |
-| A finishes a text answer | Calls tool-free B with the observed context and answer | B's short question, correction, or stop message |
+| A finishes a text answer | Calls B with the observed context, answer, and bounded host-tool definitions | B's short question, correction, stop message, or optional information-call request |
 | B continues | Adds a user-role message named `director_b`, then calls A | A's next answer in the same growing response |
 | A requests tools | Validates complete IDs/arguments; commits memory and session; ends the response with `finish_reason: tool_calls` | Ordinary function tool calls with their original IDs and arguments |
 | Host executes tools | The proxy waits for the host's next request; it executes nothing | The existing application's usual execution/approval interface |
@@ -109,7 +115,7 @@ The proxy owns two durable stores, separate from the observer's run-scoped notes
 | Store | Scope | Contents and use |
 |---|---|---|
 | Director session | Tenant + run, fixed task/floor/attempt/worker/memory space | Canonical individual A/B conversation, host-visible history, tool handoff, counters, deadline, and short transaction lease |
-| Shared memory | Tenant + named memory space | Supplied conversation and A reply bodies in a searchable journal, plus an editable pinned notebook; loaded on every A call |
+| Shared memory | Tenant + named memory space | Supplied conversation/A replies, separate generated observer notes with model/call/time provenance, plus an editable pinned notebook; bounded selection loaded on each A call |
 
 `DUAL_LOBE_DEFAULT_MEMORY_ID=main` makes all apps on the same proxy tenant share
 memory by default. Different API keys may share it if they belong to that same
@@ -133,6 +139,14 @@ search, not semantic/embedding search. Long entries have a bounded 64,000-charac
 search preview; the recorded message bodies remain available through inspection.
 The search uses PostgreSQL's built-in [text search and ranking](https://www.postgresql.org/docs/current/textsearch-controls.html)
 and [GIN indexing](https://www.postgresql.org/docs/current/textsearch-tables.html).
+
+Completed B knowledge notes attach to their source journal entry. At most one
+snapshot (two notes) is selected, within the existing memory budget and TTL,
+favoring a keyword-matched conversation. The generated wording is not separately
+indexed. Run-local knowledge takes precedence to avoid duplicate snapshots.
+Disabling enrichment suppresses saved notes without deleting them; raw history
+and pinned notes are separate. Notes remain model-generated guidance, never
+independent evidence that work occurred.
 
 Memory is supplied as a separate user-role `shared_memory` message, marked as
 untrusted historical data. It is not neural memory or an injection into a running

@@ -13,9 +13,11 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
+from sqlalchemy.exc import InterfaceError, OperationalError
 
 from ..b.outbox import shadow_job_key, shadow_payload
 from ..b.channels import ObserverContext, prepare_context
+from ..b.host_tools import injector, offered_tools
 from ..b.prompts import OBSERVATION_REMINDER, head_tail
 from ..core import stage as stage_mod
 from ..core.engine import tenant_session
@@ -56,12 +58,14 @@ def _original_goal(messages: list[dict]) -> str:
 
 def _latest_user_text(messages: list[dict]) -> str:
     for message in reversed(messages):
-        if message.get("role") != "user":
+        if message.get("role") != "user" or message.get("name") in (
+            "director_b", "observer_memory", "observer_claims", "observer_deception", "shared_memory"
+        ):
             continue
         content = message.get("content", "")
         if isinstance(content, list):
             content = "\n".join(str(p.get("text", "")) for p in content)
-        return head_tail(str(content or ""), 1600)
+        return head_tail(redact_payload(str(content or "")), 1600)
     return ""
 
 
@@ -119,31 +123,39 @@ async def _read_context(tenant_id: int, run_id: str, floor: str, attempt: int) -
     s = get_settings()
     try:
         async with asyncio.timeout(s.b_state_read_timeout):
-            async with tenant_session(tenant_id) as session:
+            for read_attempt in range(2):
                 try:
-                    latest = await repo.latest_b_state(session, run_id)
-                except asyncio.TimeoutError:
-                    raise
-                except Exception:
-                    # One immediate retry for a transient read failure, still bounded
-                    # by the same overall deadline below which A fails open.
-                    latest = await repo.latest_b_state(session, run_id)
+                    # Each attempt starts a new transaction and reapplies tenant
+                    # identity. Never retry in a disconnected/aborted transaction.
+                    async with tenant_session(tenant_id) as session:
+                        latest = await repo.latest_b_state(session, run_id)
+                    break
+                except (ConnectionError, InterfaceError, OperationalError) as exc:
+                    if read_attempt:
+                        raise
+                    LOG.warning("Retrying observer state run=%s error_type=%s", run_id, type(exc).__name__)
         return prepare_context((latest or {}).get("payload"), floor, attempt, s)
     except Exception as exc:
         LOG.warning("Observer state unavailable run=%s error_type=%s; A continues",
                     run_id, type(exc).__name__)
         return ObserverContext(memory_status="unavailable", claim_status="unavailable",
+                               deception_status="GREEN" if s.deception_meter_enabled and s.claim_checks_enabled else "disabled",
+                               deception_text=("Observer meter: GREEN (no deception detected). Observer state is unavailable; "
+                                               "this default is not a completed review.")
+                               if s.deception_meter_enabled and s.claim_checks_enabled else None,
                                status="state_unavailable")
 
 
 async def _persist_observation(tenant_id: int, run_id: str, external_run: str,
                                corr: dict, target_alias: str, context_text: str,
                                audit: dict, observe: bool,
-                               latest_user_text: str = "") -> None:
+                               latest_user_text: str = "", host_tools: list[dict] | None = None) -> None:
     """After response delivery. Failures cannot change an already-sent A answer."""
     s = get_settings()
     try:
         audit["output"] = redact_payload(audit["output"])
+        context_text = head_tail(redact_payload(context_text), s.max_shadow_input_chars)
+        latest_user_text = head_tail(redact_payload(latest_user_text), 1600)
         async with asyncio.timeout(5):
             async with tenant_session(tenant_id) as session:
                 await repo.record_provider_attempt(
@@ -172,8 +184,10 @@ async def _persist_observation(tenant_id: int, run_id: str, external_run: str,
                         attempt_id=int(corr.get("attempt", 1)), stage=s.rollout_stage,
                     )
                     payload.update(source_call=audit["call_id"], observed_at=audit["observed_at"],
-                                   latest_user_text=latest_user_text)
-                    scope_context = context_text + f"\nSCOPE:{corr.get('floor', '')}:{corr.get('attempt', 1)}"
+                                   latest_user_text=latest_user_text,
+                                   host_tools=redact_payload(host_tools or []),
+                                   memory_space=(audit.get("observer_delivery") or {}).get("shared_memory_space"))
+                    scope_context = context_text + latest_user_text + f"\nSCOPE:{corr.get('floor', '')}:{corr.get('attempt', 1)}"
                     key = shadow_job_key(tenant_id, run_id, 0, scope_context, audit["output"])
                     await repo.enqueue_outbox(session, tenant_id, "b", key, payload)
                 await session.commit()
@@ -182,11 +196,12 @@ async def _persist_observation(tenant_id: int, run_id: str, external_run: str,
                     run_id, audit["call_id"], type(exc).__name__)
 
 
-async def _stream_body(adapter, req, public_model: str, audit: dict, save_memory=None):
+async def _stream_body(adapter, req, public_model: str, audit: dict, save_memory=None, inject_tools=None):
     started = time.monotonic()
     finished = set()
     seen = set()
     collector = Completion() if save_memory else None
+    tool_collector = Completion() if inject_tools else None
     terminal = []
     try:
         async with asyncio.timeout(req.timeout), aclosing(adapter.stream(req)) as upstream:
@@ -195,6 +210,12 @@ async def _stream_body(adapter, req, public_model: str, audit: dict, save_memory
                 chunk["model"] = public_model
                 if collector is not None:
                     collector.add(chunk)
+                if tool_collector is not None:
+                    try:
+                        tool_collector.add(chunk)
+                    except (TypeError, ValueError, KeyError):
+                        # Nonstandard provider output disables optional B additions.
+                        tool_collector = None
                 for choice in chunk.get("choices") or []:
                     index = choice.get("index", 0)
                     seen.add(index)
@@ -210,16 +231,46 @@ async def _stream_body(adapter, req, public_model: str, audit: dict, save_memory
                 if chunk.get("usage"):
                     audit["usage"] = chunk["usage"]
                 wire = "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
-                if collector is not None and (finished or terminal):
-                    terminal.append(wire)
+                if (save_memory or inject_tools) and (finished or terminal):
+                    terminal.append(chunk)
                 else:
                     yield wire
         if not seen or not seen <= finished:
             raise ValueError("upstream stream ended without a terminal choice")
+        additions = []
+        if tool_collector is not None and tool_collector.finish in ("stop", "tool_calls"):
+            try:
+                original = tool_collector.message(req.tools)
+                additions = await inject_tools(original)
+            except Exception:
+                additions = []  # B must not prevent A's successful response.
+        if additions:
+            start = max(tool_collector.tools, default=-1) + 1
+            for chunk in terminal:
+                for choice in chunk.get("choices") or []:
+                    if choice.get("finish_reason") in ("stop", "tool_calls"):
+                        delta = choice.setdefault("delta", {})
+                        delta["tool_calls"] = [*(delta.get("tool_calls") or []),
+                            *[{"index": start+i, **call} for i, call in enumerate(additions)]]
+                        choice["finish_reason"] = "tool_calls"
+        message = None
         if collector is not None:
-            await save_memory([collector.message(req.tools)])
-            for wire in terminal:
-                yield wire
+            message = collector.message(req.tools)
+        elif tool_collector is not None:
+            # Memory can be disabled while optional host-tool injection remains
+            # enabled; still build the observed wire message for the audit.
+            message = tool_collector.message(req.tools)
+        if message is not None:
+            if additions:
+                message["tool_calls"] = [*(message.get("tool_calls") or []), *additions]
+            # The observer/audit record must include proxy-added calls as well
+            # as A's original text, so the next B review sees the actual wire
+            # message and the event is not misleadingly incomplete.
+            audit["output"] = _messages_text([message], get_settings().max_shadow_input_chars)
+            if collector is not None:
+                await save_memory([message])
+        for chunk in terminal:
+            yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
         audit["status"] = "SUCCESS"
     except asyncio.CancelledError:
         audit["status"] = "INCOMPLETE"
@@ -301,7 +352,7 @@ async def chat_completions(
         return await director.response(payload, request, principal, run_id, external_run, corr,
                                        target, get_registry(), s, memory_space, observe)
     # No transaction or B model call is held across A's provider operation.
-    context = ObserverContext(memory_status="disabled", claim_status="disabled", status="disabled")
+    context = ObserverContext(memory_status="disabled", claim_status="disabled", deception_status="disabled", status="disabled")
     if observe and stage_mod.injection_enabled(s.rollout_stage):
         # Forced runtime hook, on EVERY eligible call, including calls after tools.
         # It reloads completed memory even when the client omits it from history.
@@ -309,7 +360,9 @@ async def chat_completions(
     req = resolve_request(payload)
     monitoring = observe and s.observation_reminder
     try:
-        shared = await load_memory(principal.tenant_id, memory_space, messages)
+        shared = await load_memory(principal.tenant_id, memory_space, messages,
+                                   include_observer_notes=observe and stage_mod.injection_enabled(s.rollout_stage)
+                                   and not context.knowledge_source_call)
     except Exception:
         raise HTTPException(503, "Shared memory is unavailable; no model was invoked.") from None
     req.messages = _effective_messages(messages, context, monitoring, s.monitoring_role, shared_text=shared.text)
@@ -330,7 +383,10 @@ async def chat_completions(
         await record_memory(principal.tenant_id, memory_space, run_id, audit["call_id"], messages, responses)
     background = BackgroundTask(_persist_observation, principal.tenant_id, run_id,
                                 external_run, corr, alias, context_text, audit, observe,
-                                latest_user_text=latest_user_text)
+                                latest_user_text=latest_user_text,
+                                host_tools=offered_tools(req.tools, s.max_shadow_input_chars // 4)
+                                if observe and s.b_host_tools_enabled else [])
+    inject_tools = injector(context, req, messages, principal.tenant_id, run_id, floor, attempt, s, audit)
     headers = {"X-Dual-Lobe-Run-Id": run_id, "X-Dual-Lobe-Observer": context.status,
                "X-Dual-Lobe-Call-Id": audit["call_id"],
                "X-Dual-Lobe-Memory": (f"v{context.memory_version}" if context.memory_text else context.memory_status),
@@ -339,9 +395,12 @@ async def chat_completions(
                "X-Dual-Lobe-Monitoring": "on" if monitoring else "off",
                "X-Dual-Lobe-Memory-Space": memory_space or "off",
                "X-Dual-Lobe-Shared-Entries": str(len(shared.entry_ids))}
+    if context.review_source_call:
+        headers["X-Dual-Lobe-Review-Call-Id"] = context.review_source_call
+        headers["X-Dual-Lobe-Review-Age-Seconds"] = str(context.review_age_seconds)
     if req.stream:
         return StreamingResponse(
-            _stream_body(adapter, req, alias, audit, save_memory if memory_space else None), media_type="text/event-stream",
+            _stream_body(adapter, req, alias, audit, save_memory if memory_space else None, inject_tools), media_type="text/event-stream",
             headers={**headers, "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             background=background,
         )
@@ -350,10 +409,20 @@ async def chat_completions(
         async with asyncio.timeout(s.a_timeout):
             data = await _call_a_with_retry(lambda: adapter.buffered(req), s.a_retries)
         data["model"] = alias
-        await save_memory([c["message"] for c in data["choices"]])
         audit["output"] = _messages_text(
             [c["message"] for c in data["choices"]], s.max_shadow_input_chars
         )
+        if inject_tools and len(data["choices"]) == 1:
+            choice = data["choices"][0]
+            if choice.get("finish_reason") in ("stop", "tool_calls"):
+                calls = await inject_tools(choice["message"])
+                if calls:
+                    choice["message"]["tool_calls"] = [*(choice["message"].get("tool_calls") or []), *calls]
+                    choice["finish_reason"] = "tool_calls"
+        audit["output"] = _messages_text(
+            [c["message"] for c in data["choices"]], s.max_shadow_input_chars
+        )
+        await save_memory([c["message"] for c in data["choices"]])
         audit["usage"] = data.get("usage")
         audit["status"] = "SUCCESS"
         status_code = 200

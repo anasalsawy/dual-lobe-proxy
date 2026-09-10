@@ -1,4 +1,4 @@
-"""One bounded tool-free review. No verifier, tools, holds, or truth verdicts."""
+"""One bounded background review; optional host calls remain app-owned."""
 from __future__ import annotations
 
 import asyncio
@@ -15,8 +15,10 @@ from ..core.settings import get_settings
 from ..provider.adapters import NormalizedRequest, response_dict
 from ..provider.registry import get_registry
 from ..state import repositories as repo
+from ..state.memory import attach_observer_notes
 from . import prompts
-from .channels import completed_memory, memory_status, reviewed_state
+from .host_tools import make_plan
+from .channels import completed_memory, knowledge_snapshot, memory_status, reviewed_state
 from .protocol import Review, ground_review, parse_review, usable_state
 
 LOG = logging.getLogger("dual_lobe.b.context_shadow")
@@ -24,12 +26,10 @@ LOG = logging.getLogger("dual_lobe.b.context_shadow")
 
 async def _call_b(target_alias: str, prompt: str) -> str:
     s = get_settings()
-    instructions = prompts.B_SYSTEM
-    if not s.context_memory_enabled:
-        instructions += "\nContext memory is disabled: return empty goal, questions, next_step and context_notes."
-    if not s.claim_checks_enabled:
-        instructions += "\nClaim checking is disabled: return an empty concerns array."
-    # No search or tools. Timeout includes the entire provider operation.
+    instructions = prompts.observer_instructions(s)
+    # B receives definitions as data and returns optional requests in JSON; the
+    # provider call itself never receives executable tools. Timeout covers the
+    # entire observer operation.
     async with asyncio.timeout(s.b_timeout):
         response = await get_registry().adapter(target_alias).buffered(
             NormalizedRequest(
@@ -41,7 +41,10 @@ async def _call_b(target_alias: str, prompt: str) -> str:
             )
         )
     data = response_dict(response)
-    return data["choices"][0]["message"].get("content") or ""
+    choice = data["choices"][0]
+    if choice.get("finish_reason") not in (None, "stop") or choice["message"].get("tool_calls") or choice["message"].get("refusal"):
+        raise ValueError("observer response is incomplete or unsupported")
+    return choice["message"].get("content") or ""
 
 
 CORRECTION_NOTE = (
@@ -50,29 +53,40 @@ CORRECTION_NOTE = (
 )
 
 
-async def _obtain_review(target_alias: str, prompt: str) -> Review:
-    """One bounded review with at most one corrective worker-side retry.
+class ReviewBudgetExceeded(RuntimeError):
+    pass
 
-    Retries only parse/grounding failures (ValueError) because a re-ask can fix
-    them. Transport errors (429/5xx/timeouts) are honest provider failures and
-    must not double-fire against limits; they degrade immediately.
-    """
-    raw = await _call_b(target_alias, prompt)
-    try:
-        return ground_review(parse_review(raw), prompt)
-    except ValueError as exc:
-        LOG.warning("Observer review invalid once; corrective retry error_type=%s",
-                    type(exc).__name__)
-        # Runs only between turns; A is never blocked on this second attempt.
-        raw = await _call_b(target_alias, prompt + CORRECTION_NOTE.format(error=str(exc)[:300]))
-        return ground_review(parse_review(raw), prompt)
+
+async def _obtain_review(target_alias: str, prompt: str, tenant_id: int = 0) -> Review:
+    """Two attempts at most, each admitted, within ONE overall review deadline."""
+    s = get_settings()
+    request_prompt = prompt
+    async with asyncio.timeout(s.b_timeout):
+        for attempt in range(2):
+            allowed, _ = await _local_sliding(f"b:tenant:{tenant_id}", 60, s.b_rpm_limit)
+            if not allowed:
+                raise ReviewBudgetExceeded("observer attempt budget exhausted")
+            # Provider/transport failures are not retried. Only a successfully
+            # received but invalid review can receive one corrective re-ask.
+            raw = await _call_b(target_alias, request_prompt)
+            try:
+                result = ground_review(parse_review(redact.redact_payload(raw)), prompt)
+                if result.knowledge_dropped:
+                    LOG.warning("Observer dropped invalid/excess optional guidance count=%s", result.knowledge_dropped)
+                return result
+            except ValueError as exc:
+                if attempt:
+                    raise
+                LOG.warning("Observer review invalid once; corrective retry error_type=%s", type(exc).__name__)
+                # No raw model text, credentials, or validation input in diagnostics.
+                request_prompt = prompt + CORRECTION_NOTE.format(error=type(exc).__name__)
 
 
 async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
                            tenant_id: int) -> dict[str, Any]:
     # Caller owns the transaction and per-run lock, including marking the job done.
     s = get_settings()
-    payload = job.get("payload") or {}
+    payload = redact.redact_payload(job.get("payload") or {})
     run_id = str(payload.get("run_id") or job.get("run_id") or "")
     observed_at = float(payload.get("observed_at") or 0)
     latest = await repo.latest_b_state(session, run_id)
@@ -88,12 +102,6 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
         reason = "superseded"
     elif now - float(previous.get("reviewed_at", 0)) < s.b_cooldown_seconds:
         reason = "cooldown"
-    else:
-        allowed, _ = await _local_sliding(
-            f"b:tenant:{tenant_id}", 60, s.b_rpm_limit, weight=1
-        )
-        if not allowed:
-            reason = "budget"
     if reason:
         await repo.append_event(session, "shadow_skipped", tenant_id, run_id=run_id,
                                 actor="lobe-b", payload={"reason": reason})
@@ -112,6 +120,8 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
     prior_memory = memory.content.model_dump() if s.context_memory_enabled and memory_status(
         memory, floor, attempt, s.context_memory_ttl_seconds,
     ) == "available" else None
+    if prior_memory and not s.context_enrichment_enabled:
+        prior_memory.pop("knowledge_notes", None)
     prior_claims = None
     if s.claim_checks_enabled and usable_state(previous, floor, attempt, s.b_state_ttl_seconds):
         prior_claims = previous.get("claim_review") or {"concerns": (previous.get("review") or {}).get("concerns", [])}
@@ -122,16 +132,13 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
         json.dumps({"context_memory": prior_memory, "claim_review": prior_claims}, ensure_ascii=False),
         max_chars=s.max_shadow_input_chars,
         latest_request=str(payload.get("latest_user_text") or ""),
+        host_tools=payload.get("host_tools", []) if s.b_host_tools_enabled else [],
     )
     try:
-        review = await _obtain_review("lobe-b", prompt)
-        if review.deception_level == "RED" and not review.concerns:
-            # RED must always ship explicit wording; degrade the meter, never hide it.
-            LOG.warning("Deception RED without wording downgraded to YELLOW run=%s", run_id)
-            review = review.model_copy(update={"deception_level": "YELLOW"})
+        review = await _obtain_review("lobe-b", prompt, tenant_id)
     except Exception as exc:
         # Do not leak provider errors/keys or mislabel invalid JSON as success.
-        LOG.warning("Observer degraded run=%s error_type=%s after_retry",
+        LOG.warning("Observer degraded run=%s error_type=%s",
                     run_id, type(exc).__name__)
         memory = completed_memory(previous)
         await repo.save_b_state(session, tenant_id, run_id, {
@@ -139,7 +146,8 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
             "oversight_status": "degraded", "observed_at": observed_at,
             "reviewed_at": time.time(), "floor_id": payload.get("floor_id", ""),
             "attempt_id": payload.get("attempt_id", 1),
-            "deception_level": previous.get("deception_level"),
+            "deception_level": "GREEN" if s.claim_checks_enabled else None,
+            "source_call": str(payload.get("source_call", "")),
             "context_memory": memory.model_dump() if memory else None,
             "claim_review": None,
             "reason": type(exc).__name__,
@@ -150,9 +158,20 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
 
     state = reviewed_state(previous, review, {**payload, "run_id": run_id},
                            memory_enabled=s.context_memory_enabled,
-                           claims_enabled=s.claim_checks_enabled)
+                           claims_enabled=s.claim_checks_enabled,
+                           enrichment_enabled=s.context_enrichment_enabled,
+                           source_model=prompts.head_tail(get_registry().target("lobe-b").model, 256))
+    offered = json.loads(prompt.split(prompts.EVIDENCE_MARKER, 1)[1])["HOST_TOOLS"]
+    try:
+        state["host_tool_plan"] = make_plan(review, offered) if s.b_host_tools_enabled else []
+    except (KeyError, TypeError, ValueError):
+        state["host_tool_plan"] = []
     concerns = state["claim_review"]["concerns"]
     await repo.save_b_state(session, tenant_id, run_id, state)
+    snapshot = knowledge_snapshot(completed_memory(state))
+    space = payload.get("memory_space")
+    if snapshot and space and s.shared_memory_enabled and s.context_memory_enabled and s.context_enrichment_enabled:
+        await attach_observer_notes(session, tenant_id, space, run_id, snapshot)
     if s.context_memory_enabled:
         await repo.append_event(session, "context_memory_updated", tenant_id, run_id=run_id,
                                 actor="lobe-b", payload={

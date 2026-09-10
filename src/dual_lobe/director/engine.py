@@ -10,7 +10,9 @@ import uuid
 from contextlib import aclosing
 from dataclasses import replace
 
-from ..b.prompts import head_tail
+from ..b.prompts import COLOR_POLICY, ENRICHMENT_POLICY, head_tail
+from ..b.host_tools import offered_tools, make_plan, candidates
+from ..core.redact import redact_payload
 from ..provider.adapters import NormalizedRequest, response_dict
 from .protocol import (B_INSTRUCTIONS, Completion, byte_size, observed_messages,
                        parse_decision)
@@ -20,10 +22,11 @@ LOG = logging.getLogger("dual_lobe.director")
 
 class DirectorLoop:
     def __init__(self, state, store, token, req, a, b, settings, compose_a, admit,
-                 record_a):
+                 record_a, *, admit_b=None):
         self.state, self.store, self.token = state, store, token
         self.req, self.a, self.b, self.s = req, a, b, settings
         self.compose_a, self.admit, self.record_a = compose_a, admit, record_a
+        self.admit_b = admit_b or admit
         self.released = False
         self.visible = ""
         self.response_id = "chatcmpl-director-" + uuid.uuid4().hex
@@ -158,12 +161,20 @@ class DirectorLoop:
             # Review the goal and visible transcript, retaining the first user
             # request and latest output. Long history is explicitly excerpted.
             data = observed_messages(messages) + [message]
-            prompt = head_tail(json.dumps(data, ensure_ascii=False), self.s.max_shadow_input_chars)
-            b_req = NormalizedRequest(messages=[{"role": "system", "content": B_INSTRUCTIONS},
+            exposed = offered_tools(self.req.tools, self.s.max_shadow_input_chars // 4) if self.s.b_host_tools_enabled else []
+            observation = {"TRANSCRIPT": head_tail(json.dumps(redact_payload(data), ensure_ascii=False),
+                self.s.max_shadow_input_chars // 2), "HOST_TOOLS": redact_payload(exposed)}
+            while len(json.dumps(observation, ensure_ascii=False)) > self.s.max_shadow_input_chars:
+                observation["TRANSCRIPT"] = head_tail(observation["TRANSCRIPT"], len(observation["TRANSCRIPT"]) // 2)
+            prompt = json.dumps(observation, ensure_ascii=False)
+            instructions = B_INSTRUCTIONS + "\n\n" + COLOR_POLICY
+            if self.s.context_memory_enabled and self.s.context_enrichment_enabled:
+                instructions += "\n\n" + ENRICHMENT_POLICY
+            b_req = NormalizedRequest(messages=[{"role": "system", "content": instructions},
                                                 {"role": "user", "content": prompt}],
                                       temperature=0, max_tokens=self.s.director_b_max_tokens,
                                       timeout=self.s.b_timeout)
-            await self.admit(b_req.messages)
+            await self.admit_b(b_req.messages)
             self.state["b_calls"] += 1
             self.state["phase"] = "b_inflight"
             await self.save()
@@ -174,10 +185,29 @@ class DirectorLoop:
             yield self.text("\n\nB (director):\n" + decision.message + "\n")
             self.state["transcript"].append({"role": "user", "name": "director_b",
                                               "content": decision.message})
+            self.state["last_b_assessment"] = {"source_call": call_id, "observed_at": time.time(),
+                "deception_level": decision.deception_level, "reason": decision.deception_reason}
             if decision.action == "stop":
                 yield self.text("\n[Director stopped: B chose to end the exchange; this is an assessment, not independent verification.]\n")
                 await self.finish("stopped", "b_stop")
                 yield {"kind": "end", "finish_reason": "stop"}
+                return
+            # One optional B tool batch per real-user invocation. Host execution
+            # resumes A with the actual results through the existing checkpoint.
+            extra = []
+            if exposed and not self.state.get("b_tool_batches", 0):
+                try:
+                    extra = candidates(make_plan(decision, exposed), self.req, {"content": ""})
+                except Exception:
+                    pass
+            if extra:
+                self.state["b_tool_batches"] = 1
+                self.state["transcript"].append({"role": "assistant", "content": None, "tool_calls": extra})
+                self.state["pending_tools"] = [c["id"] for c in extra]
+                yield self.text("\n[Returning B's information requests to your app's tool loop.]\n")
+                await self.finish("waiting_tools", "observer_tool_handoff", extra)
+                yield {"kind": "tools", "tool_calls": extra}
+                yield {"kind": "end", "finish_reason": "tool_calls"}
                 return
 
 

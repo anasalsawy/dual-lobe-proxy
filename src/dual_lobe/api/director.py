@@ -87,11 +87,13 @@ async def response(payload, request, principal, run_id, external_run, corr,
     receipts = {}
 
     async def compose_a(messages):
-        context = ObserverContext(memory_status="disabled", claim_status="disabled", status="disabled")
+        context = ObserverContext(memory_status="disabled", claim_status="disabled", deception_status="disabled", status="disabled")
         if observe and stage.injection_enabled(settings.rollout_stage):
             context = await chat._read_context(principal.tenant_id, run_id,
                                                str(corr.get("floor", "")), int(corr.get("attempt", 1)))
-        shared = await load_memory(principal.tenant_id, memory_space, messages)
+        shared = await load_memory(principal.tenant_id, memory_space, messages,
+                                   include_observer_notes=observe and stage.injection_enabled(settings.rollout_stage)
+                                   and not context.knowledge_source_call)
         receipts.update(**context.receipt(), monitoring=True,
                         shared_memory_space=memory_space, shared_entry_ids=list(shared.entry_ids))
         return chat._effective_messages(messages, context, True, settings.monitoring_role,
@@ -102,6 +104,12 @@ async def response(payload, request, principal, run_id, external_run, corr,
         if not result.allowed:
             raise RuntimeError("Director admission budget reached")
 
+    async def admit_b(messages):
+        await admit(messages)
+        allowed, _ = await limits._local_sliding(f"b:tenant:{principal.tenant_id}", 60, settings.b_rpm_limit)
+        if not allowed:
+            raise RuntimeError("Director B attempt budget reached")
+
     async def record_a(call_id, messages, message, usage, latency_ms):
         # Shared memory is committed before returning executable tool calls or
         # declaring this segment complete. The observer remains best effort.
@@ -110,20 +118,23 @@ async def response(payload, request, principal, run_id, external_run, corr,
                  "status": "SUCCESS", "output": chat._messages_text([message], settings.max_shadow_input_chars),
                  "latency_ms": latency_ms, "observed_at": time.time(), "usage": usage,
                  "observer_delivery": copy.deepcopy(receipts)}
-        observations.append((chat._messages_text(messages, settings.max_shadow_input_chars), audit))
+        observations.append((chat._messages_text(redact_payload(messages), settings.max_shadow_input_chars),
+                             chat._latest_user_text(messages), audit))
 
     async def persist_observations():
-        for context_text, audit in observations:
+        for context_text, latest_user_text, audit in observations:
             await chat._persist_observation(principal.tenant_id, run_id, external_run, corr,
-                                            "lobe-a", context_text, audit, observe)
+                                            "lobe-a", context_text, audit, observe,
+                                            latest_user_text=latest_user_text)
 
     req = resolve_request(payload)
     loop = engine.DirectorLoop(state, store, token, req, registry.adapter("lobe-a"),
-                               registry.adapter("lobe-b"), settings, compose_a, admit, record_a)
+                               registry.adapter("lobe-b"), settings, compose_a, admit, record_a, admit_b=admit_b)
     background = BackgroundTask(persist_observations)
     headers = {"X-Dual-Lobe-Run-Id": run_id, "X-Dual-Lobe-Director": "on",
                "X-Dual-Lobe-Director-Cycle": state["cycle_id"], "X-Dual-Lobe-Memory": "per-turn",
-               "X-Dual-Lobe-Claims": "per-turn", "X-Dual-Lobe-Monitoring": "on",
+               "X-Dual-Lobe-Claims": "per-turn", "X-Dual-Lobe-Deception": "per-turn",
+               "X-Dual-Lobe-Monitoring": "on",
                "X-Dual-Lobe-Memory-Space": memory_space or "off"}
     if req.stream:
         return ClosingStreamingResponse(

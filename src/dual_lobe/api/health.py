@@ -47,6 +47,6 @@ async def verify(
     principal: auth.Principal = Depends(auth.require_scope(auth.SCOPE_STATE_READ)),
 ):
     raise HTTPException(status_code=410, detail=(
-        "Automatic file verification is retired. B is tool-free and advisory; "
+        "Automatic file verification is retired. B is advisory and cannot execute tools; "
         "send caller-reported results to /v1/dual-lobe/events."
     ))

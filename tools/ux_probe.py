@@ -1,110 +1,151 @@
-"""A/B UX probe for the dual-lobe proxy.
+"""Reproducible text-only UX probe; failures never become successful samples.
 
-Sends the same multi-turn script to either the live proxy gateway or a provider
-directly, and reports per-turn latency/shape/flow metrics plus the proxy's
-observer delivery headers and stored B state. Repro harness for the assessment
-in docs/UX_ASSESSMENT_WITH_VS_WITHOUT.md.
-
-Usage:
-    python -m tools.ux_probe --url http://127.0.0.1:8801 --key <proxy-key> --path /v1/chat/completions --state 1 --observe-delay 12 --questions q.txt
-    python -m tools.ux_probe --url https://generativelanguage.googleapis.com/v1beta/openai --key <gemini-key> --path /chat/completions --questions q.txt
+Examples (keys in environment, not command history):
+    python -m tools.ux_probe --url http://127.0.0.1:8801 --path /v1/chat/completions --model lobe-a --run probe-1 --state --observe-delay 12 --questions tools/evals/questions.txt
+    python -m tools.ux_probe --url https://provider.example/v1 --model actual-model-id --key-env PROVIDER_API_KEY --questions tools/evals/questions.txt
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import os
 import time
+from pathlib import Path
 
 import httpx
 
+from dual_lobe.core.redact import redact_payload
+
 
 async def stream_turn(client: httpx.AsyncClient, url: str, messages: list[dict],
-                      model: str) -> tuple[dict, dict]:
+                      model: str, *, temperature: float = 0) -> tuple[dict, dict]:
     started = time.monotonic()
-    content = ""
-    first_token_ms = None
+    content, first_token_ms = "", None
     tokens_in = tokens_out = None
-    receipts = {}
-    async with client.stream("POST", url,
-                             json={"model": model, "messages": messages, "stream": True}) as r:
-        for k, v in r.headers.items():
-            if k.startswith("x-dual-lobe"):
-                receipts[k] = v
+    receipts, finished, done = {}, False, False
+    async with client.stream("POST", url, json={"model": model, "messages": messages,
+                                               "temperature": temperature, "stream": True}) as r:
+        r.raise_for_status()
+        receipts = {k: v for k, v in r.headers.items() if k.startswith("x-dual-lobe")}
+        lines, size = [], 0
         async for line in r.aiter_lines():
-            if not line.startswith("data:"):
+            if line.startswith("data:"):
+                value = line[5:].lstrip()
+                size += len(value)
+                if size > 2 * 1024 * 1024:
+                    raise ValueError("oversize SSE event")
+                lines.append(value)
                 continue
-            data = line[5:].strip()
-            if data == "[DONE]":
+            if line or not lines:
+                continue
+            data = "\n".join(lines)
+            lines, size = [], 0
+            if data.strip() == "[DONE]":
+                done = True
                 break
             chunk = json.loads(data)
-            if "usage" in chunk:
-                tokens_in = chunk["usage"].get("prompt_tokens") or tokens_in
-                tokens_out = chunk["usage"].get("completion_tokens") or tokens_out
+            if not isinstance(chunk, dict) or "error" in chunk:
+                raise ValueError("upstream SSE error or invalid event")
+            usage = chunk.get("usage") or {}
+            tokens_in = usage.get("prompt_tokens", tokens_in)
+            tokens_out = usage.get("completion_tokens", tokens_out)
             for choice in chunk.get("choices") or []:
+                if choice.get("index", 0) != 0 or finished:
+                    raise ValueError("unexpected choice or content after finish")
                 delta = choice.get("delta") or {}
+                if delta.get("tool_calls") or delta.get("refusal"):
+                    raise ValueError("text probe cannot complete a tool handoff or refusal")
                 text = delta.get("content") or ""
                 if text and first_token_ms is None:
                     first_token_ms = (time.monotonic() - started) * 1000
                 content += text
-    total_ms = (time.monotonic() - started) * 1000
-    return ({"ttft_ms": round(first_token_ms or -1, 1), "total_ms": round(total_ms, 1),
+                finish = choice.get("finish_reason")
+                if finish is not None:
+                    if finish != "stop":
+                        raise ValueError("truncated or non-text completion")
+                    finished = True
+        if lines or not done or not finished or not content.strip():
+            raise ValueError("incomplete or empty completion")
+    return ({"ok": True, "ttft_ms": round(first_token_ms, 1),
+             "total_ms": round((time.monotonic() - started) * 1000, 1),
              "tokens_in": tokens_in, "tokens_out": tokens_out,
              "words": len(content.split()), "text": content.strip()}, receipts)
 
 
-# usage is optional; tokens stay None when the provider omits it
 async def run(args: argparse.Namespace) -> None:
-    questions = [ln for ln in (open(args.questions).read().splitlines()) if ln.strip()]
-    messages: list[dict] = []
-    base = args.url.rstrip("/")
+    questions = [line for line in Path(args.questions).read_text().splitlines() if line.strip()]
+    if not questions:
+        raise ValueError("question set is empty")
+    messages = []
     headers = {"Authorization": "Bearer " + args.key}
     if args.run:
         headers["X-DL-Run-ID"] = args.run
-    async with httpx.AsyncClient(base_url=base, headers=headers,
+    if args.memory_id is not None:
+        headers["X-DL-Memory-ID"] = args.memory_id
+
+    def emit(record):
+        encoded = json.dumps(redact_payload(record), ensure_ascii=False)
+        # CLI-provided keys need not be present in the service's environment.
+        print(encoded.replace(args.key, "[REDACTED]"), flush=True)
+
+    emit({"kind": "setup", "model": args.model, "run": args.run, "memory_id": args.memory_id,
+          "temperature": args.temperature, "observe_delay": args.observe_delay,
+          "questions": questions, "recorded_at": time.time(),
+          "metadata": json.loads(Path(args.metadata).read_text()) if args.metadata else {}})
+    async with httpx.AsyncClient(base_url=args.url.rstrip("/"), headers=headers,
                                  timeout=httpx.Timeout(240, connect=10)) as client:
-        for i, q in enumerate(questions, 1):
-            messages.append({"role": "user", "content": q})
-            result, receipts = await stream_turn(client, args.path, messages, args.model)
+        for i, question in enumerate(questions, 1):
+            messages.append({"role": "user", "content": question})
+            try:
+                result, receipts = await stream_turn(client, args.path, messages, args.model,
+                                                      temperature=args.temperature)
+            except Exception as exc:
+                emit({"turn": i, "kind": "question", "q": question, "ok": False,
+                      "error_type": type(exc).__name__})
+                raise SystemExit(1) from None
             messages.append({"role": "assistant", "content": result["text"]})
-            record = {"turn": i, "kind": "question"} | {"q": q} | result
-            if receipts:
-                record["receipts"] = {"memory": receipts.get("x-dual-lobe-memory"),
-                                      "claims": receipts.get("x-dual-lobe-claims"),
-                                      "monitoring": receipts.get("x-dual-lobe-monitoring")}
-            print(json.dumps(record, ensure_ascii=False))
-            if args.state and args.run:
-                resp = await client.get("/v1/dual-lobe/state/" + args.run)
-                if resp.status_code == 200:
-                    s = resp.json()
-                    payload = s.get("payload") or {}
-                    mem = (payload.get("context_memory") or {}).get("content") or {}
-                    claims = (payload.get("claim_review") or {}).get("concerns", [])
-                    print(json.dumps({"turn": i, "kind": "state",
-                                      "revision": s.get("revision"),
-                                      "oversight_status": payload.get("oversight_status"),
-                                      "memory_version": (payload.get("context_memory") or {}).get("version"),
-                                      "goal": mem.get("goal", ""),
-                                      "next_step": mem.get("next_step", ""),
-                                      "n_claims": len(claims)}, ensure_ascii=False))
-                else:
-                    print(json.dumps({"turn": i, "kind": "state", "error": resp.status_code},
-                                     ensure_ascii=False))
-            if args.observe_delay and i < len(questions):
-                time.sleep(args.observe_delay)
+            emit({"turn": i, "kind": "question", "q": question, **result, "receipts": receipts})
+            # Include the final turn; inspect AFTER the optional observer pause.
+            if args.observe_delay:
+                await asyncio.sleep(args.observe_delay)
+            if args.state:
+                try:
+                    response = await client.get("/v1/dual-lobe/state/" + args.run)
+                    response.raise_for_status()
+                    state = response.json()
+                except Exception as exc:
+                    emit({"turn": i, "kind": "state", "ok": False, "error_type": type(exc).__name__})
+                    continue
+                payload = state.get("payload") or {}
+                source = payload.get("source_call")
+                emit({"turn": i, "kind": "state", "ok": True, "revision": state.get("revision"),
+                      "review_matches_turn": bool(source and source == receipts.get("x-dual-lobe-call-id")),
+                      "payload": payload})
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--url", required=True)
-    p.add_argument("--key", required=True)
-    p.add_argument("--path", default="/chat/completions")
-    p.add_argument("--model", default="gemini-3.5-flash-lite")
-    p.add_argument("--questions", required=True)
-    p.add_argument("--run", default=None)
-    p.add_argument("--state", action="store_true")
-    p.add_argument("--observe-delay", type=float, default=0.0)
-    args = p.parse_args()
-    import asyncio
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--url", required=True)
+    parser.add_argument("--key", help="Prefer --key-env to avoid shell-history exposure")
+    parser.add_argument("--key-env", default="DUAL_LOBE_PROXY_KEY")
+    parser.add_argument("--path", default="/chat/completions")
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--questions", required=True)
+    parser.add_argument("--metadata", help="JSON file containing revision, arm label and non-secret server settings")
+    parser.add_argument("--run")
+    parser.add_argument("--memory-id")
+    parser.add_argument("--state", action="store_true")
+    parser.add_argument("--observe-delay", type=float, default=0)
+    parser.add_argument("--temperature", type=float, default=0)
+    args = parser.parse_args()
+    args.key = args.key or os.environ.get(args.key_env)
+    if not args.key:
+        parser.error("set the requested key environment variable or supply --key")
+    if args.state and not args.run:
+        parser.error("--state requires --run")
+    if not 0 <= args.observe_delay <= 60:
+        parser.error("--observe-delay must be between 0 and 60 seconds")
     asyncio.run(run(args))
 
 
