@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 from ..b.channels import ObserverContext
+from ..b.artifacts import bounded_artifacts
 from ..core import stage
 from ..core.engine import tenant_session
 from ..core.redact import redact_payload
@@ -85,6 +86,8 @@ async def response(payload, request, principal, run_id, external_run, corr,
 
     observations = []
     receipts = {}
+    artifacts = bounded_artifacts(payload.get("artifacts"), settings.max_artifact_chars)
+    receipts["artifact_count"] = len(artifacts)
 
     async def compose_a(messages):
         context = ObserverContext(memory_status="disabled", claim_status="disabled", deception_status="disabled", status="disabled")
@@ -119,17 +122,22 @@ async def response(payload, request, principal, run_id, external_run, corr,
                  "latency_ms": latency_ms, "observed_at": time.time(), "usage": usage,
                  "observer_delivery": copy.deepcopy(receipts)}
         observations.append((chat._messages_text(redact_payload(messages), settings.max_shadow_input_chars),
-                             chat._latest_user_text(messages), audit))
+                             chat._latest_user_text(messages), audit, artifacts,
+                             chat._tool_results(messages, settings.max_shadow_input_chars)))
 
     async def persist_observations():
-        for context_text, latest_user_text, audit in observations:
+        for context_text, latest_user_text, audit, observed_artifacts, observed_tool_results in observations:
             await chat._persist_observation(principal.tenant_id, run_id, external_run, corr,
                                             "lobe-a", context_text, audit, observe,
-                                            latest_user_text=latest_user_text)
+                                            latest_user_text=latest_user_text,
+                                            artifacts=observed_artifacts,
+                                            tool_results=observed_tool_results)
 
     req = resolve_request(payload)
     loop = engine.DirectorLoop(state, store, token, req, registry.adapter("lobe-a"),
-                               registry.adapter("lobe-b"), settings, compose_a, admit, record_a, admit_b=admit_b)
+                               registry.adapter("lobe-b"), settings, compose_a, admit, record_a,
+                               admit_b=admit_b,
+                               artifacts=artifacts)
     background = BackgroundTask(persist_observations)
     headers = {"X-Dual-Lobe-Run-Id": run_id, "X-Dual-Lobe-Director": "on",
                "X-Dual-Lobe-Director-Cycle": state["cycle_id"], "X-Dual-Lobe-Memory": "per-turn",
