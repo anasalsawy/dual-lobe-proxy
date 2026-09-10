@@ -49,7 +49,7 @@ def test_three_paths_are_distinct_and_user_input_is_unchanged():
     assert result[1] == {"role": "system", "content": prompts.OBSERVATION_REMINDER}
     deception, memory, claims = result[2:5]
     assert deception["name"] == "observer_deception"
-    assert deception["content"].startswith("Observer deception meter")
+    assert deception["content"].startswith("Observer assessment")
     assert memory["name"] == "observer_memory" and claims["name"] == "observer_claims"
     assert memory["role"] == claims["role"] == deception["role"] == "user"
     assert "Windows" in memory["content"] and "All tests passed." not in memory["content"]
@@ -114,16 +114,17 @@ def test_legacy_state_converts_without_mutating_or_renewing_it():
     assert "deception_level" not in memory.content.model_dump()
 
 
-def test_deception_level_lives_outside_memory_and_is_delivered():
-    state = reviewed_state({}, Review.model_validate({
-        "goal": "g", "deception_level": "YELLOW", "questions": [], "next_step": "",
-        "context_notes": [], "concerns": []}), {"run_id": "run", "observed_at": time.time()})
-    assert state["deception_level"] == "YELLOW"
+def test_model_color_is_preserved_and_attributed():
+    state = snapshot(observed_at=1000.)
+    # B's choice is authoritative; code does not recalculate it from concerns.
+    state["deception_level"] = "GREEN"
+    context = prepare_context(state, "f1", 1, Settings(_env_file=None), now=1090.)
     assert "deception_level" not in state["context_memory"]["content"]
-    context = prepare_context(state, "", 1, Settings(_env_file=None))
-    assert context.deception_status == "YELLOW"
-    assert context.deception_text == "Observer deception meter for the last answer: YELLOW."
-    assert context.receipt()["deception_status"] == "YELLOW"
+    assert context.deception_status == "GREEN"
+    assert "call-1" in context.deception_text and "90.0s" in context.deception_text
+    assert "last answer" not in context.deception_text
+    assert context.receipt()["review_source_call"] == "call-1"
+    assert context.receipt()["review_observed_at"] == 1000.
 
 
 async def test_degraded_worker_preserves_completed_memory_without_renewal(monkeypatch):

@@ -5,13 +5,39 @@ import json
 import time
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, StringConstraints, ValidationError, model_validator
 
 from .prompts import EVIDENCE_MARKER
 
 Short = Annotated[str, StringConstraints(max_length=400)]
 
 DeceptionLevel = Literal["GREEN", "YELLOW", "RED"]
+
+
+class KnowledgeNote(BaseModel):
+    """A question, useful domain knowledge, or both; never execution evidence."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    topic: Annotated[str, StringConstraints(min_length=1, max_length=80)]
+    kind: Literal["background", "hypothesis", "question"]
+    insight: Annotated[str, StringConstraints(max_length=300)] = ""
+    question: Annotated[str, StringConstraints(max_length=240)] = ""
+    relevance: Annotated[str, StringConstraints(min_length=1, max_length=180)]
+    application: Annotated[str, StringConstraints(max_length=180)] = ""
+
+    @model_validator(mode="after")
+    def has_contribution(self):
+        if not (self.insight.strip() or self.question.strip()):
+            raise ValueError("a knowledge note needs an insight or question")
+        return self
+
+
+class KnowledgeSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    origin: Literal["model_generated_guidance"] = "model_generated_guidance"
+    source_call: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    source_model: Annotated[str, StringConstraints(min_length=1, max_length=256)]
+    observed_at: FiniteFloat
+    notes: list[KnowledgeNote] = Field(max_length=2)
 
 
 class Concern(BaseModel):
@@ -23,14 +49,63 @@ class Concern(BaseModel):
     suggestion: Short
 
 
+class HostToolRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    name: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    arguments: dict
+
+
+def parse_tool_requests(raw):
+    accepted = []
+    if isinstance(raw, list):
+        for item in raw[:2]:
+            try:
+                parsed = HostToolRequest.model_validate(item)
+                if len(json.dumps(parsed.arguments, allow_nan=False)) <= 2000:
+                    accepted.append(parsed)
+            except (TypeError, ValueError):
+                pass
+    return accepted
+
+
 class Review(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     goal: Short
-    deception_level: DeceptionLevel = "GREEN"
+    # B owns the judgment. Missing color in an old record means default GREEN.
+    deception_level: DeceptionLevel | None = Field(default=None, exclude=True)
+    deception_reason: Annotated[str, StringConstraints(max_length=300)] = Field(default="", exclude=True)
     questions: list[Short] = Field(max_length=2)
     next_step: Annotated[str, StringConstraints(max_length=500)]
     context_notes: list[Short] = Field(default_factory=list, max_length=2)
+    knowledge_notes: list[KnowledgeNote] = Field(default_factory=list, max_length=2)
+    knowledge_dropped: int = Field(default=0, exclude=True)
+    tool_requests: list[HostToolRequest] = Field(default_factory=list, max_length=2, exclude=True)
     concerns: list[Concern] = Field(max_length=3)
+
+    @model_validator(mode="before")
+    @classmethod
+    def optional_guidance(cls, data):
+        # A malformed optional note must not erase valid claim findings. Do not
+        # repair, infer, or default the required concerns field.
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        raw = data.get("knowledge_notes", [])
+        accepted, dropped = [], 0
+        if not isinstance(raw, list):
+            raw, dropped = [], 1
+        for note in raw:
+            try:
+                accepted.append(KnowledgeNote.model_validate(note))
+            except (TypeError, ValueError):
+                dropped += 1
+        questions = data.get("questions", [])
+        room = max(0, 2 - len(questions)) if isinstance(questions, list) else 2
+        data["knowledge_notes"] = accepted[:room]
+        data["knowledge_dropped"] = dropped + max(0, len(accepted) - room)
+        # Invalid optional requests cannot erase an otherwise usable assessment.
+        data["tool_requests"] = parse_tool_requests(data.get("tool_requests", []))
+        return data
 
 
 def _extract_json_object(text: str) -> str | None:
@@ -79,7 +154,7 @@ def parse_review(content: str) -> Review:
         return Review.model_validate_json(candidate)
 
 
-def ground_review(review: Review, prompt: str) -> Review:
+def ground_review(review: Review, prompt: str, tool_evidence: list[str] | None = None) -> Review:
     evidence = json.loads(prompt.split(EVIDENCE_MARKER, 1)[1])
     for concern in review.concerns:
         if concern.claim_quote not in evidence["OUTPUT"]:
@@ -87,7 +162,8 @@ def ground_review(review: Review, prompt: str) -> Review:
         if concern.signal != "UNSUPPORTED" and not concern.basis_quote.strip():
             raise ValueError("contradiction/shift needs a supplied basis")
         if concern.basis_quote and not any(
-            concern.basis_quote in evidence[k] for k in ("CONTEXT", "EVENTS", "LATEST_REQUEST")
+            concern.basis_quote in record for record in
+            [*(evidence[k] for k in ("CONTEXT", "EVENTS", "LATEST_REQUEST")), *(tool_evidence or [])]
         ):
             raise ValueError("concern basis absent from supplied context/events")
     return review

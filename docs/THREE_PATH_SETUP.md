@@ -1,6 +1,6 @@
 # Context memory, claim findings, and monitoring awareness
 
-This is the v0.3 implementation of the agreed setup. One background B review
+This is the v0.5 implementation of the agreed setup. One background B review
 produces two outputs; no new LLM, memory service, agent framework, or database
 table has been added.
 
@@ -11,6 +11,7 @@ table has been added.
 | Context memory | Current goal, overlooked questions, alternate explanations, missing prerequisites, relevant supplied information, one next step | `b_state.payload.context_memory`, with its own version, observation time, update time and source call | Forced lookup before every eligible model call; `observer_memory` data message |
 | Claim findings | Material unsupported claims, contradictions and unexplained shifts, with exact source quotes | `b_state.payload.claim_review`, outside the memory content | `observer_claims` data message directly in the next eligible request |
 | Monitoring awareness | Fixed instructions explaining the proxy, observation, evidence limits, and direct-to-user behavior | Source-controlled `OBSERVATION_REMINDER` | Re-added to every observed request in the configured system/developer role |
+| Optional host-tool requests | B may ask for bounded information from tools the application already supplied | `host_tool_plan` and response injection | Added as ordinary A tool calls; the application executes or ignores them |
 
 Model-generated notes are never promoted into system/developer instructions. Your
 own messages are not edited. The prompt tells B to keep completion disputes out of

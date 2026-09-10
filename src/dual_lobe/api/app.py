@@ -29,7 +29,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Dual-Lobe Inference Proxy",
-    version="0.4.0",
+    version="0.5.0",
     lifespan=lifespan,
 )
 

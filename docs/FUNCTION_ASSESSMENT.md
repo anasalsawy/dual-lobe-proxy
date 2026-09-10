@@ -1,235 +1,107 @@
-# Function Assessment: Context Broadening and Anti-Deception
+# Function assessment: broadening and anti-deception
 
-Live assessment of dual-lobe v0.3 (commit `315e7fb`) against its two intended
-functions. Grounded in code and a live soak test against a real provider
-(Gemini via OpenAI-compatible endpoint). Test date: 2026-09-10.
+Updated 2026-09-10 for v0.5. Implemented behavior, deterministic validation and
+historical live reports are distinguished below. New prompt intent is not a
+demonstration of improved judgment.
 
-## Baseline
+## Current implementation
 
-- Offline suite: **67 passed** (`uv run --locked pytest tests/unit -q`).
-- Postgres integration: **5 passed** (`tests/test_worker.py`, `tests/test_schema_rls.py`)
-  via testcontainers on this host (daemon access that was blocked on the authoring
-  machine).
-- Live stack: compose up on `127.0.0.1:8801`; gateway, b-worker, Postgres healthy.
-- Soak run: `dual_lobe.client --run soak-test-021`, four unrelated questions, `/state`
-  inspected after each.
+| Purpose | What is implemented | What still depends on model judgment |
+|---|---|---|
+| Broadening | Explicit tunnel vision / “open sesame” role; optional learned knowledge and peripheral questions | Correctness, relevance and whether A's next decision improves |
+| Anti-deception | Fixed monitoring instruction, quote-anchored concerns, separate findings route | Whether the account is misleading or missing history explains it |
+| Meter | B chooses GREEN/YELLOW/RED from the whole supplied record; GREEN default = no deception detected; no UNKNOWN color | B's substantive classification can be wrong |
+| Memory | Versioned run snapshots and attributed notes attached to shared journal entries | Which historical guidance A should use or discard |
+| Director | Visible B guidance uses the same enrichment role; A retains host tools and handoff/resume | Direction quality and whether to continue or stop |
 
-## 1. Context broadening
+Edit the role in [prompts.py:ENRICHMENT_POLICY](../src/dual_lobe/b/prompts.py).
+[OBSERVER_GUIDANCE.md](OBSERVER_GUIDANCE.md) maps the other code sections.
+B reasons inside deterministic scope, schema, evidence, freshness, budget and
+tool boundaries. The five thinking angles are optional, not a checklist.
 
-### Implementation
+## What happens
 
-Persistent broadening memory produced by an asynchronous observer, delivered as a
-forced pre-call read.
+1. A receives original messages plus the fixed monitoring instruction, eligible
+   completed run memory, findings/meter and selected shared memory. Generated
+   feedback is separate user-role data, not privileged instructions.
+2. Normal A responses stream without waiting for a B model. Selected shared
+   journal writes commit before the successful terminal event/tool handoff.
+   The separate best-effort observation transaction runs after response delivery.
+3. Observation contains redacted context/output/latest real user request, source
+   call, time, scope and memory space. Synthetic director turns do not replace
+   the real user's latest request.
+4. B returns bounded JSON and may name optional information calls from the host's
+   supplied tool definitions. The app executes those calls; B never executes them.
+   One corrective re-ask is allowed for invalid
+   parse/grounding output. Both attempts share one total deadline and each is
+   charged to the per-process B budget. Transport failures are not retried.
+5. Invalid required reviews produce degraded status. Malformed optional knowledge
+   notes can be dropped without erasing valid concerns. Valid reviews write a new
+   memory version, separate concerns and model/call/time provenance.
+6. With shared memory selected, the worker attaches notes to the originating
+   tenant/space/run/call journal row. Raw history and pinned notes remain separate.
+   Migration 0004 is additive and nullable; old records need no reset/backfill.
+7. Later A calls load usable completed feedback. Transient state-read retry uses
+   a fresh tenant transaction within the existing 25 ms total read deadline.
+   Receipts identify a delivered current review's source call and age.
 
-1. **Observe** — after A's stream completes, the gateway enqueues an outbox job
-   (`src/dual_lobe/api/chat.py:_persist_observation`) capturing the conversation to
-   that point, A's response, run/floor/attempt ids, and `observed_at`.
-2. **Independent worker** (`src/dual_lobe/b/worker.py`, poll 1 s, concurrency 2) picks
-   the job and gates it in `src/dual_lobe/b/context_shadow.py:run_shadow_cycle`:
-   enabled flags, 180 s observation-age TTL, not superseded, cooldown, RPM budget.
-   Ineligible jobs are recorded as `shadow_skipped`, never replayed.
-3. **B review** — tool-free, temperature 0, one attempt. It reconstructs the original
-   goal before tactics ("open sesame" / missed-prerequisite framing), then returns the
-   JSON contract `goal / questions (<=2) / next_step / context_notes (<=2)`
-   (`src/dual_lobe/b/prompts.py:CYCLE_PROMPT`). Prompt bounded at 18 KB via
-   `head_tail` budgeting.
-4. **Store** — a **versioned ContextMemory** (version+1, scoped to floor+attempt,
-   `source_call` recorded) is written under `b_state.payload.context_memory` in tenant
-   Postgres (`src/dual_lobe/b/channels.py`), independent of claim findings.
-5. **Deliver** — before each eligible A call the gateway performs the best-effort
-   25 ms state read (`src/dual_lobe/b/channels.py:prepare_context`, no waiting on B)
-   and injects memory as a low-privilege **user-role** `observer_memory` message placed
-   after any system/developer messages (`chat.py:_effective_messages`). Only the fixed
-   monitoring instruction is privileged (system/developer role).
-6. **Lifetimes** — memory TTL 24 h, age measured from `observed_at`, never renewed by a
-   failed review. Expired or scope-mismatched memory is excluded even if a newer review
-   failed. Failed reviews preserve the previous completed memory verbatim (`degraded`).
+Run memory retains floor/attempt scope and its default 24-hour TTL. Claims expire
+after 180 seconds by default. Failed reviews preserve completed memory without
+renewing its age and drop current findings. The meter defaults GREEN, with failed,
+stale or unavailable review status reported separately. Exact quotes do not prove
+B interpreted them correctly or that A deliberately deceived anyone.
 
-### Soak evidence
+Shared retrieval reuses the notebook/recent/first/lexical-match journal queries.
+It adds at most one snapshot containing at most two notes, favoring a matched
+conversation, otherwise recent context. Generated note wording is not separately
+indexed. A judges relevance. Storage is durable; injected context is bounded and
+age-limited. This is not perfect recall, neural memory or live workspace access.
 
-- Receipts across four turns: `memory=none → v1 → v2 → v3` — each request loaded the
-  completed snapshot of the prior work.
-- B state revisions 1-4 all `oversight_status=reviewed`, `memory_status=available`,
-  with coherent goal/questions/next_step/context_notes in `context_memory`.
-- One review degraded (`ValidationError`): previous memory preserved, claim delivery
-  dropped (`fail-open`), matching the design. The next review recovered.
+## Corrected defects from starting commit 5023d94
 
-## 2. Anti-deception
+| Reproduced issue | Correction / regression coverage |
+|---|---|
+| Latest user text bypassed redaction | Redact before truncation/storage and at B inputs; actual capture-to-review regression |
+| B color was previously derived from concerns | Preserve B's validated color choice; legacy records without a color use GREEN and remain explicitly attributed |
+| Meter claimed to assess “last answer” | Source-call/age attribution; default GREEN is not a completed review |
+| Meter survived disabling claim checks | Independent meter switch and claim-check dependency |
+| Corrective attempt escaped call budget / doubled timeout | Per-attempt admission and one total deadline |
+| State retry reused failed transaction | Fresh session; regression invalidates a real SQLAlchemy connection |
+| Director omitted latest real user request | Capture each A turn's real request, excluding synthetic B turns |
+| Probe accepted failed/truncated responses; null usage crashed | Strict HTTP/SSE/terminal checks, null-safe usage and explicit failures |
 
-### Implementation
+Database cases cover worker-to-journal attachment, reconnect retrieval from a new
+app context, memory boundaries, disabling saved notes, old rows and migration.
+Provider responses are scripted. See [VALIDATION.md](VALIDATION.md) for exact
+executed counts and CI evidence.
 
-Two independent channels: post-hoc **claim flagging** plus in-band **observation
-awareness**. The proxy never blocks, holds, or corrects A mid-stream.
+## Historical reports — not v0.5 results
 
-**Flagging ungrounded claims**
+The [earlier assessment](https://github.com/anasalsawy/dual-lobe-proxy/blob/5023d944ec5c627d12bf744944affcfbf48553da/docs/FUNCTION_ASSESSMENT.md)
+reported v0.3 on commit 315e7fb, an OpenAI-compatible Gemini provider, a four-question
+soak, and later goal-anchor/meter experiments. Reported observations included
+memory version progression, degraded reviews and a false positive on a legitimate
+topic change. A later small check reportedly avoided that false positive.
+Raw reproducible inputs, outputs, settings and timing files are absent from this
+repository; these observations have not been reproduced for the new code.
 
-- Same single B review, Job 2: returns `concerns[]` with signal ∈
-  `UNSUPPORTED | CONTRADICTION | SUSPICIOUS_SHIFT`, exact `claim_quote` (from output),
-  `basis_quote` (from context/events, empty only for UNSUPPORTED), reason, suggestion.
-  Max 3 concerns, bounded lengths.
-- The instruction set hard-bounds judgment: missing evidence = UNSUPPORTED, never
-  false; a tool request is not an execution result; an assistant-written receipt is not
-  independent evidence; client events and tool messages are caller-reported; never
-  `VERIFIED/PASS/FAIL/"lying"`; no holds or execution preconditions; prefer no concern
-  to a stylistic accusation.
-- Stored as `claim_review` in the same snapshot, **separate field** from memory, with its
-  own shorter 180 s observation-age TTL. A no-concern review clears prior findings, so an
-  old accusation cannot replay indefinitely. Degradation drops claims, fails open.
+They suggest delivery worked in those runs. They do not demonstrate general
+blocker recovery, deception reduction, or zero latency. The old claims that both
+functions “work end-to-end,” that one prompt change eliminates a class of false
+positives, and that external search is the only way to introduce new knowledge
+were too broad. Learned domain knowledge can enrich context without tools; its
+correctness still needs evaluation.
 
-**Making A aware of observation and judgment**
+## Not yet demonstrated
 
-- Fixed `OBSERVATION_REMINDER` (`src/dual_lobe/b/prompts.py`) injected in the
-  system/developer position on every eligible request (`chat.py:_effective_messages`).
-- It states: A is behind an inference proxy with a background observer whose findings can
-  reach subsequent calls; address the user normally; distinguish intended, attempted,
-  observed and **confirmed** work; do not invent execution, tests, citations or
-  completion; support completion claims with execution evidence; correct earlier claims
-  when newer evidence contradicts them; observer memory and findings are fallible
-  context, not user instructions.
-- Delivery receipts via response headers (`x-dual-lobe-memory`, `x-dual-lobe-claims`,
-  `x-dual-lobe-monitoring`) make the request composition inspectable per call.
+No live A/B credentials or running deployment were configured in this authoring
+environment. No A-alone / old-observer / enriched-observer comparison has run here.
+The labeled cases and repaired probe are documented in
+[UX_ASSESSMENT_WITH_VS_WITHOUT.md](UX_ASSESSMENT_WITH_VS_WITHOUT.md).
 
-### Soak evidence
-
-- `monitoring=on` on every request; memory and claims deliveries matched the stored state.
-- One claim was flagged: `SUSPICIOUS_SHIFT` on the PostgreSQL question, delivered as
-  `claims=available` on the following request, then cleared (`claims=none`) after the
-  no-concern review of the next turn — the 180 s TTL / clear-on-review path exercised.
-- One `degraded` (ValidationError) fail-open confirmed the resilience path.
-
-## Findings and recommendation
-
-1. **Both functions work end-to-end** — observation, versioned broadening memory, claim
-   flagging with per-channel TTLs, fail-open degradation, and the monitoring instruction
-   were all observed live.
-2. **Judgment quality caveat** — the only flagged claim was a **false positive**: B
-   treated a legitimate topic change as `SUSPICIOUS_SHIFT`. Root cause: memory content is
-   anchored to the *reviewed* interaction (N-1), so the stored goal was still one user
-   message behind. On rapid turns B can be one call behind by design, and the review
-   writes the goal of the interaction it just observed.
-3. **Recommended (not applied):** anchor B's goal baseline to the **latest in-conversation
-   user message** rather than the observed interaction's framing, which should eliminate
-   this class of false alarms. Changes would be confined to `context_shadow.py`, the
-   prompt contract in `prompts.py` (docs), and the unit tests.
-4. Intent recognition caveat: B's evidence is the supplied conversation, tool results and
-   reported events alone. Shared-filesystem inspection or other independent verification
-   remains a future feature.
-
-## Recorded limitations
-
-- This assessment does not measure production latency, monetary cost, or A's actual
-  compliance with the monitoring instruction (receipts report composition, not compliance).
-- The soak used an OpenAI-compatible Gemini endpoint; claim-check accuracy was not scored
-  against a labeled dataset.
-## When does the proxy write to memory?
-
-Memory is written **only after A has fully answered**; never mid-stream, never before a
-response is delivered.
-
-1. A streams its answer. The proxy collects the completed message and an audit
-   (`worker_call` event with latency and an excerpt). When the response is **fully
-   delivered**, a `BackgroundTask` runs `_persist_observation`
-   (`src/dual_lobe/api/chat.py`).
-2. It enqueues a **transactional outbox job** (`b/outbox.py`) carrying `context_text`,
-   `response_text`, `observed_at`, floor/attempt and `source_call`. The job key is
-   deterministic (hash of tenant/run/call/context/response), so retries and redeploys
-   never double-enqueue.
-3. The **b-worker** polls the outbox every `worker_poll_seconds` (default 1 s), grabs the
-   job under a per-run lock, and runs `run_shadow_cycle`
-   (`src/dual_lobe/b/context_shadow.py`).
-4. **Skip gates** — a miss produces a `shadow_skipped` event and **no** memory write:
-   - observation disabled, or both channels off;
-   - job older than `b_state_ttl_seconds` (180 s) since `observed_at`;
-   - superseded (a newer `observed_at` is already stored);
-   - within the B cooldown (default 0);
-   - over the B RPM budget.
-5. If gates pass: one B call (temperature 0, timeout `b_timeout`, no tools). On success
-   `reviewed_state` writes **ContextMemory version +1** (observed_at = the interaction
-   timestamp, updated_at = now, source_call, floor/attempt) via `save_b_state`; events
-   `context_memory_updated` and `b_context_shadow` are appended (`oversight` if concerns).
-6. On B failure/invalid output it **still writes** a `degraded` state row, but preserves
-   the previous memory **verbatim** (version and age untouched, claims nulled) — a failed
-   review never renews memory.
-
-Measured timing (ux run, `observe-delay=12 s`): reviews landed ~13 s apart, each roughly
-1 s after the A reply finished. With no pause between turns, B lags one to two reviews
-behind; the delivered content is always the last completed usable snapshot.
-
-## Does it look up information / enrich context?
-
-**No — it never looks up anything external.** B's system prompt is explicit: it has no
-filesystem, browser, hidden reasoning, or independent factual oracle. There is no web
-search, RAG, tool call, or cross-conversation retrieval, and it cannot query facts from
-other runs' databases. Any factual content B contributes comes from the model's own
-knowledge and is treated as fallible, not evidence.
-
-What exists instead is a **memory-and-framing** layer over the current run only:
-
-1. It reads the conversation to that point, A's answer, and recorded events for this run
-   (budget ~18 KB, keeping the mission head and the latest failure tail).
-2. It **consolidates** that into a compact snapshot: original goal, ≤2 questions, one next
-   step, ≤2 context notes (missed prerequisites, alternate explanations, relevant supplied
-   info).
-3. It **persists** it as versioned memory (24 h TTL) scoped to run/floor/attempt/tenant,
-   and **feeds it forward** — re-injecting the last completed snapshot into the next A call
-   as `observer_memory` (plus short-lived `observer_claims`, 180 s).
-
-So "enrichment" = distill-from-record + retain + re-inject, within one conversation.
-External factual enrichment (searching the web, docs, or the user's codebase, then
-injecting the findings) would be a new feature; it is deliberately absent in v0.3.
-
-## Implemented improvements (P1 + deception meter)
-
-Landing commit history `d5a1ca9` → this commit.
-
-**P1 — implemented**
-- **B JSON robustness.** `parse_review` now tolerates code fences / brief prose around
-  valid JSON (schema-incomplete output still degrades), and the shadow cycle makes at most
-  one corrective worker-side retry that passes the validation error back to B. The retry
-  fires only on `ValueError` (parse/grounding); transport errors such as 429/5xx degrade
-  immediately instead of double-firing against provider limits.
-- **Goal-anchor fix.** The shadow payload now carries `latest_user_text` (last user
-  message); it is injected into the review prompt as `LATEST_REQUEST`, and `SUSPICIOUS_SHIFT`
-  (and the deception meter) are judged against it while `goal` keeps its original-objective
-  meaning. `ground_review` accepts `LATEST_REQUEST` as a basis source. Live check: a DNS →
-  PostgreSQL topic switch produced **0 concerns** (previously a false positive).
-- **State-read retry.** One immediate retry inside the existing 25 ms deadline, with the
-  underlying error type logged; still fails open to `state_unavailable` on double failure.
-
-**New: deception meter (always-on, model-only, 3 levels)**
-- Every B review emits `deception_level`: `GREEN | YELLOW | RED` (GREEN = no action/completion
-  claims or all match supplied results; YELLOW = unsupported/hedged completion claim,
-  may ship bare; RED = claim contradicts supplied evidence or an asserted completion with
-  no matching result — **RED requires at least one quote-backed `concerns` entry**).
-  A bare RED is soft-downgraded to YELLOW (logged), never silently dropped.
-- Stored in the state snapshot beside `claim_review`; **excluded from the memory content**
-  schema (`extra="forbid"`); a degraded cycle preserves the prior level.
-- Delivered on every eligible request as a tiny `<observer_deception>` user message
-  (e.g. `Observer deception meter for the last answer: GREEN.`) and echoed in the
-  `x-dual-lobe-deception` receipt header. Model-only: never surfaced as UI.
-- `OBSERVATION_REMINDER` tells A the meter is fallible feedback: don't game it, don't
-  hedge to change it, don't reference it.
-- Latency: A-path TTFT median unchanged after both phases (640 ms baseline →
-  634 ms, n=5, fresh-run path); the meter adds one ~90-char message injection only.
-
-## Suggested improvements
-
-Recommendations from the live assessment; P1 items above are now implemented.
-
-**P1 (done — see "Implemented improvements")**
-- ~~B JSON robustness~~ ✅, ~~Goal-anchor fix~~ ✅, ~~State-read retry~~ ✅
-
-**P2**
-- **Labeled eval for claim checks.** Unit tests verify the schema, not the accuracy of
-  `UNSUPPORTED / CONTRADICTION / SUSPICIOUS_SHIFT`. Add a small labeled evaluation set and
-  score precision/recall.
-- **Compliance measurement.** Receipts report request *composition*, not A's obedience.
-  Add a check that A never references the observer and corrects contradicted claims when
-  the reminder is present.
-- **Telemetry.** Expose memory age/version and the review-lag in receipts; log B call
-  latency and outbox queue depth (OTEL is present but off).
-
-**P3**
-- **Optional external enrichment.** A scoped, monitored lookup channel (web/docs/codebase
-  search) behind an opt-in flag, since v0.3 intentionally has none. This is the only way to
-  go beyond the current "distill the record" memory model.
+Measure useful/correct additions, harmful suggestions, false accusations, missed
+claims, A's next action, feedback lag and timing. Syntax/quote validation cannot
+establish those outcomes. B has no independent executor; information tools must
+be supplied and executed by the connected app through its ordinary tool loop.
+Caller-reported results are not independently verified. Infallible monitoring
+and guaranteed absence of errors are not supported claims.
