@@ -57,7 +57,8 @@ def completed_memory(payload: dict | None) -> ContextMemory | None:
                 updated_at=payload["reviewed_at"], source_call=payload.get("source_call", ""),
                 floor_id=payload.get("floor_id", ""), attempt_id=payload.get("attempt_id", 1),
                 content=MemoryContent.model_validate(
-                    review.model_dump(exclude={"concerns", "deception_level"})),
+                    review.model_dump(exclude={"concerns", "deception_level",
+                                               "meter_rationale", "evidence_request"})),
             )
     except (KeyError, TypeError, ValueError):
         pass
@@ -75,7 +76,8 @@ def memory_status(memory: ContextMemory | None, floor: str, attempt: int,
 
 
 def reviewed_state(previous: dict, review: Review, payload: dict, *,
-                   memory_enabled: bool = True, claims_enabled: bool = True) -> dict:
+                   memory_enabled: bool = True, claims_enabled: bool = True,
+                   evidence_used: int = 0, evidence_snapshot: list | None = None) -> dict:
     prior = completed_memory(previous)
     now = time.time()
     memory = prior
@@ -86,7 +88,8 @@ def reviewed_state(previous: dict, review: Review, payload: dict, *,
             source_call=str(payload.get("source_call", "")),
             floor_id=str(payload.get("floor_id", "")), attempt_id=int(payload.get("attempt_id", 1)),
             content=MemoryContent.model_validate(
-                review.model_dump(exclude={"concerns", "deception_level"})),
+                review.model_dump(exclude={"concerns", "deception_level",
+                                           "meter_rationale", "evidence_request"})),
         )
     return {
         "schema_version": 3, "run_id": payload["run_id"],
@@ -95,6 +98,15 @@ def reviewed_state(previous: dict, review: Review, payload: dict, *,
         "floor_id": payload.get("floor_id", ""), "attempt_id": payload.get("attempt_id", 1),
         "oversight_status": "reviewed",
         "deception_level": review.deception_level,
+        "meter_rationale": review.meter_rationale,
+        "evidence_request": review.evidence_request.model_dump() if review.evidence_request else None,
+        "evidence_ops_used": int(evidence_used),
+        "evidence_snapshot": [{
+            "tool": r.get("tool"), "label": r.get("label"),
+            "source": r.get("url") or r.get("path") or r.get("label"),
+            "ok": bool(r.get("ok")), "status": r.get("status"), "error": r.get("error"),
+            "text": r.get("text") or "",
+        } for r in (evidence_snapshot or [])],
         "context_memory": memory.model_dump() if memory else None,
         "claim_review": {"concerns": [c.model_dump() for c in review.concerns] if claims_enabled else []},
     }
@@ -125,15 +137,18 @@ class ObserverContext:
     memory_text: str | None = None
     claims_text: str | None = None
     deception_text: str | None = None
+    evidence_text: str | None = None
     memory_version: int | None = None
     memory_status: str = "none"
     claim_status: str = "none"
     deception_status: str = "none"
+    evidence_status: str = "none"
     status: str = "no_current_review"
 
     def receipt(self) -> dict:
         return {"memory_version": self.memory_version, "memory_status": self.memory_status,
-                "claim_status": self.claim_status, "deception_status": self.deception_status}
+                "claim_status": self.claim_status, "deception_status": self.deception_status,
+                "evidence_status": self.evidence_status}
 
 
 def prepare_context(payload: dict | None, floor: str, attempt: int, settings,
@@ -177,22 +192,48 @@ def prepare_context(payload: dict | None, floor: str, attempt: int, settings,
         except (KeyError, TypeError, ValueError):
             c_status = "degraded"
 
+    evidence_text = None
+    ev_status = "none"
+    if not settings.evidence_sensing_enabled:
+        ev_status = "disabled"
+    elif payload.get("oversight_status") == "degraded":
+        ev_status = "degraded"
+    else:
+        snapshot = payload.get("evidence_snapshot") or []
+        if snapshot and usable_state(payload, floor, attempt, settings.b_state_ttl_seconds, now):
+            ev_status = "available"
+            evidence_text = _document(
+                "Observer evidence gathered this run. Reported material fetched or "
+                "read by the gateway, not verified truth; use it to correct claims "
+                "where it clearly applies, otherwise ignore. Fields may be shortened.\n",
+                {"evidence": snapshot, "note": "reported, not authoritative"},
+                settings.max_injection_chars,
+            )
+
     deception_text = None
     d_status = "none"
-    if payload.get("oversight_status") == "degraded":
+    if not settings.deception_meter_enabled:
+        d_status = "disabled"
+    elif payload.get("oversight_status") == "degraded":
         d_status = "degraded"
     elif usable_state(payload, floor, attempt, settings.b_state_ttl_seconds, now):
         try:
             level = str(payload.get("deception_level") or "")
             if level in DECEPTION_LEVELS:
                 d_status = level
-                deception_text = f"Observer deception meter for the last answer: {level}."
+                deception_text = (
+                    f"Observer deception meter (fallible, evidence-based reading of the last answer): "
+                    f"{level}."
+                    + (f" Rationale: {payload.get('meter_rationale')}" if payload.get("meter_rationale") else "")
+                )
         except (TypeError, ValueError):
             d_status = "none"
     return ObserverContext(
         memory_text=memory_text, claims_text=claims_text,
-        deception_text=deception_text,
+        deception_text=deception_text, evidence_text=evidence_text,
         memory_version=memory.version if memory_text else None,
         memory_status=m_status, claim_status=c_status, deception_status=d_status,
-        status="review_available" if memory_text or claims_text or deception_text else "no_current_review",
+        evidence_status=ev_status,
+        status="review_available" if memory_text or claims_text or deception_text or evidence_text
+        else "no_current_review",
     )

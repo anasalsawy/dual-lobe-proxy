@@ -81,6 +81,7 @@ def _effective_messages(messages: list[dict], context: ObserverContext, reminder
     # user-message priority; only the fixed monitoring instruction is privileged.
     for name, content in (("shared_memory", shared_text),
                           ("observer_deception", context.deception_text),
+                          ("observer_evidence", context.evidence_text),
                           ("observer_memory", context.memory_text),
                           ("observer_claims", context.claims_text)):
         if content:
@@ -285,7 +286,8 @@ async def chat_completions(
     if not limit.allowed:
         raise HTTPException(status_code=429, detail="rate limit exceeded",
                             headers={"Retry-After": str(int(limit.retry_after + 1))})
-    observe = (s.b_enabled and (s.context_memory_enabled or s.claim_checks_enabled)
+    observe = (s.b_enabled and (s.context_memory_enabled or s.claim_checks_enabled
+                                or s.deception_meter_enabled)
                and not correlation.is_bypass(corr))
     external_run = str(corr.get("run") or uuid.uuid4())
     floor, attempt = str(corr.get("floor", "")), int(corr.get("attempt", 1))
@@ -336,6 +338,7 @@ async def chat_completions(
                "X-Dual-Lobe-Memory": (f"v{context.memory_version}" if context.memory_text else context.memory_status),
                "X-Dual-Lobe-Claims": context.claim_status,
                "X-Dual-Lobe-Deception": context.deception_status,
+               "X-Dual-Lobe-Evidence": context.evidence_status,
                "X-Dual-Lobe-Monitoring": "on" if monitoring else "off",
                "X-Dual-Lobe-Memory-Space": memory_space or "off",
                "X-Dual-Lobe-Shared-Entries": str(len(shared.entry_ids))}

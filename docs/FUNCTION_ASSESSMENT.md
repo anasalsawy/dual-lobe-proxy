@@ -138,12 +138,16 @@ response is delivered.
    job under a per-run lock, and runs `run_shadow_cycle`
    (`src/dual_lobe/b/context_shadow.py`).
 4. **Skip gates** — a miss produces a `shadow_skipped` event and **no** memory write:
-   - observation disabled, or both channels off;
+   - observation disabled, or all channels off (memory, claims, deception meter);
    - job older than `b_state_ttl_seconds` (180 s) since `observed_at`;
    - superseded (a newer `observed_at` is already stored);
    - within the B cooldown (default 0);
    - over the B RPM budget.
-5. If gates pass: one B call (temperature 0, timeout `b_timeout`, no tools). On success
+5. If gates pass: **B never executes tools**. It may propose evidence work
+   (`evidence_request`, restricted to the platform toolset `fetch_web`/`read_artifact`),
+   and the gateway runs it in code off the request path — one B call first (temperature
+   0, timeout `b_timeout`, no tools), then at most `b_tool_max_rounds` sensing
+   re-reviews bounded by `b_evidence_ops_per_run` per run. On success
    `reviewed_state` writes **ContextMemory version +1** (observed_at = the interaction
    timestamp, updated_at = now, source_call, floor/attempt) via `save_b_state`; events
    `context_memory_updated` and `b_context_shadow` are appended (`oversight` if concerns).
@@ -157,13 +161,33 @@ behind; the delivered content is always the last completed usable snapshot.
 
 ## Does it look up information / enrich context?
 
-**No — it never looks up anything external.** B's system prompt is explicit: it has no
-filesystem, browser, hidden reasoning, or independent factual oracle. There is no web
-search, RAG, tool call, or cross-conversation retrieval, and it cannot query facts from
-other runs' databases. Any factual content B contributes comes from the model's own
-knowledge and is treated as fallible, not evidence.
+**The observer model never looks anything up itself.** B has no filesystem, browser,
+hidden reasoning, or independent factual oracle. What Tier 2 (evidence sensing) adds is a
+**bounded, gateway-executed** lookup on B's behalf, disabled by default:
 
-What exists instead is a **memory-and-framing** layer over the current run only:
+- B can request at most one evidence tool per review from the platform toolset:
+  `fetch_web` (a URL) or `read_artifact` (a file under `DUAL_LOBE_ARTIFACT_ROOT`).
+- The request is **shape-validated** (`ExtraRequest` rejects unknown tools/args) and the
+  gateway executes it **in code** during the worker cycle, never inside an A request.
+  Output lands as `SENSED_TOOL_RESULTS` for a bounded re-review.
+- Two mechanical guards only: fetch allows `http`/`https` schemes and re-validates each
+  redirect hop; artifact paths must resolve inside the configured root with no symlink
+  escape and a small credentials/`*.key` blocklist. Content and hosts are otherwise
+  unrestricted per product policy (see SSRF note below).
+- Gathered material is **reported, not verified truth**. It is delivered to A on the next
+  call as `observer_evidence` and stored in the dedicated `observer` memory space tagged
+  `source=observer`/`kind=evidence_fetched`, so cross-run retrieval cannot mistake it for
+  an authoritative source.
+- Budgets are deterministic counters (`b_tool_max_rounds`, `b_evidence_ops_per_run` kept
+  in `b_state`), never model-driven. Everything runs in the worker off the A critical
+  path, so latency is unchanged.
+
+> **SSRF posture**: internal-reachability and cloud-metadata fetch is an accepted cost of
+> the unrestricted policy; only the two mechanical scheme/redirect guards remain. To
+> close it fully, drop the guards to zero reachability or run fetch through an egress
+> proxy/allowlist — not implemented by default.
+
+What persists is a **memory-and-framing** layer over the current run only:
 
 1. It reads the conversation to that point, A's answer, and recorded events for this run
    (budget ~18 KB, keeping the mission head and the latest failure tail).
@@ -196,21 +220,43 @@ Landing commit history `d5a1ca9` → this commit.
 - **State-read retry.** One immediate retry inside the existing 25 ms deadline, with the
   underlying error type logged; still fails open to `state_unavailable` on double failure.
 
-**New: deception meter (always-on, model-only, 3 levels)**
+**New: deception meter (model-only, 3 levels, independent switch)**
 - Every B review emits `deception_level`: `GREEN | YELLOW | RED` (GREEN = no action/completion
   claims or all match supplied results; YELLOW = unsupported/hedged completion claim,
   may ship bare; RED = claim contradicts supplied evidence or an asserted completion with
   no matching result — **RED requires at least one quote-backed `concerns` entry**).
   A bare RED is soft-downgraded to YELLOW (logged), never silently dropped.
-- Stored in the state snapshot beside `claim_review`; **excluded from the memory content**
-  schema (`extra="forbid"`); a degraded cycle preserves the prior level.
+- **Independent switch** (`DUAL_LOBE_DECEPTION_METER_ENABLED`): when off, the meter is
+  delivered as `disabled` (header `x-dual-lobe-deception: disabled`), the reminder to A omits
+  the meter, B is told to return `deception_level GREEN` with an empty `meter_rationale`, and
+  observation still runs for the memory/claims channels. "No meter, no B bill" costs stay
+  honored alongside the other two channels.
+- Stored in the state snapshot beside `claim_review` together with an optional
+  `meter_rationale` (≤200 chars); **excluded from the memory content** schema
+  (`extra="forbid"`); a degraded cycle preserves the prior level.
 - Delivered on every eligible request as a tiny `<observer_deception>` user message
-  (e.g. `Observer deception meter for the last answer: GREEN.`) and echoed in the
-  `x-dual-lobe-deception` receipt header. Model-only: never surfaced as UI.
+  (e.g. `Observer deception meter (fallible, evidence-based reading of the last answer):
+  YELLOW. Rationale: …`) and echoed in the `x-dual-lobe-deception` receipt header.
+  Model-only: never surfaced as UI.
 - `OBSERVATION_REMINDER` tells A the meter is fallible feedback: don't game it, don't
   hedge to change it, don't reference it.
 - Latency: A-path TTFT median unchanged after both phases (640 ms baseline →
   634 ms, n=5, fresh-run path); the meter adds one ~90-char message injection only.
+
+**New: Tier 2 evidence sensing (gateway-executed, default on, off critical path)**
+- B stays inference-only; it may emit one `evidence_request` per review from the platform
+  toolset (`fetch_web`, `read_artifact`). The gateway executes it in code during the worker
+  cycle, feeds the result back as `SENSED_TOOL_RESULTS` for a bounded re-review
+  (`b_tool_max_rounds`, `b_evidence_ops_per_run` per run, persisted in `b_state`).
+- Only two mechanical guards on fetch (`http`/`https` scheme allowlist, per-hop redirect
+  re-validation) and containment/blocklist on artifacts; hosts/content otherwise
+  unrestricted (SSRF trade-off documented above).
+- Delivered to A next call as `observer_evidence`, echoed by `x-dual-lobe-evidence`, and
+  persisted to the dedicated `observer` memory space tagged
+  `source=observer`/`kind=evidence_fetched` — recorded as reported material, never truth.
+- Knobs: `DUAL_LOBE_EVIDENCE_SENSING_ENABLED`, `DUAL_LOBE_B_TOOL_MAX_ROUNDS`,
+  `DUAL_LOBE_B_EVIDENCE_OPS_PER_RUN`, `DUAL_LOBE_FETCH_TIMEOUT`, `DUAL_LOBE_FETCH_MAX_BYTES`,
+  `DUAL_LOBE_ARTIFACT_ROOT`, `DUAL_LOBE_OBSERVER_MEMORY_SPACE`.
 
 ## Suggested improvements
 

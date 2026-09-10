@@ -23,10 +23,27 @@ class Concern(BaseModel):
     suggestion: Short
 
 
+class EvidenceRequest(BaseModel):
+    """B proposes evidence-sensing work; the gateway executes it in code.
+
+    The tool name is restricted to the platform toolset in code before any
+    execution, and argument shapes are validated, so a malformed or invented
+    proposal is dropped and logged, never executed.
+    """
+    model_config = ConfigDict(extra="forbid", strict=True)
+    tool: Literal["fetch_web", "read_artifact"]
+    arguments: dict[str, str] = Field(default_factory=dict)
+
+    def reason(self) -> str:
+        return self.arguments.get("url") or self.arguments.get("path") or ""
+
+
 class Review(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     goal: Short
     deception_level: DeceptionLevel = "GREEN"
+    meter_rationale: Annotated[str, StringConstraints(max_length=200)] = ""
+    evidence_request: EvidenceRequest | None = None
     questions: list[Short] = Field(max_length=2)
     next_step: Annotated[str, StringConstraints(max_length=500)]
     context_notes: list[Short] = Field(default_factory=list, max_length=2)

@@ -3,13 +3,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import text
 
 from dual_lobe.b.context_shadow import run_shadow_cycle
 from dual_lobe.b.outbox import shadow_job_key, shadow_payload
 from dual_lobe.core.bootstrap import ensure_tenant
 from dual_lobe.core.engine import admin_session_factory, dispose_engines
+from dual_lobe.core.settings import Settings
 from dual_lobe.state import repositories as repo
 
 pytestmark = pytest.mark.usefixtures("postgres")
@@ -58,7 +62,7 @@ def test_worker_review_is_not_a_verdict(monkeypatch):
         async with admin_session_factory()() as session:
             result = await run_shadow_cycle(session, {"run_id": run_id, "payload": payload}, tid)
             await session.commit()
-        assert result == {"ok": True, "concerns": 1}
+        assert result == {"ok": True, "concerns": 1, "evidence_used": 0}
         async with admin_session_factory()() as session:
             state = await repo.latest_b_state(session, run_id)
             assert state["payload"]["oversight_status"] == "reviewed"
@@ -90,5 +94,90 @@ def test_shadow_failure_is_explicit_degradation(monkeypatch):
             state = await repo.latest_b_state(session, run_id)
             assert state["payload"]["oversight_status"] == "degraded"
             assert "review" not in state["payload"]
+        await dispose_engines()
+    asyncio.run(run())
+
+
+def _admin_tenant_session(monkeypatch):
+    """Swap artifacts' RLS session for the disposable-admin session so the insert
+    path is testable without provisioning the RLS role in the container."""
+    @asynccontextmanager
+    async def fake(tenant_id):
+        async with admin_session_factory()() as session:
+            await session.execute(
+                text("SELECT set_config('app.tenant_id', :tenant, true)"),
+                {"tenant": str(int(tenant_id))})
+            yield session
+    monkeypatch.setattr("dual_lobe.b.artifacts.tenant_session", fake)
+
+
+def test_evidence_memory_is_tagged_reported_not_verified(monkeypatch):
+    from dual_lobe.b import artifacts
+    _admin_tenant_session(monkeypatch)
+
+    async def run():
+        tid, run_id, key, payload = await _seed_run("evidence-mem")
+        await artifacts.record_evidence_memory(tid, run_id, [
+            {"ok": True, "tool": "fetch_web", "label": "fetch_web",
+             "url": "https://docs.example.com/flag", "status": 200,
+             "text": "The documented flag is --dry-run."}])
+        async with admin_session_factory()() as session:
+            rows = (await session.execute(text(
+                "SELECT payload, search_text FROM memory_entries WHERE tenant_id = :t AND run_id = :r"),
+                {"t": tid, "r": run_id})).all()
+            assert len(rows) == 1
+            payload_row, search = rows[0]
+            assert payload_row["kind"] == "evidence_fetched" and payload_row["source"] == "observer"
+            assert payload_row["results"][0]["source"] == "https://docs.example.com/flag"
+            assert "evidence_fetched" in search
+        await dispose_engines()
+    asyncio.run(run())
+
+
+def test_worker_gateway_executes_evidence_and_ships_snapshot(monkeypatch):
+    _admin_tenant_session(monkeypatch)
+    reviews = [
+        json.dumps({"goal": "Fix tests", "deception_level": "YELLOW",
+                    "meter_rationale": "Outcome contradicts the fetched reference.",
+                    "questions": [], "next_step": "Correct the claim", "context_notes": [],
+                    "concerns": [], "evidence_request": {
+                        "tool": "fetch_web", "arguments": {"url": "https://docs.example.com/flag"}}}),
+        json.dumps({"goal": "Fix tests", "deception_level": "GREEN", "questions": [],
+                    "next_step": "", "context_notes": [], "concerns": []}),
+    ]
+    calls = []
+    async def fake_b(*args):
+        calls.append(1)
+        return reviews[len(calls) - 1]
+    monkeypatch.setattr("dual_lobe.b.context_shadow._call_b", fake_b)
+    monkeypatch.setattr("dual_lobe.b.context_shadow.get_settings", lambda: Settings(
+        _env_file=None, evidence_sensing_enabled=True, b_tool_max_rounds=2, b_evidence_ops_per_run=3,
+        context_memory_enabled=True, b_cooldown_seconds=0))
+    monkeypatch.setattr("dual_lobe.b.context_shadow._execute_evidence",
+                        AsyncMock(return_value={
+                            "ok": True, "tool": "fetch_web", "label": "fetch_web",
+                            "url": "https://docs.example.com/flag", "status": 200,
+                            "text": "The documented flag is --dry-run."}))
+
+    async def run():
+        tid, run_id, key, payload = await _seed_run("evidence-cycle")
+        async with admin_session_factory()() as session:
+            result = await run_shadow_cycle(session, {"run_id": run_id, "payload": payload}, tid)
+            await session.commit()
+        assert result == {"ok": True, "concerns": 0, "evidence_used": 1} and len(calls) == 2
+        async with admin_session_factory()() as session:
+            state = await repo.latest_b_state(session, run_id)
+            assert not state["payload"].get("reason")
+            assert state["payload"]["oversight_status"] == "reviewed"
+            assert state["payload"]["deception_level"] == "GREEN"
+            assert state["payload"]["meter_rationale"] == ""  # final review (post-evidence) is authoritative
+            assert state["payload"]["evidence_ops_used"] == 1
+            snap = state["payload"]["evidence_snapshot"]
+            assert len(snap) == 1 and snap[0]["tool"] == "fetch_web"
+            assert snap[0]["source"] == "https://docs.example.com/flag"
+            rows = (await session.execute(text(
+                "SELECT payload FROM memory_entries WHERE tenant_id = :t AND run_id = :r"),
+                {"t": tid, "r": run_id})).all()
+            assert rows and rows[0][0]["kind"] == "evidence_fetched"
         await dispose_engines()
     asyncio.run(run())

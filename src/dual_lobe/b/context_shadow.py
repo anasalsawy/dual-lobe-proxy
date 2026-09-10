@@ -16,6 +16,8 @@ from ..provider.adapters import NormalizedRequest, response_dict
 from ..provider.registry import get_registry
 from ..state import repositories as repo
 from . import prompts
+from . import artifacts as evidence_artifacts
+from . import fetch as evidence_fetch
 from .channels import completed_memory, memory_status, reviewed_state
 from .protocol import Review, ground_review, parse_review, usable_state
 
@@ -29,7 +31,10 @@ async def _call_b(target_alias: str, prompt: str) -> str:
         instructions += "\nContext memory is disabled: return empty goal, questions, next_step and context_notes."
     if not s.claim_checks_enabled:
         instructions += "\nClaim checking is disabled: return an empty concerns array."
-    # No search or tools. Timeout includes the entire provider operation.
+    if not s.deception_meter_enabled:
+        instructions += "\nThe deception meter is disabled: return deception_level GREEN with an empty meter_rationale."
+    # B never executes; only the gateway senses via evidence_request. Timeout
+    # includes the entire provider operation.
     async with asyncio.timeout(s.b_timeout):
         response = await get_registry().adapter(target_alias).buffered(
             NormalizedRequest(
@@ -68,6 +73,51 @@ async def _obtain_review(target_alias: str, prompt: str) -> Review:
         return ground_review(parse_review(raw), prompt)
 
 
+async def _execute_evidence(request, settings) -> dict:
+    """Execute one validated evidence_request in code; B never runs tools."""
+    tool = request.tool
+    if tool == "fetch_web":
+        url = (request.arguments or {}).get("url", "")
+        if not url:
+            return {"ok": False, "tool": tool, "label": "", "error": "missing url argument"}
+        return await evidence_fetch.fetch_url(url)
+    if tool == "read_artifact":
+        path = (request.arguments or {}).get("path", "")
+        if not path:
+            return {"ok": False, "tool": tool, "label": "", "error": "missing path argument"}
+        return await evidence_artifacts.read_artifact(path)
+    return {"ok": False, "tool": tool, "label": "", "error": "unsupported tool"}
+
+
+async def _review_with_sensing(base_prompt: str, rebuild, previous: dict) -> tuple[Review, list[dict], int]:
+    """One bounded review, then up to N gateway-executed sensing rounds, all off
+    the request critical path. Budgets are deterministic counters, not model calls.
+    """
+    s = get_settings()
+    review = await _obtain_review("lobe-b", base_prompt)
+    if not s.evidence_sensing_enabled:
+        return review, [], int(previous.get("evidence_ops_used", 0))
+    used = int(previous.get("evidence_ops_used", 0))
+    results: list[dict] = []
+    for _ in range(s.b_tool_max_rounds):
+        request = review.evidence_request
+        if request is None or used >= s.b_evidence_ops_per_run:
+            break
+        result = await _execute_evidence(request, s)
+        used += 1
+        results.append(result)
+        sensed = evidence_artifacts.sensed_text(results)
+        if not sensed:
+            break
+        try:
+            review = await _obtain_review("lobe-b", rebuild(sensed))
+        except Exception as exc:
+            LOG.warning("Observer sensing re-review failed run=%s error_type=%s; keeping last review",
+                        (previous.get("run_id") or ""), type(exc).__name__)
+            break
+    return review, results, used
+
+
 async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
                            tenant_id: int) -> dict[str, Any]:
     # Caller owns the transaction and per-run lock, including marking the job done.
@@ -80,7 +130,8 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
     now = time.time()
 
     reason = None
-    if not s.b_enabled or not (s.context_memory_enabled or s.claim_checks_enabled):
+    if not s.b_enabled or not (s.context_memory_enabled or s.claim_checks_enabled
+                               or s.deception_meter_enabled):
         reason = "disabled"
     elif not 0 <= now - observed_at <= s.b_state_ttl_seconds:
         reason = "expired"
@@ -115,16 +166,21 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
     prior_claims = None
     if s.claim_checks_enabled and usable_state(previous, floor, attempt, s.b_state_ttl_seconds):
         prior_claims = previous.get("claim_review") or {"concerns": (previous.get("review") or {}).get("concerns", [])}
-    prompt = prompts.build_cycle_prompt(
-        str(payload.get("context_text") or ""),
-        str(payload.get("response_text") or ""),
-        events_preview,
-        json.dumps({"context_memory": prior_memory, "claim_review": prior_claims}, ensure_ascii=False),
-        max_chars=s.max_shadow_input_chars,
-        latest_request=str(payload.get("latest_user_text") or ""),
-    )
+
+    def rebuild(sensed: str = "") -> str:
+        return prompts.build_cycle_prompt(
+            str(payload.get("context_text") or ""),
+            str(payload.get("response_text") or ""),
+            events_preview,
+            json.dumps({"context_memory": prior_memory, "claim_review": prior_claims}, ensure_ascii=False),
+            max_chars=s.max_shadow_input_chars,
+            latest_request=str(payload.get("latest_user_text") or ""),
+            sensed=sensed,
+        )
+
+    base_prompt = rebuild()
     try:
-        review = await _obtain_review("lobe-b", prompt)
+        review, tool_results, used = await _review_with_sensing(base_prompt, rebuild, previous)
         if review.deception_level == "RED" and not review.concerns:
             # RED must always ship explicit wording; degrade the meter, never hide it.
             LOG.warning("Deception RED without wording downgraded to YELLOW run=%s", run_id)
@@ -140,6 +196,8 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
             "reviewed_at": time.time(), "floor_id": payload.get("floor_id", ""),
             "attempt_id": payload.get("attempt_id", 1),
             "deception_level": previous.get("deception_level"),
+            "meter_rationale": previous.get("meter_rationale"),
+            "evidence_ops_used": int(previous.get("evidence_ops_used", 0)),
             "context_memory": memory.model_dump() if memory else None,
             "claim_review": None,
             "reason": type(exc).__name__,
@@ -150,9 +208,12 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
 
     state = reviewed_state(previous, review, {**payload, "run_id": run_id},
                            memory_enabled=s.context_memory_enabled,
-                           claims_enabled=s.claim_checks_enabled)
+                           claims_enabled=s.claim_checks_enabled,
+                           evidence_used=used, evidence_snapshot=tool_results)
     concerns = state["claim_review"]["concerns"]
     await repo.save_b_state(session, tenant_id, run_id, state)
+    if tool_results:
+        await evidence_artifacts.record_evidence_memory(tenant_id, run_id, tool_results)
     if s.context_memory_enabled:
         await repo.append_event(session, "context_memory_updated", tenant_id, run_id=run_id,
                                 actor="lobe-b", payload={
@@ -163,6 +224,8 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
                             actor="lobe-b", payload={
                                 "n_concerns": len(concerns),
                                 "deception_level": state.get("deception_level"),
+                                "meter_rationale": review.meter_rationale,
+                                "evidence_used": used, "tool_rounds": len(tool_results),
                                 "source_call": state["source_call"],
                                 "assessment_only": True,
                             })
@@ -172,4 +235,4 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
                                     "concerns": concerns,
                                     "assessment_only": True,
                                 })
-    return {"ok": True, "concerns": len(concerns)}
+    return {"ok": True, "concerns": len(concerns), "evidence_used": used}

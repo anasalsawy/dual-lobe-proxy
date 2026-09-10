@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     monitoring_role: Literal["system", "developer"] = Field(default="system", validation_alias="DUAL_LOBE_MONITORING_ROLE")
     context_memory_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_CONTEXT_MEMORY_ENABLED")
     claim_checks_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_CLAIM_CHECKS_ENABLED")
+    deception_meter_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_DECEPTION_METER_ENABLED")
     context_memory_ttl_seconds: float = Field(default=86400, gt=0, validation_alias="DUAL_LOBE_CONTEXT_MEMORY_TTL_SECONDS")
     max_memory_chars: int = Field(default=1600, ge=600, le=6000, validation_alias="DUAL_LOBE_MAX_MEMORY_CHARS")
     b_cooldown_seconds: float = Field(default=0, ge=0, validation_alias="DUAL_LOBE_B_COOLDOWN_SECONDS")
@@ -64,6 +65,17 @@ class Settings(BaseSettings):
     b_rpm_limit: int = Field(default=20, ge=1, validation_alias="DUAL_LOBE_B_RPM_LIMIT")
     max_injection_chars: int = Field(default=1200, ge=300, le=4000, validation_alias="DUAL_LOBE_MAX_INJECTION_CHARS")
     max_shadow_input_chars: int = Field(default=18000, ge=4000, le=60000, validation_alias="DUAL_LOBE_MAX_SHADOW_INPUT_CHARS")
+
+    # Gateway-side evidence sensing: B stays inference-only; code executes bounded
+    # tools on its behalf, strictly off the request critical path (worker side).
+    evidence_sensing_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_EVIDENCE_SENSING_ENABLED")
+    b_tool_max_rounds: int = Field(default=2, ge=1, le=4, validation_alias="DUAL_LOBE_B_TOOL_MAX_ROUNDS")
+    b_evidence_ops_per_run: int = Field(default=3, ge=1, le=20, validation_alias="DUAL_LOBE_B_EVIDENCE_OPS_PER_RUN")
+    fetch_timeout: float = Field(default=10.0, gt=0, le=60, validation_alias="DUAL_LOBE_FETCH_TIMEOUT")
+    fetch_max_bytes: int = Field(default=32000, ge=2000, le=200000, validation_alias="DUAL_LOBE_FETCH_MAX_BYTES")
+    artifact_root: str = Field(default="", validation_alias="DUAL_LOBE_ARTIFACT_ROOT")
+    observer_memory_space: str = Field(default="observer", pattern=r"^([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})?$",
+                                       validation_alias="DUAL_LOBE_OBSERVER_MEMORY_SPACE")
 
     rpm_limit: int = Field(default=600, validation_alias="DUAL_LOBE_RPM_LIMIT")
     tpm_limit: int = Field(default=120000, validation_alias="DUAL_LOBE_TPM_LIMIT")

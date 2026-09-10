@@ -117,13 +117,48 @@ def test_legacy_state_converts_without_mutating_or_renewing_it():
 def test_deception_level_lives_outside_memory_and_is_delivered():
     state = reviewed_state({}, Review.model_validate({
         "goal": "g", "deception_level": "YELLOW", "questions": [], "next_step": "",
-        "context_notes": [], "concerns": []}), {"run_id": "run", "observed_at": time.time()})
+        "context_notes": [], "concerns": [], "meter_rationale": "Odd timing between claim and evidence."}),
+        {"run_id": "run", "observed_at": time.time()})
     assert state["deception_level"] == "YELLOW"
+    assert state["meter_rationale"] == "Odd timing between claim and evidence."
     assert "deception_level" not in state["context_memory"]["content"]
+    assert "meter_rationale" not in state["context_memory"]["content"]
     context = prepare_context(state, "", 1, Settings(_env_file=None))
     assert context.deception_status == "YELLOW"
-    assert context.deception_text == "Observer deception meter for the last answer: YELLOW."
+    assert context.deception_text.startswith("Observer deception meter (fallible, evidence-based")
+    assert "YELLOW." in context.deception_text
+    assert context.deception_text.endswith("Odd timing between claim and evidence.")
     assert context.receipt()["deception_status"] == "YELLOW"
+
+
+def test_evidence_snapshot_delivered_to_a_and_excluded_from_memory():
+    state = reviewed_state({}, example_review(), {
+        "run_id": "run", "observed_at": time.time(),
+        "source_call": "call-1"}, evidence_used=1, evidence_snapshot=[{
+            "ok": True, "tool": "fetch_web", "label": "fetch_web",
+            "url": "https://docs.example.com/guide", "status": 200,
+            "text": "The documented flag is --dry-run."}])
+    assert state["oversight_status"] == "reviewed"
+    assert state["evidence_ops_used"] == 1
+    assert state["evidence_request"] is None
+    assert "evidence_snapshot" not in state["context_memory"]["content"]
+    assert "meter_rationale" not in state["context_memory"]["content"]
+    context = prepare_context(state, "", 1, Settings(_env_file=None))
+    assert context.evidence_status == "available"
+    assert context.evidence_text and "docs.example.com" in context.evidence_text
+    assert context.receipt()["evidence_status"] == "available"
+    assert context.status == "review_available"
+
+
+def test_deception_meter_can_be_turned_off_independently():
+    state = reviewed_state({}, example_review(), {
+        "run_id": "run", "observed_at": time.time()})
+    off = prepare_context(state, "", 1, Settings(_env_file=None, deception_meter_enabled=False))
+    assert off.deception_status == "disabled"
+    assert off.deception_text is None
+    assert off.memory_status == "available"  # independent from memory channel
+    on = prepare_context(state, "", 1, Settings(_env_file=None))
+    assert on.deception_status == "GREEN"
 
 
 async def test_degraded_worker_preserves_completed_memory_without_renewal(monkeypatch):

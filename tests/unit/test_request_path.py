@@ -74,7 +74,8 @@ async def test_bypass_does_not_inject_or_enqueue_b(request_path):
 async def test_both_paths_disabled_does_not_pretend_to_monitor(request_path, monkeypatch):
     request, principal, persist, adapter = request_path
     monkeypatch.setattr(chat, "get_settings", lambda: Settings(
-        _env_file=None, context_memory_enabled=False, claim_checks_enabled=False))
+        _env_file=None, context_memory_enabled=False, claim_checks_enabled=False,
+        deception_meter_enabled=False))
     messages = [{"role": "user", "content": "task"}]
     response = await chat.chat_completions(ChatCompletionRequest(messages=messages), request, principal)
     assert adapter.buffered.call_args.args[0].messages == messages
@@ -175,7 +176,7 @@ def test_latest_user_text_takes_the_most_recent_user_message():
 async def test_deception_meter_is_injected_and_echoed_in_header(request_path, monkeypatch):
     from dual_lobe.b.channels import ObserverContext
     monkeypatch.setattr(chat, "_read_context", AsyncMock(return_value=ObserverContext(
-        deception_text="Observer deception meter for the last answer: RED.",
+        deception_text="Observer deception meter (fallible, evidence-based reading of the last answer): RED.",
         deception_status="RED")))
     request, principal, _, adapter = request_path
     response = await chat.chat_completions(
