@@ -5,8 +5,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from dual_lobe.b import host_tools
+from dual_lobe.b.context_shadow import _tool_results_present
 from dual_lobe.b.channels import ObserverContext
-from dual_lobe.b.protocol import Review
+from dual_lobe.b.protocol import Review, parse_tool_requests
+from dual_lobe.b.artifacts import bounded_artifacts
+from dual_lobe.b.prompts import EVIDENCE_MARKER, build_cycle_prompt
 from dual_lobe.api import chat
 from dual_lobe.core.settings import Settings
 
@@ -53,6 +56,55 @@ def test_b_can_request_mutation_tools_supplied_by_host():
     })
     assert host_tools.offered_tools([mutating]) == [mutating]
     assert host_tools.make_plan(review, [mutating])[0]["name"] == "write_file"
+
+
+def test_artifact_full_request_requires_explicit_complete_payload():
+    assert parse_tool_requests([{"name": "read_file", "arguments": {"path": "x"},
+                                "request_kind": "artifact_full"}]) == []
+    accepted = parse_tool_requests([{"name": "read_file", "arguments": {"path": "x"},
+                                    "claim_quote": "created x", "request_kind": "artifact_full",
+                                    "full_artifact": True}])
+    assert len(accepted) == 1 and accepted[0].full_artifact is True
+
+
+def test_artifact_plan_preserves_claim_and_source_provenance():
+    review = Review.model_validate({
+        "goal": "g", "questions": [], "next_step": "", "context_notes": [], "concerns": [],
+        "tool_requests": [{"name": "search_docs", "arguments": {"q": "out.txt"},
+                            "claim_quote": "created out.txt", "request_kind": "artifact_full",
+                            "full_artifact": True}],
+    })
+    plan = host_tools.make_plan(review, host_tools.offered_tools([definition()]), "a-call")
+    assert plan[0]["source_call"] == "a-call"
+    assert plan[0]["request_kind"] == "artifact_full"
+    assert plan[0]["claim_quote"] == "created out.txt"
+
+
+def test_artifact_inventory_and_prompt_are_bounded_and_keep_complete_json():
+    artifact = {"path": "out.txt", "content": "x" * 20000}
+    bounded = bounded_artifacts([artifact], budget=1200)
+    assert bounded and bounded[0]["content_truncated"] is True
+    prompt = build_cycle_prompt("context", "created out.txt", "", "",
+                                max_chars=4000, artifacts=[artifact])
+    assert len(prompt) <= 4000
+    assert '"ARTIFACTS"' in prompt
+
+
+def test_structured_tool_results_are_kept_in_observer_prompt():
+    prompt = build_cycle_prompt("context", "created out.txt", "", "",
+                                max_chars=6000,
+                                tool_results=[{"role": "tool", "tool_call_id": "dlb_1",
+                                               "content": "complete artifact bytes"}])
+    body = prompt.split(EVIDENCE_MARKER, 1)[1]
+    assert '"TOOL_RESULTS"' in body and "complete artifact bytes" in body
+
+
+def test_verification_waits_for_each_host_tool_result():
+    context = 'message[2] {"role":"tool","tool_call_id":"dlb_one","content":"ok"}'
+    assert not _tool_results_present(context, ["dlb_one", "dlb_two"])
+    assert _tool_results_present(context + '\n' +
+                                 'message[3] {"role":"tool","tool_call_id":"dlb_two","content":"ok"}',
+                                 ["dlb_one", "dlb_two"])
 
 
 def test_unknown_or_changed_tools_are_fail_open():
