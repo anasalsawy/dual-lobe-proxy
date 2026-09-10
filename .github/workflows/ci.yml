@@ -1,0 +1,39 @@
+name: Proxy tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-and-protocol:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: dual_lobe
+          POSTGRES_PASSWORD: dual_lobe_dev
+          POSTGRES_DB: dual_lobe_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dual_lobe -d dual_lobe_test"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      DUAL_LOBE_TEST_DATABASE_URL: postgresql+asyncpg://dual_lobe:dual_lobe_dev@127.0.0.1:5432/dual_lobe_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.8"
+          python-version: "3.12"
+      - run: uv sync --locked --extra dev
+      - run: uv run --locked pytest -q --tb=short
+      - run: uv run --locked python -m dual_lobe.demo
+      - run: uv run --locked python -m compileall -q src tests alembic

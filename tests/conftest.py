@@ -10,6 +10,9 @@ os.environ.setdefault("DUAL_LOBE_A_MODEL", "fake-model")
 os.environ.setdefault("DUAL_LOBE_A_BASE_URL", "https://fake.local/v1")
 os.environ.setdefault("DUAL_LOBE_ROLLOUT_STAGE", "observation")
 os.environ.setdefault("DUAL_LOBE_PULSE_EVERY", "3")
+# Legacy observer tests run without shared-memory DB calls; tests selecting a
+# memory space explicitly exercise the new default-enabled persistence path.
+os.environ.setdefault("DUAL_LOBE_DEFAULT_MEMORY_ID", "")
 
 from testcontainers.community.postgres import PostgresContainer  # noqa: E402
 
@@ -18,6 +21,20 @@ from dual_lobe.core.settings import get_settings  # noqa: E402
 
 @pytest.fixture(scope="session")
 def postgres() -> PostgresContainer:
+    # Optional explicitly disposable Postgres for hosts without Docker. Never
+    # infer this from the application's regular DATABASE_URL.
+    test_url = os.environ.get("DUAL_LOBE_TEST_DATABASE_URL")
+    if test_url:
+        from sqlalchemy.engine import make_url
+        url = make_url(test_url)
+        if not (url.database or "").endswith("_test"):
+            raise ValueError("DUAL_LOBE_TEST_DATABASE_URL must name a disposable database ending in _test")
+        os.environ["DATABASE_URL"] = url.set(drivername="postgresql+asyncpg").render_as_string(hide_password=False)
+        os.environ["RLS_DATABASE_URL"] = url.set(drivername="postgresql+asyncpg", username="dual_lobe_rls", password="dual_lobe_rls").render_as_string(hide_password=False)
+        get_settings.cache_clear()
+        _apply_migrations()
+        yield None
+        return
     with PostgresContainer("postgres:18") as pg:
         host, port = pg.get_container_host_ip(), pg.get_exposed_port(5432)
         user, password, db = pg.username, pg.password, pg.dbname

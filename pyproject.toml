@@ -1,7 +1,7 @@
 [project]
 name = "dual-lobe"
-version = "0.3.0"
-description = "Text inference gateway with a bounded asynchronous context and claim observer."
+version = "0.4.0"
+description = "Text inference proxy with background observation, visible director mode, and shared persistent memory."
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115,<1",

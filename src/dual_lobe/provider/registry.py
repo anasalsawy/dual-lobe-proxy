@@ -81,7 +81,8 @@ class Registry:
         return self._adapters[target.alias]
 
     def models(self) -> list[dict[str, Any]]:
-        return [
+        from ..core.settings import get_settings
+        result = [
             {
                 "id": t.alias,
                 "object": "model",
@@ -93,6 +94,12 @@ class Registry:
             for t in self._targets.values()
             if t.enabled
         ]
+        if get_settings().director_enabled and "lobe-a" in self._targets and self._targets["lobe-a"].enabled:
+            result.append({"id": "lobe-a-director", "object": "model", "owned_by": "local",
+                           "logical_model": self._targets["lobe-a"].model,
+                           "kind": "chat_completions", "capabilities": {"stream": True, "tools": True,
+                           "director": True, "requires_run_header": True, "structured_output": False}})
+        return result
 
 
 _registry: Registry | None = None

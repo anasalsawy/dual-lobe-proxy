@@ -1,5 +1,42 @@
 # Validation record
 
+## v0.4 director mode and shared persistent memory — 2026-09-10
+
+Local Python 3.12 validation:
+
+- **109 deterministic tests passed**, including all 67 previous unit tests.
+- **131 cases collected**: 109 deterministic and 22 Postgres integration cases.
+- Visible A/B alternation, single outer completion identity/termination, fragmented
+  parallel tool handoff, exact result matching, full and delta history, duplicate
+  request prevention, SDK null-field compatibility, persistent invocation budgets,
+  malformed B/A output, cancellation and ASGI send-failure cleanup were exercised.
+- Memory tests cover a second app sending no previous chat history, the default
+  shared space, bounded valid context, notebook preservation, selection headers,
+  and committing memory before the successful terminal event.
+- Locked offline install built v0.4.0. No new Python runtime dependency was added.
+- Source/test/migration compilation, whitespace checks, lock validation, installed
+  client help, and the existing five-check offline observer demo passed.
+- New migrations 0002 and 0003 successfully generated Postgres SQL with Alembic
+  from the existing 0001 revision. SQL generation is not a database execution test.
+
+The local Postgres test was attempted and failed during fixture setup because
+Docker access raised `PermissionError(1, 'Operation not permitted')`. No database
+assertion ran locally. Native Postgres is absent; package-manager setup was also
+blocked by this environment's process permissions.
+
+The new [CI workflow](../.github/workflows/ci.yml) runs the complete suite against
+an isolated Postgres 18 service. Its database cases test new-connection memory
+retention, old-record lookup, namespace/tenant isolation, SQL leases, migrations,
+and a full HTTP tool handoff. Check the associated workflow result for execution
+status; the local mock tests alone do not establish those guarantees.
+
+No live A/B provider conversation has run in this checkout: no provider key or
+running proxy is configured here. These tests do not measure model honesty,
+judgment, recall accuracy, or provider compatibility. The installed client and
+the [director/memory test guide](DIRECTOR_AND_MEMORY.md) provide the live test.
+
+The earlier release records below are historical, not additional v0.4 results.
+
 ## v0.3 memory and separate request paths — 2026-09-10
 
 Executed in a fresh Python 3.12 environment created for the updated checkout:

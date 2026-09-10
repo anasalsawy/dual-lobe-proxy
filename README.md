@@ -1,7 +1,20 @@
 # Dual-lobe proxy
 
-A text-only Chat Completions gateway with a small asynchronous observer (v0.3).
-**A works. B asks better questions and flags evidence-linked concerns. B never holds A.**
+A text-only Chat Completions gateway with a background observer, visible director
+mode, and shared persistent memory (v0.4).
+
+**Normal mode:** A responds while B reviews in the background.
+**Director mode:** B takes your conversational place, asks A follow-up questions,
+and directs another A turn. Watch labelled A/B exchanges in the response stream.
+Your application continues to execute A's tools.
+
+**Shared memory:** all apps using the same proxy tenant share the persistent
+space named `main` by default. Override it with `X-DL-Memory-ID: project-name`.
+The proxy automatically loads its notebook and selected stored history on each
+A call, even when an app sends no prior chat history. It does not transfer tools,
+permissions, or a running agent's execution state between apps.
+
+See [director mode, memory, and the test commands](docs/DIRECTOR_AND_MEMORY.md).
 
 The three paths are now separate:
 
@@ -15,7 +28,8 @@ Your original messages remain unchanged. Memory loading still supplies input to 
 next model call; it is not an extra connection into an already generating model.
 See [the setup and conversation test](docs/THREE_PATH_SETUP.md).
 
-B has no tools, browser, filesystem access, CrewAI tasks, or multi-agent debate.
+B has no tools, browser, filesystem access, or CrewAI tasks. Director mode uses
+the same configured B provider with a separate short conversational prompt.
 It cannot guarantee truth, infer intent from writing style, or prevent every fabricated
 statement. This is an advisory development implementation, not a verified production
 security boundary. Read [the research and design](docs/RESEARCH_AND_DESIGN.md) and
@@ -28,7 +42,7 @@ security boundary. Read [the research and design](docs/RESEARCH_AND_DESIGN.md) a
 | Admission | Bearer key, request, correlation headers | Resolve tenant; validate supported fields; apply process-local budgets | Unauthorized requests rejected; images/audio rejected; unknown model aliases rejected |
 | Run context | Run/floor/attempt headers and first user objective | Resolve/create run; retain original goal | Internal run UUID; no database transaction held while A generates |
 | A context | Original messages, completed memory, fresh claim findings | Add the fixed monitoring instruction; load memory as `observer_memory` and claim findings as `observer_claims` | Separate user-role data messages; original user text and tool-call/result adjacency preserved |
-| A response | Provider completion or SSE | Relay response; stream each SSE event as it arrives | Tool fragments, choice indices, IDs, finish reasons and usage preserved; interrupted streams report an error |
+| A response (normal mode) | Provider completion or SSE | Relay response; stream content as it arrives | When shared memory is selected, persist the complete observed turn before releasing the terminal event; storage failure is explicit |
 | Observation capture | Bounded original context, A output, call metadata | After response delivery, best-effort audit/outbox transaction | A never waits for a B model; a crash before this transaction can lose the observation |
 | B review | Original goal, context/output, recent reported events, relevant prior memory/findings | One bounded model call; no tool use or retries | Goal, two questions, one next step, two context notes; separately, three concerns |
 | Review validation | B JSON | Check schema, lengths, allowed labels, exact quoted substrings | Malformed/ungrounded review becomes degraded, not “clean” or “verified” |
@@ -63,7 +77,8 @@ curl http://localhost:8801/healthz
 curl http://localhost:8801/readyz
 ```
 
-Only the `initialize` service runs migrations/bootstrap. It must succeed before
+Only the `initialize` service runs migrations/bootstrap, including v0.4 migrations
+0002 (director sessions) and 0003 (shared memory). It must succeed before
 the gateway and worker start. Re-running bootstrap does not duplicate existing
 keys or reactivate revoked keys. Existing development keys from older versions
 are not automatically revoked: rotate them before sharing the service.
@@ -76,7 +91,8 @@ end-to-end model availability. Inspect state timestamps and worker logs for B.
 
 Point a Chat Completions client at `http://localhost:8801/v1`, use your **proxy**
 API key (not the upstream provider key), and select model `lobe-a`.
-No CrewAI observer agent or tools need to be added.
+No CrewAI observer agent or tools need to be added. Choose `lobe-a-director` for
+the visible director loop. Both routes load shared memory by default.
 
 Set a stable `X-DL-Run-ID` for one conversation/task. Without it, each request is
 a new run, so B cannot help subsequent calls. You can reuse the returned internal
@@ -112,12 +128,15 @@ means no stored review. “Reviewed” means the output contract passed, not tha
 answer is true. `payload.context_memory` and `payload.claim_review` are separate.
 `payload.context_memory_status` reports memory freshness independently.
 
-Context receipts describe what was prepared for a particular A request:
+In normal mode, context receipts describe what was prepared for a particular A request:
 `X-Dual-Lobe-Memory` is `vN`, `none`, `stale`, `scope_mismatch`, `disabled`, or
 `unavailable`; `X-Dual-Lobe-Claims` describes the claim-finding route;
 `X-Dual-Lobe-Monitoring` is `on` or `off`. They do not independently prove upstream
 receipt or that the model followed the notes. `X-Dual-Lobe-Observer` retains the overall lookup status. A matching
 `worker_call` event records `observer_delivery` after response delivery.
+`X-Dual-Lobe-Memory-Space` names the shared space or `off`;
+`X-Dual-Lobe-Shared-Entries` counts the selected journal entries. Director mode
+reloads memory per internal A turn and reports `per-turn` for observer channels.
 
 Optional external results can be posted to `/v1/dual-lobe/events` with
 `kind`, `run_id`, `payload`, and `idempotency_key`. They are stored as
@@ -187,11 +206,14 @@ image/audio processing and public inference via `lobe-b` are disabled.
 runtime. Legacy claim/evidence tables remain readable for existing data; B does
 not create final verdicts or run artifact checks. Successful v2 state is converted
 on read without changing its observation time. New writes use v3 with separate
-`context_memory` and `claim_review` fields. No new database migration is required.
+`context_memory` and `claim_review` fields. The new director and shared-memory
+features require migrations 0002 and 0003; run initialization when upgrading.
 
-No B model wait does not mean literally zero overhead: authentication, database
+Normal mode's lack of a B model wait does not mean literally zero overhead: authentication, database
 run lookup, optional 25 ms state lookup, network/proxy work and additional prompt
-tokens still cost time. Shared upstream capacity can also slow A. A response
+tokens still cost time. Shared memory adds database reads/writes and selected
+history tokens. Director mode intentionally adds serial A/B calls, time and cost.
+Shared upstream capacity can also slow A. A response
 already delivered cannot be retracted or corrected by a later B review.
 
 Observation capture is best effort after delivery, not lossless audit logging.
@@ -220,11 +242,14 @@ For a live conversation against the configured running Compose stack:
 
 ```sh
 docker compose exec gateway python -m dual_lobe.client --run our-first-test
+# Visible conversation, with memory shared across later apps/runs:
+docker compose exec gateway python -m dual_lobe.client --director --memory-id main --run director-test-1
 ```
 
 Enter the proxy key at the hidden prompt. Type `/state` to inspect B's current
 memory and findings. Each A response displays the delivered version and route
-statuses. This test client does not execute tools or pretend to inspect files.
+statuses. `/director` and `/normal` switch modes; `/new` starts a fresh run while
+keeping the selected shared memory space. This test client does not execute tools or pretend to inspect files.
 Native clients can run `python -m dual_lobe.client --url http://localhost:8801`.
 
 Native execution requires Postgres, explicit `DATABASE_URL` and

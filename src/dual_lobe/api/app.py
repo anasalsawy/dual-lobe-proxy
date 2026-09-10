@@ -10,7 +10,7 @@ from ..core.engine import dispose_engines
 from ..core.settings import get_settings
 from ..provider.adapters import close_http_client
 from ..obs.telemetry import TRACER
-from . import chat, events, health, state
+from . import chat, director, events, health, memory, state
 
 LOG = logging.getLogger("dual_lobe.api")
 
@@ -29,11 +29,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Dual-Lobe Inference Proxy",
-    version="0.3.0",
+    version="0.4.0",
     lifespan=lifespan,
 )
 
 app.include_router(chat.router)
+app.include_router(director.router)
+app.include_router(memory.router)
 app.include_router(events.router)
 app.include_router(state.router)
 app.include_router(health.router)

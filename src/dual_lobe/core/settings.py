@@ -73,6 +73,19 @@ class Settings(BaseSettings):
     a_timeout: float = Field(default=180.0, gt=0, validation_alias="DUAL_LOBE_A_TIMEOUT")
     b_timeout: float = Field(default=20.0, gt=0, le=60, validation_alias="DUAL_LOBE_B_TIMEOUT")
 
+    # Opt-in by model alias/header; these budgets are per director invocation,
+    # including resumed tool segments. Normal lobe-a remains asynchronous.
+    director_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_DIRECTOR_ENABLED")
+    director_max_a_calls: int = Field(default=8, ge=1, le=40, validation_alias="DUAL_LOBE_DIRECTOR_MAX_A_CALLS")
+    director_max_seconds: float = Field(default=300, gt=0, le=3600, validation_alias="DUAL_LOBE_DIRECTOR_MAX_SECONDS")
+    director_a_max_tokens: int = Field(default=4096, ge=64, le=32768, validation_alias="DUAL_LOBE_DIRECTOR_A_MAX_TOKENS")
+    director_b_max_tokens: int = Field(default=1000, ge=64, le=4000, validation_alias="DUAL_LOBE_DIRECTOR_B_MAX_TOKENS")
+    director_max_state_bytes: int = Field(default=1048576, ge=16384, le=8388608, validation_alias="DUAL_LOBE_DIRECTOR_MAX_STATE_BYTES")
+    shared_memory_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_SHARED_MEMORY_ENABLED")
+    default_memory_id: str = Field(default="main", pattern=r"^([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})?$", validation_alias="DUAL_LOBE_DEFAULT_MEMORY_ID")
+    shared_memory_max_chars: int = Field(default=10000, ge=6000, le=40000, validation_alias="DUAL_LOBE_SHARED_MEMORY_MAX_CHARS")
+    shared_memory_timeout: float = Field(default=5, gt=0, le=30, validation_alias="DUAL_LOBE_SHARED_MEMORY_TIMEOUT")
+
     worker_poll_seconds: float = Field(default=1.0, gt=0, validation_alias="DUAL_LOBE_WORKER_POLL_SECONDS")
     worker_max_concurrency: int = Field(default=2, ge=1, le=16, validation_alias="DUAL_LOBE_WORKER_MAX_CONCURRENCY")
     worker_lock_seconds: int = Field(default=90, validation_alias="DUAL_LOBE_WORKER_LOCK_SECONDS")

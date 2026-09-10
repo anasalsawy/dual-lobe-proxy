@@ -24,6 +24,8 @@ from ..core.settings import get_settings
 from ..provider.adapters import resolve_request, response_dict
 from ..provider.registry import get_registry
 from ..state import repositories as repo
+from ..state.memory import load_memory, record_memory, validate_space
+from ..director.protocol import Completion
 from . import auth, correlation, limits
 from .schemas import ChatCompletionRequest
 
@@ -53,7 +55,8 @@ def _original_goal(messages: list[dict]) -> str:
 
 
 def _effective_messages(messages: list[dict], context: ObserverContext, reminder: bool,
-                        monitoring_role: str = "system") -> list[dict]:
+                        monitoring_role: str = "system", *,
+                        reminder_text: str = OBSERVATION_REMINDER, shared_text: str | None = None) -> list[dict]:
     effective = list(messages)
     # Insert only before the conversation, never between an assistant tool call
     # and its results. B's generated text is NOT promoted into a system message.
@@ -61,11 +64,11 @@ def _effective_messages(messages: list[dict], context: ObserverContext, reminder
     while index < len(effective) and effective[index].get("role") in ("system", "developer"):
         index += 1
     if reminder:
-        effective.insert(index, {"role": monitoring_role, "content": OBSERVATION_REMINDER})
+        effective.insert(index, {"role": monitoring_role, "content": reminder_text})
         index += 1
     # Two separately stored/delivered paths. Model-generated material stays at
     # user-message priority; only the fixed monitoring instruction is privileged.
-    for name, content in (("observer_memory", context.memory_text),
+    for name, content in (("shared_memory", shared_text), ("observer_memory", context.memory_text),
                           ("observer_claims", context.claims_text)):
         if content:
             effective.insert(index, {"role": "user", "name": name, "content": content})
@@ -156,15 +159,19 @@ async def _persist_observation(tenant_id: int, run_id: str, external_run: str,
                     run_id, audit["call_id"], type(exc).__name__)
 
 
-async def _stream_body(adapter, req, public_model: str, audit: dict):
+async def _stream_body(adapter, req, public_model: str, audit: dict, save_memory=None):
     started = time.monotonic()
     finished = set()
     seen = set()
+    collector = Completion() if save_memory else None
+    terminal = []
     try:
         async with asyncio.timeout(req.timeout), aclosing(adapter.stream(req)) as upstream:
             async for raw in upstream:
                 chunk = response_dict(raw)
                 chunk["model"] = public_model
+                if collector is not None:
+                    collector.add(chunk)
                 for choice in chunk.get("choices") or []:
                     index = choice.get("index", 0)
                     seen.add(index)
@@ -179,9 +186,17 @@ async def _stream_body(adapter, req, public_model: str, audit: dict):
                     )
                 if chunk.get("usage"):
                     audit["usage"] = chunk["usage"]
-                yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
+                wire = "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
+                if collector is not None and (finished or terminal):
+                    terminal.append(wire)
+                else:
+                    yield wire
         if not seen or not seen <= finished:
             raise ValueError("upstream stream ended without a terminal choice")
+        if collector is not None:
+            await save_memory([collector.message(req.tools)])
+            for wire in terminal:
+                yield wire
         audit["status"] = "SUCCESS"
     except asyncio.CancelledError:
         audit["status"] = "INCOMPLETE"
@@ -217,8 +232,23 @@ async def chat_completions(
         ):
             raise HTTPException(status_code=400, detail="image/audio input is disabled; text only")
     alias = payload["model"]
+    corr = correlation.parse_headers(request.headers)
+    director_mode = alias == "lobe-a-director" or corr.get("mode") == "director"
+    if director_mode and (not s.director_enabled or correlation.is_bypass(corr)):
+        raise HTTPException(400, "Director mode is disabled or conflicts with bypass.")
+    if director_mode and alias not in ("lobe-a", "lobe-a-director"):
+        raise HTTPException(400, "Use lobe-a-director or lobe-a with director mode.")
+    target_alias = "lobe-a" if director_mode else alias
+    requested_space = request.headers.get("X-DL-Memory-ID")
+    selected_space = requested_space if requested_space is not None else (s.default_memory_id if s.shared_memory_enabled else None)
     try:
-        target = get_registry().target(alias)
+        memory_space = validate_space(selected_space) if selected_space and selected_space != "off" else None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    if memory_space and not s.shared_memory_enabled:
+        raise HTTPException(400, "Shared memory is disabled on this proxy.")
+    try:
+        target = get_registry().target(target_alias)
         if target is None or not target.enabled:
             raise KeyError(alias)
     except KeyError:
@@ -232,7 +262,6 @@ async def chat_completions(
     if not limit.allowed:
         raise HTTPException(status_code=429, detail="rate limit exceeded",
                             headers={"Retry-After": str(int(limit.retry_after + 1))})
-    corr = correlation.parse_headers(request.headers)
     observe = (s.b_enabled and (s.context_memory_enabled or s.claim_checks_enabled)
                and not correlation.is_bypass(corr))
     external_run = str(corr.get("run") or uuid.uuid4())
@@ -244,6 +273,10 @@ async def chat_completions(
         )
         run_id = str(run.id)
         await session.commit()
+    if director_mode:
+        from . import director
+        return await director.response(payload, request, principal, run_id, external_run, corr,
+                                       target, get_registry(), s, memory_space, observe)
     # No transaction or B model call is held across A's provider operation.
     context = ObserverContext(memory_status="disabled", claim_status="disabled", status="disabled")
     if observe and stage_mod.injection_enabled(s.rollout_stage):
@@ -252,7 +285,11 @@ async def chat_completions(
         context = await _read_context(principal.tenant_id, run_id, floor, attempt)
     req = resolve_request(payload)
     monitoring = observe and s.observation_reminder
-    req.messages = _effective_messages(messages, context, monitoring, s.monitoring_role)
+    try:
+        shared = await load_memory(principal.tenant_id, memory_space, messages)
+    except Exception:
+        raise HTTPException(503, "Shared memory is unavailable; no model was invoked.") from None
+    req.messages = _effective_messages(messages, context, monitoring, s.monitoring_role, shared_text=shared.text)
     req.timeout = s.a_timeout
     adapter = get_registry().adapter(alias)
     context_text = head_tail(
@@ -264,16 +301,21 @@ async def chat_completions(
              "stream": req.stream, "status": "INCOMPLETE", "output": "",
              "latency_ms": 0, "observed_at": time.time(),
              "observer_delivery": {**context.receipt(), "monitoring": monitoring}}
+    audit["observer_delivery"].update(shared_memory_space=memory_space, shared_entry_ids=list(shared.entry_ids))
+    async def save_memory(responses):
+        await record_memory(principal.tenant_id, memory_space, run_id, audit["call_id"], messages, responses)
     background = BackgroundTask(_persist_observation, principal.tenant_id, run_id,
                                 external_run, corr, alias, context_text, audit, observe)
     headers = {"X-Dual-Lobe-Run-Id": run_id, "X-Dual-Lobe-Observer": context.status,
                "X-Dual-Lobe-Call-Id": audit["call_id"],
                "X-Dual-Lobe-Memory": (f"v{context.memory_version}" if context.memory_text else context.memory_status),
                "X-Dual-Lobe-Claims": context.claim_status,
-               "X-Dual-Lobe-Monitoring": "on" if monitoring else "off"}
+               "X-Dual-Lobe-Monitoring": "on" if monitoring else "off",
+               "X-Dual-Lobe-Memory-Space": memory_space or "off",
+               "X-Dual-Lobe-Shared-Entries": str(len(shared.entry_ids))}
     if req.stream:
         return StreamingResponse(
-            _stream_body(adapter, req, alias, audit), media_type="text/event-stream",
+            _stream_body(adapter, req, alias, audit, save_memory if memory_space else None), media_type="text/event-stream",
             headers={**headers, "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             background=background,
         )
@@ -282,6 +324,7 @@ async def chat_completions(
         async with asyncio.timeout(s.a_timeout):
             data = await _call_a_with_retry(lambda: adapter.buffered(req), s.a_retries)
         data["model"] = alias
+        await save_memory([c["message"] for c in data["choices"]])
         audit["output"] = _messages_text(
             [c["message"] for c in data["choices"]], s.max_shadow_input_chars
         )

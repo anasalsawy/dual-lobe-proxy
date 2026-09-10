@@ -24,6 +24,7 @@ async def test_migration_applied_with_tables_and_rls_role(admin_engine_conn):
         expected = {
             "tenants", "api_keys", "runs", "provider_attempts", "events", "claims",
             "evidence", "b_state", "b_jobs", "outbox", "provider_registry",
+            "director_sessions", "memory_spaces", "memory_entries",
         }
         assert expected.issubset(set(tables))
         roles = (await conn.execute(text("SELECT rolname FROM pg_roles WHERE rolname='dual_lobe_rls'"))).scalars().all()
