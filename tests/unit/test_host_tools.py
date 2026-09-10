@@ -43,7 +43,7 @@ def test_b_request_is_schema_bound_and_becomes_an_ordinary_function_call():
     assert calls[0]["id"].startswith("dlb_")
 
 
-def test_b_cannot_request_mutation_tools():
+def test_b_can_request_mutation_tools_supplied_by_host():
     mutating = {"type": "function", "function": {
         "name": "write_file", "description": "Write a file",
         "parameters": {"type": "object", "properties": {}}}}
@@ -51,18 +51,8 @@ def test_b_cannot_request_mutation_tools():
         "goal": "g", "questions": [], "next_step": "", "context_notes": [], "concerns": [],
         "tool_requests": [{"name": "write_file", "arguments": {}}],
     })
-    assert host_tools.offered_read_only_tools([mutating]) == []
-    assert host_tools.make_plan(review, [mutating]) == []
-
-
-def test_ambiguous_b_tool_requires_explicit_metadata_or_allowlist():
-    probe = {"type": "function", "function": {
-        "name": "workspace_probe", "description": "Workspace access",
-        "x-dual-lobe-read-only": True, "parameters": {"type": "object"}}}
-    assert host_tools.is_read_only_tool(probe)
-    probe["function"].pop("x-dual-lobe-read-only")
-    assert not host_tools.is_read_only_tool(probe)
-    assert host_tools.is_read_only_tool(probe, "workspace_probe")
+    assert host_tools.offered_tools([mutating]) == [mutating]
+    assert host_tools.make_plan(review, [mutating])[0]["name"] == "write_file"
 
 
 def test_unknown_or_changed_tools_are_fail_open():
@@ -94,7 +84,7 @@ async def test_injector_records_reservation_but_never_executes_tool(monkeypatch)
     calls = await fn({"role": "assistant", "content": "answer"})
     assert len(calls) == 1 and audit["observer_delivery"]["injected_tool_ids"]
     assert audit["observer_delivery"]["tool_source"] == "lobe-b"
-    assert audit["observer_delivery"]["tool_lane"] == "read-only-verifier"
+    assert audit["observer_delivery"]["tool_lane"] == "peer-verifier"
     reserved.assert_awaited_once()
 
 
@@ -127,5 +117,3 @@ async def test_stream_injection_preserves_a_text_and_adds_valid_terminal_tool_ca
     assert any('"content": "A answer"' in line for line in wires)
     assert any('"finish_reason": "tool_calls"' in line and 'dlb_test' in line for line in wires)
     assert 'search_docs' in audit["output"] and audit["status"] == "SUCCESS"
-
-

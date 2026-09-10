@@ -72,17 +72,15 @@ off suppresses findings and meter; the independent meter switch only hides color
 
 ## Persistence and timing
 
-### Optional read-only host-tool lane
+### Optional host-tool lane
 
-B may request at most two read-only information calls from tools already supplied
-by the host application. The proxy offers only tools with an explicit
-`x-dual-lobe-read-only: true` marker, an obvious read-only name, or a configured
-`DUAL_LOBE_B_READ_ONLY_TOOL_NAMES` entry; mutation-like or ambiguous tools are
-rejected. Requests are relayed through the normal application tool-call protocol;
-the proxy never executes them. Results can reach A and B on subsequent turns.
-Missing tools, rejected calls and failures are fail-open and do not block A. The
-proxy cannot prove that a host implementation marked read-only is honest, so the
-host must enforce that boundary too.
+B may request at most two calls using any valid function tools already supplied by
+the host application, including reads, writes or execution when relevant and
+permitted. Requests are relayed through the normal application tool-call protocol;
+the proxy never executes them independently. Results can reach A and B on
+subsequent turns. Missing tools, rejected calls and failures are fail-open and do
+not block A. The host application remains responsible for its own permissions and
+approval policy.
 
 Knowledge notes carry topic, kind (`background`, `hypothesis`, or `question`),
 insight/question, relevance and an application/check suggestion. Code supplies

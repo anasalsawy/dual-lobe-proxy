@@ -83,9 +83,9 @@ return 409. The proxy never turns a tool request or B's approval into evidence o
 execution. A consumes actual host-reported results before B's next review.
 
 Tool schemas and tool-choice settings come from the host and are retained for A;
-B receives only bounded read-only information definitions (explicitly marked,
-obviously read-only, or configured by name), never mutation tools or an executor.
-Forced tool choice can keep A producing tools, so
+B receives bounded definitions for any tools supplied by the host. It can request
+reads or mutations, but the proxy never executes tools itself: the host application
+retains permission, approval and execution control. Forced tool choice can keep A producing tools, so
 those calls also count toward the invocation budget. Host permissions remain in
 effect. An inference proxy cannot create new native user bubbles or promise that
 every client will display text alongside tool requests. Host-specific signed

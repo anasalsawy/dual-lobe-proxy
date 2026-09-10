@@ -58,7 +58,6 @@ class Settings(BaseSettings):
     context_enrichment_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_CONTEXT_ENRICHMENT_ENABLED")
     deception_meter_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_DECEPTION_METER_ENABLED")
     b_host_tools_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_B_HOST_TOOLS_ENABLED")
-    b_read_only_tool_names: str = Field(default="", validation_alias="DUAL_LOBE_B_READ_ONLY_TOOL_NAMES")
     context_memory_ttl_seconds: float = Field(default=86400, gt=0, validation_alias="DUAL_LOBE_CONTEXT_MEMORY_TTL_SECONDS")
     max_memory_chars: int = Field(default=1600, ge=600, le=6000, validation_alias="DUAL_LOBE_MAX_MEMORY_CHARS")
     b_cooldown_seconds: float = Field(default=0, ge=0, validation_alias="DUAL_LOBE_B_COOLDOWN_SECONDS")
