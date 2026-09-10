@@ -27,8 +27,10 @@ blocked by this environment's process permissions.
 The new [CI workflow](../.github/workflows/ci.yml) runs the complete suite against
 an isolated Postgres 18 service. Its database cases test new-connection memory
 retention, old-record lookup, namespace/tenant isolation, SQL leases, migrations,
-and a full HTTP tool handoff. Check the associated workflow result for execution
-status; the local mock tests alone do not establish those guarantees.
+and a full HTTP tool handoff. [CI run 34434262978](https://github.com/anasalsawy/dual-lobe-proxy/actions/runs/34434262978)
+completed successfully on the implementation commit 7443e431: **131 passed** on
+Python 3.12.3, with a real Postgres 18 service. The model replies remain scripted.
+The install, offline observer demo, and compilation steps also passed in CI.
 
 No live A/B provider conversation has run in this checkout: no provider key or
 running proxy is configured here. These tests do not measure model honesty,
