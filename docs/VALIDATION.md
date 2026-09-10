@@ -25,7 +25,10 @@ Current local Python 3.12 validation:
 - The new Postgres cases cover worker-to-journal guidance attachment, reconnect
   retrieval, tenant/space/run/call boundaries, suppression of saved notes,
   old-record compatibility and additive migration 0004 on pre-existing rows.
-  Their execution is pending CI at this checkpoint; collection is not a pass.
+  GitHub Actions run [34451686020](https://github.com/anasalsawy/dual-lobe-proxy/actions/runs/34451686020)
+  completed successfully on the merged implementation: the isolated Postgres
+  service ran the complete suite (**184 passed**), the offline demo, and source
+  compilation.
 
 No real provider credentials or running deployment are configured in the authoring
 environment. The live three-arm comparison has not run. Both assessments now
