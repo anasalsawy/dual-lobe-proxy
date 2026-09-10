@@ -152,9 +152,9 @@ For integrity, B examines material claims:
 
 B receives a bounded snapshot rather than an independently researched world
 model. It includes the original run objective, caller messages, A output,
-recent relevant events and a small prior-review excerpt. The context projection
-preserves tool requests and tool results. It does not request or store hidden
-reasoning fields.
+recent relevant events, a small prior-review excerpt, the host tool definitions,
+and the host-supplied artifact inventory. The context projection preserves tool
+requests and tool results. It does not request or store hidden reasoning fields.
 
 The context limiter retains both the beginning and the end, with an explicit
 omission marker. This reduces the risk of discarding the original goal while
@@ -171,9 +171,11 @@ Authority is deliberately narrow:
   event kinds; the gateway wraps them as client-reported data.
 - Prior B notes are fallible suggestions, not new evidence. They are not included
   as independent events when constructing the next review.
-- B cannot invoke tools, mutate project files, issue a final verdict, change
-  credentials, or grant permission. The gateway does not turn B severity into
-  an execution gate.
+- B does not execute tools itself or grant permission. It can request any
+  advertised host tool, including the complete specific artifact needed to check
+  an action claim; the connected runtime executes the call and returns its real
+  result through the ordinary A tool loop. The gateway does not turn B severity
+  into an execution gate or call a request a completed check.
 
 B output uses a small strict schema: an objective, up to two questions, one next
 step, and up to three concerns. Each concern includes a permitted signal,
@@ -288,7 +290,9 @@ prove row-level security.
 The automatic verification RPC is retired with HTTP 410. Checking a path inside
 the observer container was not proof of a worker-side artifact and exposed an
 unnecessary privileged mutation path. Historical claim/evidence tables remain;
-the active B worker does not create verified artifact verdicts.
+the active B worker requests evidence through the connected host tool loop and
+records a model-selected assessment after the result; it never labels that
+assessment independent proof or guarantees that a hidden artifact exists.
 
 Compose now actually passes provider settings to both processes, runs
 initialization only once, and binds host ports to loopback. Bootstrap requires an
