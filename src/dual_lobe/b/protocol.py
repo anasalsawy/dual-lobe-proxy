@@ -53,6 +53,20 @@ class HostToolRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     name: Annotated[str, StringConstraints(min_length=1, max_length=128)]
     arguments: dict
+    claim_quote: Annotated[str, StringConstraints(max_length=400)] = ""
+    request_kind: Literal["general", "artifact_full", "evidence"] = "general"
+    full_artifact: bool = False
+
+    @model_validator(mode="after")
+    def artifact_request_is_explicit(self):
+        # Keep the semantic boundary deterministic: a request labelled as a
+        # full-artifact check must actually ask the host for the complete
+        # artifact.  B still chooses which tool, artifact and arguments fit;
+        # this only prevents an ambiguous request from being dispatched as a
+        # verification request.
+        if self.request_kind == "artifact_full" and not self.full_artifact:
+            raise ValueError("artifact_full requests must set full_artifact=true")
+        return self
 
 
 def parse_tool_requests(raw):
@@ -163,7 +177,9 @@ def ground_review(review: Review, prompt: str, tool_evidence: list[str] | None =
             raise ValueError("contradiction/shift needs a supplied basis")
         if concern.basis_quote and not any(
             concern.basis_quote in record for record in
-            [*(evidence[k] for k in ("CONTEXT", "EVENTS", "LATEST_REQUEST")), *(tool_evidence or [])]
+            [*(evidence[k] for k in ("CONTEXT", "EVENTS", "LATEST_REQUEST")),
+             json.dumps(evidence.get("TOOL_RESULTS", []), ensure_ascii=False),
+             *(tool_evidence or [])]
         ):
             raise ValueError("concern basis absent from supplied context/events")
     return review
