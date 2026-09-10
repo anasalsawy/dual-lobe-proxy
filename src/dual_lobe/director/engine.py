@@ -22,10 +22,11 @@ LOG = logging.getLogger("dual_lobe.director")
 
 class DirectorLoop:
     def __init__(self, state, store, token, req, a, b, settings, compose_a, admit,
-                 record_a, *, admit_b=None):
+                 record_a, *, admit_b=None, artifacts=None):
         self.state, self.store, self.token = state, store, token
         self.req, self.a, self.b, self.s = req, a, b, settings
         self.compose_a, self.admit, self.record_a = compose_a, admit, record_a
+        self.artifacts = artifacts or []
         self.admit_b = admit_b or admit
         self.released = False
         self.visible = ""
@@ -163,10 +164,31 @@ class DirectorLoop:
             data = observed_messages(messages) + [message]
             exposed = (offered_tools(self.req.tools, self.s.max_shadow_input_chars // 4)
                        if self.s.b_host_tools_enabled else [])
+            tool_results = []
+            for item in data:
+                if item.get("role") != "tool":
+                    continue
+                result = {k: v for k, v in item.items()
+                          if k in ("role", "content", "tool_call_id", "name")}
+                if isinstance(result.get("content"), str):
+                    result["content"] = head_tail(result["content"], self.s.max_shadow_input_chars // 2)
+                tool_results.append(result)
             observation = {"TRANSCRIPT": head_tail(json.dumps(redact_payload(data), ensure_ascii=False),
-                self.s.max_shadow_input_chars // 2), "HOST_TOOLS": redact_payload(exposed)}
+                self.s.max_shadow_input_chars // 2), "HOST_TOOLS": redact_payload(exposed),
+                "ARTIFACTS": redact_payload(self.artifacts), "TOOL_RESULTS": redact_payload(tool_results)}
             while len(json.dumps(observation, ensure_ascii=False)) > self.s.max_shadow_input_chars:
-                observation["TRANSCRIPT"] = head_tail(observation["TRANSCRIPT"], len(observation["TRANSCRIPT"]) // 2)
+                if observation["TRANSCRIPT"]:
+                    observation["TRANSCRIPT"] = head_tail(observation["TRANSCRIPT"], len(observation["TRANSCRIPT"]) // 2)
+                elif observation["TOOL_RESULTS"]:
+                    observation["TOOL_RESULTS"] = observation["TOOL_RESULTS"][:-1]
+                elif observation["ARTIFACTS"]:
+                    observation["ARTIFACTS"] = observation["ARTIFACTS"][:-1]
+                elif observation["HOST_TOOLS"]:
+                    # Whole definitions only: drop the optional tool lane rather
+                    # than sending a partial schema to B.
+                    observation["HOST_TOOLS"] = []
+                else:
+                    break
             prompt = json.dumps(observation, ensure_ascii=False)
             instructions = B_INSTRUCTIONS + "\n\n" + COLOR_POLICY
             if self.s.context_memory_enabled and self.s.context_enrichment_enabled:
@@ -198,7 +220,7 @@ class DirectorLoop:
             extra = []
             if exposed and not self.state.get("b_tool_batches", 0):
                 try:
-                    extra = candidates(make_plan(decision, exposed), self.req, {"content": ""})
+                    extra = candidates(make_plan(decision, exposed, call_id), self.req, {"content": ""})
                 except Exception:
                     pass
             if extra:
