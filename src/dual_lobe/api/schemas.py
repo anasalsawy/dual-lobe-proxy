@@ -18,6 +18,9 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: int | None = None
     stop: Any = None
     tools: list[dict[str, Any]] | None = None
+    # Optional host-runtime artifact inventory. This extension is consumed by
+    # B only and is never forwarded to the upstream A provider.
+    artifacts: list[dict[str, Any]] | None = Field(default=None, max_length=256)
     tool_choice: Any = None
     response_format: Any = None
     seed: int | None = None
