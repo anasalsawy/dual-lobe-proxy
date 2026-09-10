@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -17,11 +18,20 @@ from ..provider.registry import get_registry
 from ..state import repositories as repo
 from ..state.memory import attach_observer_notes
 from . import prompts
-from .host_tools import make_plan
+from .artifacts import bounded_artifacts
+from .host_tools import make_plan, planned_call_id
 from .channels import completed_memory, knowledge_snapshot, memory_status, reviewed_state
 from .protocol import Review, ground_review, parse_review, usable_state
 
 LOG = logging.getLogger("dual_lobe.b.context_shadow")
+
+
+def _tool_results_present(context_text: str, tool_ids: list[str]) -> bool:
+    """Recognize host results for every B-issued call without trusting their content."""
+    if not tool_ids:
+        return False
+    return all(re.search(r'"tool_call_id"\s*:\s*"' + re.escape(tool_id) + r'"', context_text or "")
+               for tool_id in tool_ids)
 
 
 async def _call_b(target_alias: str, prompt: str) -> str:
@@ -92,6 +102,16 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
     latest = await repo.latest_b_state(session, run_id)
     previous = (latest or {}).get("payload") or {}
     now = time.time()
+    pending = previous.get("verification_pending")
+    if isinstance(pending, dict):
+        try:
+            # A host that never returns a requested artifact must not freeze
+            # B's future reviews forever. After the normal B TTL, continue
+            # fail-open with the newest response and mark the old request stale.
+            if now - float(pending.get("observed_at", observed_at)) > s.b_state_ttl_seconds:
+                pending = None
+        except (TypeError, ValueError):
+            pending = None
 
     reason = None
     if not s.b_enabled or not (s.context_memory_enabled or s.claim_checks_enabled):
@@ -102,6 +122,13 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
         reason = "superseded"
     elif now - float(previous.get("reviewed_at", 0)) < s.b_cooldown_seconds:
         reason = "cooldown"
+    elif isinstance(pending, dict) and not _tool_results_present(
+        str(payload.get("context_text") or ""), pending.get("tool_ids") or []
+    ):
+        # Keep the original target and provisional state until the host sends
+        # the tool-result continuation. This prevents a normal A follow-up from
+        # replacing a pending verification with an unrelated review.
+        reason = "verification_waiting"
     if reason:
         await repo.append_event(session, "shadow_skipped", tenant_id, run_id=run_id,
                                 actor="lobe-b", payload={"reason": reason})
@@ -125,14 +152,28 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
     prior_claims = None
     if s.claim_checks_enabled and usable_state(previous, floor, attempt, s.b_state_ttl_seconds):
         prior_claims = previous.get("claim_review") or {"concerns": (previous.get("review") or {}).get("concerns", [])}
+    verification_followup = isinstance(pending, dict) and _tool_results_present(
+        str(payload.get("context_text") or ""), pending.get("tool_ids") or []
+    )
+    target_output = (str(pending.get("target_output") or "")
+                     if verification_followup else str(payload.get("response_text") or ""))
+    prompt_context = str(payload.get("context_text") or "")
+    if verification_followup:
+        prompt_context += (
+            "\n\nVERIFICATION_FOLLOWUP: The host supplied results for B's requested "
+            "checks. Reassess the original target response below using those "
+            "results. Do not grade this follow-up response instead."
+        )
     prompt = prompts.build_cycle_prompt(
-        str(payload.get("context_text") or ""),
-        str(payload.get("response_text") or ""),
+        prompt_context,
+        target_output,
         events_preview,
         json.dumps({"context_memory": prior_memory, "claim_review": prior_claims}, ensure_ascii=False),
         max_chars=s.max_shadow_input_chars,
         latest_request=str(payload.get("latest_user_text") or ""),
         host_tools=payload.get("host_tools", []) if s.b_host_tools_enabled else [],
+        artifacts=bounded_artifacts(payload.get("artifacts"), s.max_artifact_chars),
+        tool_results=payload.get("tool_results", []),
     )
     try:
         review = await _obtain_review("lobe-b", prompt, tenant_id)
@@ -156,17 +197,57 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
                                 actor="lobe-b", payload={"error_type": type(exc).__name__})
         return {"ok": False, "degraded": True}
 
-    state = reviewed_state(previous, review, {**payload, "run_id": run_id},
+    target_payload = {**payload, "run_id": run_id}
+    if verification_followup:
+        target_payload.update(
+            source_call=pending.get("source_call", payload.get("source_call", "")),
+            observed_at=pending.get("observed_at", payload.get("observed_at", 0)),
+            response_text=target_output,
+        )
+    state = reviewed_state(previous, review, target_payload,
                            memory_enabled=s.context_memory_enabled,
                            claims_enabled=s.claim_checks_enabled,
                            enrichment_enabled=s.context_enrichment_enabled,
                            source_model=prompts.head_tail(get_registry().target("lobe-b").model, 256))
     offered = json.loads(prompt.split(prompts.EVIDENCE_MARKER, 1)[1])["HOST_TOOLS"]
     try:
-        state["host_tool_plan"] = (make_plan(review, offered)
-                                    if s.b_host_tools_enabled else [])
+        plan = (make_plan(review, offered, state["source_call"])
+                if s.b_host_tools_enabled else [])
     except (KeyError, TypeError, ValueError):
+        plan = []
+    verification_plan = [call for call in plan
+                         if call.get("request_kind") in ("artifact_full", "evidence")
+                         or call.get("full_artifact")]
+    if verification_followup:
+        # One evidence round is enough to avoid a B↔host loop. B's final color
+        # is based on the supplied result; any further request is ignored.
         state["host_tool_plan"] = []
+        state["verification_pending"] = None
+        state["verification_status"] = "completed"
+    elif plan:
+        state["host_tool_plan"] = plan
+        if verification_plan:
+            state["verification_pending"] = {
+                "source_call": state["source_call"],
+                "observed_at": state["observed_at"],
+                "target_output": str(payload.get("response_text") or ""),
+                # General enrichment/search requests may be delivered without
+                # holding the claim grade open. Only evidence-bearing calls define
+                # the required continuation and final assessment.
+                "tool_ids": [planned_call_id(call) for call in verification_plan],
+                "preliminary_concerns": state.get("claim_review", {}).get("concerns", []),
+            }
+            state["verification_status"] = "pending"
+            state["deception_level"] = None
+            state["deception_reason"] = "Verification requested; final assessment pending host evidence."
+            state["claim_review"] = {"concerns": []}
+        else:
+            state["verification_pending"] = None
+            state["verification_status"] = "completed"
+    else:
+        state["host_tool_plan"] = []
+        state["verification_pending"] = None
+        state["verification_status"] = "completed"
     concerns = state["claim_review"]["concerns"]
     await repo.save_b_state(session, tenant_id, run_id, state)
     snapshot = knowledge_snapshot(completed_memory(state))

@@ -219,6 +219,10 @@ def prepare_context(payload: dict | None, floor: str, attempt: int, settings,
     d_status = "GREEN"
     if not settings.claim_checks_enabled or not settings.deception_meter_enabled:
         d_status = "disabled"
+    elif fresh and payload.get("verification_status") == "pending":
+        d_status = "GREEN"
+        deception_text = (f"Observer assessment pending host verification for answer {source_call or 'unidentified historical answer'}, age {age}s. "
+                          "GREEN here is only the default while B's requested checks are outstanding; it is not a completed grade.")
     elif fresh and review is not None:
         # B alone chooses color. Code validates the enum; it never re-scores findings.
         selected = payload.get("deception_level") or (payload.get("review") or {}).get("deception_level")

@@ -1,8 +1,9 @@
 # Context memory, claim findings, and monitoring awareness
 
-This is the v0.5 implementation of the agreed setup. One background B review
-produces two outputs; no new LLM, memory service, agent framework, or database
-table has been added.
+This is the v0.6 implementation of the agreed setup. A background B review
+produces context guidance and claim assessment; an evidence-bearing claim can
+add one bounded follow-up after the host result. No new LLM, memory service,
+agent framework, or database table has been added.
 
 ## What is separate
 
@@ -11,7 +12,7 @@ table has been added.
 | Context memory | Current goal, overlooked questions, alternate explanations, missing prerequisites, relevant supplied information, one next step | `b_state.payload.context_memory`, with its own version, observation time, update time and source call | Forced lookup before every eligible model call; `observer_memory` data message |
 | Claim findings | Material unsupported claims, contradictions and unexplained shifts, with exact source quotes | `b_state.payload.claim_review`, outside the memory content | `observer_claims` data message directly in the next eligible request |
 | Monitoring awareness | Fixed instructions explaining the proxy, observation, evidence limits, and direct-to-user behavior | Source-controlled `OBSERVATION_REMINDER` | Re-added to every observed request in the configured system/developer role |
-| Optional host-tool requests | B may ask for bounded information from tools the application already supplied | `host_tool_plan` and response injection | Added as ordinary A tool calls; the application executes or ignores them |
+| Host-tool/evidence lane | A and B are peers on one host tool plane. B may request context, search, execution or the complete specific artifact needed to check a claim | `host_tool_plan`, verification state and response injection | Added as ordinary tool calls; the connected runtime executes them and returns the real results to A and B |
 
 Model-generated notes are never promoted into system/developer instructions. Your
 own messages are not edited. The prompt tells B to keep completion disputes out of
@@ -36,6 +37,14 @@ into an inference already in progress or require A to choose a retrieval tool.
 5. B saves a new memory snapshot and claim findings atomically. The next A call
    reloads them automatically, including a tool-follow-up call within the same
    user turn. No user request to “check memory” is needed.
+
+The caller may include an `artifacts` list on every request. It is a bounded
+runtime inventory, not a proxy filesystem mount. If A claims an artifact-producing
+action, B asks for the complete specific artifact through the host tool loop. The
+proxy records that the request is pending, injects the ordinary tool call on the
+next eligible A response, and grades the original A response after the host
+returns the result. General enrichment/search requests do not hold a claim grade
+open; only requests labelled `artifact_full` or `evidence` do.
 
 There is no separate model call just to make an idle A “aware.” Its next generation
 gets the update. If B is still busy then, A uses the last completed usable snapshot.
@@ -74,16 +83,18 @@ inspectable. No new retention/cleanup service is added.
 ## The monitoring instruction
 
 The complete text is in `src/dual_lobe/b/prompts.py`. It says A is behind an inference
-proxy with a separate background observer; A should address the user normally and
+proxy with a separate peer observer; A should address the user normally and
 continue without waiting or acknowledging B. It requires accurate distinctions
 between intended, attempted and confirmed work and corrections when evidence
-contradicts earlier claims. It explicitly states that B cannot independently
-inspect the workspace or verify every claim.
+contradicts earlier claims. B receives the host's supplied tools and artifact
+inventory as data, and can ask the host runtime for targeted evidence. It cannot
+see a hidden workspace that the host does not expose.
 
 The instruction is not proof of effective deception deterrence. B's evidence
 remains the supplied conversation, tool results and reported events. A request
 to execute a tool is not evidence that it ran; caller-reported results are not
-independent verification. Shared-filesystem inspection would be another feature.
+independent verification. Direct proxy-owned filesystem inspection without a
+host-provided tool remains unsupported.
 
 ## Start our conversation test
 
@@ -125,9 +136,10 @@ shows that completed version. Do not require a model to produce a predetermined
 sentence; assess relevance, false concerns, and whether A stays focused on you.
 
 For execution integrity, connect the real agent executor and send its actual tool
-results. This basic client has no filesystem or shell tools, so it cannot establish
-that a requested file edit, test or deployment happened. No extra A correction
-turns, interruptions or holds are triggered by B.
+definitions and results. This basic client has no filesystem or shell tools, so it
+cannot establish that a requested file edit, test or deployment happened. With a
+host tool capable of returning the specific artifact, B can request it without a
+separate connector; missing/rejected tools remain fail-open and do not block A.
 
 ## Offline test
 

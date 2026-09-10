@@ -24,6 +24,12 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
 
 
+def planned_call_id(item):
+    return "dlb_" + digest({"name": item.get("name"),
+                             "arguments": item.get("arguments"),
+                             "source_call": item.get("source_call", "")})[:32]
+
+
 def offered_tools(tools, budget=4500):
     """Bounded whole definitions, exactly as exposed by the caller."""
     result = []
@@ -47,7 +53,7 @@ def is_host_tool(definition):
     return True
 
 
-def make_plan(review, tools):
+def make_plan(review, tools, source_call=""):
     available = {t["function"]["name"]: t for t in tools
                  if is_host_tool(t)}
     result = []
@@ -55,7 +61,11 @@ def make_plan(review, tools):
         definition = available.get(request.name)
         if definition:
             result.append({"name": request.name, "arguments": request.arguments,
-                           "definition_hash": digest(definition)})
+                           "definition_hash": digest(definition),
+                           "source_call": source_call,
+                           "claim_quote": request.claim_quote,
+                           "request_kind": request.request_kind,
+                           "full_artifact": request.full_artifact})
     return result
 
 
@@ -80,7 +90,13 @@ def candidates(plan, request, message):
     for item in plan[:2]:
         try:
             definition = available.get(item["name"])
-            if not definition or digest(definition) != item["definition_hash"] or not isinstance(item["arguments"], dict):
+            # B sees a redacted copy of tool definitions in the persisted
+            # observation. Accept either the exact host definition hash or its
+            # redacted equivalent; never weaken name/argument validation.
+            definition_hash = (digest(definition) if definition else "")
+            redacted_hash = digest(redact_payload(definition)) if definition else ""
+            if (not definition or item["definition_hash"] not in (definition_hash, redacted_hash)
+                    or not isinstance(item["arguments"], dict)):
                 continue
             arguments = json.dumps(item["arguments"], ensure_ascii=False, allow_nan=False)
             if len(arguments) > 2000:
@@ -92,7 +108,7 @@ def candidates(plan, request, message):
             if same or digest(function) in duplicates:
                 continue
             duplicates.add(digest(function))
-            result.append({"id": "dlb_" + uuid.uuid4().hex, "type": "function", "function": function})
+            result.append({"id": planned_call_id(item), "type": "function", "function": function})
         except (KeyError, TypeError, ValueError):
             continue
         if request.parallel_tool_calls is False and result:

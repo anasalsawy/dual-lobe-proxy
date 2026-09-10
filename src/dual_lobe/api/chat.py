@@ -17,6 +17,7 @@ from sqlalchemy.exc import InterfaceError, OperationalError
 
 from ..b.outbox import shadow_job_key, shadow_payload
 from ..b.channels import ObserverContext, prepare_context
+from ..b.artifacts import bounded_artifacts
 from ..b.host_tools import injector, offered_tools
 from ..b.prompts import OBSERVATION_REMINDER, head_tail
 from ..core import stage as stage_mod
@@ -47,6 +48,35 @@ def _messages_text(messages: list[dict[str, Any]], max_chars: int) -> str:
                     if k in ("role", "content", "tool_calls", "tool_call_id", "name")}
         parts.append(f"message[{i}] " + json.dumps(observed, ensure_ascii=False))
     return head_tail("\n".join(parts), max_chars)
+
+
+def _tool_results(messages: list[dict[str, Any]], max_chars: int) -> list[dict[str, Any]]:
+    """Keep structured host results so B can inspect evidence before excerpts."""
+    result: list[dict[str, Any]] = []
+    used = 0
+    # Newest tool results are the most likely evidence for the latest pending
+    # claim. Walk backwards under the cap, then restore conversation order.
+    for message in reversed(messages):
+        if message.get("role") != "tool":
+            continue
+        observed = {k: v for k, v in message.items()
+                    if k in ("role", "content", "tool_call_id", "name")}
+        encoded = json.dumps(observed, ensure_ascii=False)
+        remaining = max_chars - used
+        if remaining <= 0:
+            break
+        if len(encoded) > remaining:
+            content = observed.get("content")
+            if isinstance(content, str):
+                observed["content"] = head_tail(content, max(0, remaining - 120))
+                observed["content_truncated"] = True
+            encoded = json.dumps(observed, ensure_ascii=False)
+            if len(encoded) > remaining:
+                break
+        result.append(observed)
+        used += len(encoded)
+    result.reverse()
+    return result
 
 
 def _original_goal(messages: list[dict]) -> str:
@@ -149,7 +179,9 @@ async def _read_context(tenant_id: int, run_id: str, floor: str, attempt: int) -
 async def _persist_observation(tenant_id: int, run_id: str, external_run: str,
                                corr: dict, target_alias: str, context_text: str,
                                audit: dict, observe: bool,
-                               latest_user_text: str = "", host_tools: list[dict] | None = None) -> None:
+                               latest_user_text: str = "", host_tools: list[dict] | None = None,
+                               artifacts: list[dict] | None = None,
+                               tool_results: list[dict] | None = None) -> None:
     """After response delivery. Failures cannot change an already-sent A answer."""
     s = get_settings()
     try:
@@ -186,6 +218,8 @@ async def _persist_observation(tenant_id: int, run_id: str, external_run: str,
                     payload.update(source_call=audit["call_id"], observed_at=audit["observed_at"],
                                    latest_user_text=latest_user_text,
                                    host_tools=redact_payload(host_tools or []),
+                                   artifacts=bounded_artifacts(artifacts, s.max_artifact_chars),
+                                   tool_results=redact_payload(tool_results or []),
                                    memory_space=(audit.get("observer_delivery") or {}).get("shared_memory_space"))
                     scope_context = context_text + latest_user_text + f"\nSCOPE:{corr.get('floor', '')}:{corr.get('attempt', 1)}"
                     key = shadow_job_key(tenant_id, run_id, 0, scope_context, audit["output"])
@@ -374,18 +408,23 @@ async def chat_completions(
         s.max_shadow_input_chars,
     )
     latest_user_text = _latest_user_text(messages)
+    artifacts = bounded_artifacts(payload.get("artifacts"), s.max_artifact_chars)
     audit = {"call_id": str(uuid.uuid4()), "logical_model": target.model,
              "stream": req.stream, "status": "INCOMPLETE", "output": "",
              "latency_ms": 0, "observed_at": time.time(),
              "observer_delivery": {**context.receipt(), "monitoring": monitoring}}
-    audit["observer_delivery"].update(shared_memory_space=memory_space, shared_entry_ids=list(shared.entry_ids))
+    audit["observer_delivery"].update(shared_memory_space=memory_space,
+                                       shared_entry_ids=list(shared.entry_ids),
+                                       artifact_count=len(artifacts))
     async def save_memory(responses):
         await record_memory(principal.tenant_id, memory_space, run_id, audit["call_id"], messages, responses)
     background = BackgroundTask(_persist_observation, principal.tenant_id, run_id,
                                 external_run, corr, alias, context_text, audit, observe,
                                 latest_user_text=latest_user_text,
                                 host_tools=offered_tools(req.tools, s.max_shadow_input_chars // 4)
-                                if observe and s.b_host_tools_enabled else [])
+                                if observe and s.b_host_tools_enabled else [],
+                                artifacts=artifacts,
+                                tool_results=_tool_results(messages, s.max_shadow_input_chars))
     inject_tools = injector(context, req, messages, principal.tenant_id, run_id, floor, attempt, s, audit)
     headers = {"X-Dual-Lobe-Run-Id": run_id, "X-Dual-Lobe-Observer": context.status,
                "X-Dual-Lobe-Call-Id": audit["call_id"],

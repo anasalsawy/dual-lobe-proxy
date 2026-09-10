@@ -72,15 +72,16 @@ off suppresses findings and meter; the independent meter switch only hides color
 
 ## Persistence and timing
 
-### Optional host-tool lane
+### Host-tool and evidence lane
 
 B may request at most two calls using any valid function tools already supplied by
 the host application, including reads, writes or execution when relevant and
-permitted. Requests are relayed through the normal application tool-call protocol;
-the proxy never executes them independently. Results can reach A and B on
-subsequent turns. Missing tools, rejected calls and failures are fail-open and do
-not block A. The host application remains responsible for its own permissions and
-approval policy.
+permitted. When B requests a check for a completion claim, the proxy records the
+original target response, relays the calls through the normal application
+tool-call protocol, and waits for the host's result continuation before asking B
+for its final assessment of that original response. Missing tools, rejected calls
+and failures are fail-open and do not block A. The host application remains
+responsible for its own permissions and approval policy.
 
 Knowledge notes carry topic, kind (`background`, `hypothesis`, or `question`),
 insight/question, relevance and an application/check suggestion. Code supplies
@@ -117,14 +118,18 @@ See [current functional assessment](FUNCTION_ASSESSMENT.md),
 [reproducible evaluation](UX_ASSESSMENT_WITH_VS_WITHOUT.md), and
 [executed validation](VALIDATION.md). Prompt intent is not measured efficacy.
 
-## Optional host-tool information requests
+## Host-tool and artifact requests
 
 When the connected application includes standard function definitions in the
 request, B receives bounded copies of those definitions. B may request at most
-two information-gathering calls by name and JSON arguments. The proxy validates
-the name and exact schema, records an at-most-once reservation, and adds the
-calls to A's ordinary response protocol. The application—not B and not the
-proxy—executes them. Returned tool results must come back in the application's
-next request, where A and B can see them. No definitions means no requests; an
-unsupported, rejected, failed, or unavailable tool simply leaves the normal A
-answer intact. Requests never count as evidence that work happened.
+two calls by name and JSON arguments, including a targeted full-artifact or
+other evidence retrieval. The proxy validates the name and exact schema, records
+an at-most-once reservation, and adds the calls to A's ordinary response
+protocol. The connected host runtime—not B and not the proxy process—executes
+them. Returned tool results must come back in the application's next request,
+where A and B can see them. No definitions means no requests; an unsupported,
+rejected, failed, or unavailable tool simply leaves the normal A answer intact.
+Requests never count as evidence that work happened. A caller may also send an
+`artifacts` inventory on every request; B sees it as baseline context, while a
+claim-triggered `artifact_full` request asks for the complete specific artifact
+rather than a filename, size, hash, or workspace archive.

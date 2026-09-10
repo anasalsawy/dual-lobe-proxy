@@ -1,5 +1,21 @@
 # Validation record
 
+## v0.6 peer tool plane and artifact evidence — pending CI
+
+This change adds the agreed peer/evidence behavior on top of the merged v0.5
+observer: B receives the host-supplied artifact inventory on every review; B may
+request any advertised host tool; every `artifact_full` request is required to
+ask for the complete specific artifact; the original A response remains the
+grading target until the host result returns; and general enrichment requests do
+not hold the grade open. The proxy remains hook-only and fail-open: it relays
+ordinary tool calls but does not invent a filesystem mount or execute tools.
+
+Local static validation is run before publication. The authoritative Postgres
+and unit-test result for this change will be recorded here from the GitHub CI run
+after the branch is published. No live provider/model efficacy or artifact-host
+integration claim is made until a real connected agent supplies the tools and
+results.
+
 ## v0.5 observer repairs and enrichment — 2026-09-10
 
 Starting point: main `5023d944ec5c627d12bf744944affcfbf48553da`. Its existing
