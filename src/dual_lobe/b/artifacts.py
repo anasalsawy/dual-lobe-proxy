@@ -29,6 +29,19 @@ def bounded_artifacts(value: Any, budget: int = 12000) -> list[dict[str, Any]]:
             item["content_truncated"] = True
         candidate = [*result, item]
         if len(json.dumps(candidate, ensure_ascii=False)) > budget:
-            break
+            # Preserve the inventory entry even when its optional content is
+            # larger than the remaining budget. Metadata is more useful than
+            # silently dropping the artifact altogether.
+            compact = dict(item)
+            for key in ("content", "text", "body", "data"):
+                if isinstance(compact.get(key), str):
+                    compact[key] = ""
+                    compact["content_truncated"] = True
+            candidate = [*result, compact]
+            if len(json.dumps(candidate, ensure_ascii=False)) > budget:
+                # A malformed/oversized metadata record cannot be represented
+                # safely; stop before exceeding the envelope.
+                break
+            item = compact
         result.append(item)
     return result
