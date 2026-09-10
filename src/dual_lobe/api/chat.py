@@ -532,6 +532,8 @@ async def chat_completions(
                     proof_coverage=review.proof_coverage,
                     gate_deception_level=review.deception_level or "GREEN",
                 )
+                headers["X-Dual-Lobe-Gate"] = review.gate_decision or "BLOCK"
+                headers["X-Dual-Lobe-Proof-Coverage"] = review.proof_coverage
                 gate_blocked = not gate_allows(review)
                 if gate_blocked:
                     offered = json.loads(gate_prompt.split(EVIDENCE_MARKER, 1)[1])["HOST_TOOLS"]
@@ -547,6 +549,8 @@ async def chat_completions(
                     gate_decision="BLOCK", proof_coverage="unknown",
                     gate_error=type(exc).__name__,
                 )
+                headers["X-Dual-Lobe-Gate"] = "BLOCK"
+                headers["X-Dual-Lobe-Proof-Coverage"] = "unknown"
                 gate_blocked = True
         if gate_blocked:
             if gate_calls:

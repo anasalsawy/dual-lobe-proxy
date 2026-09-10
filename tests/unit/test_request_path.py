@@ -267,6 +267,8 @@ async def test_strict_gatekeeper_withholds_unproved_a_answer(request_path, monke
     assert b"gate_blocked" in response.body
     assert b"result" not in response.body
     assert response.headers["x-dual-lobe-variant"] == "strict-gatekeeper"
+    assert response.headers["x-dual-lobe-gate"] == "BLOCK"
+    assert response.headers["x-dual-lobe-proof-coverage"] == "incomplete"
     await response.background()
 
 
