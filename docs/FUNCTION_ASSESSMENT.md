@@ -121,3 +121,92 @@ awareness**. The proxy never blocks, holds, or corrects A mid-stream.
   compliance with the monitoring instruction (receipts report composition, not compliance).
 - The soak used an OpenAI-compatible Gemini endpoint; claim-check accuracy was not scored
   against a labeled dataset.
+## When does the proxy write to memory?
+
+Memory is written **only after A has fully answered**; never mid-stream, never before a
+response is delivered.
+
+1. A streams its answer. The proxy collects the completed message and an audit
+   (`worker_call` event with latency and an excerpt). When the response is **fully
+   delivered**, a `BackgroundTask` runs `_persist_observation`
+   (`src/dual_lobe/api/chat.py`).
+2. It enqueues a **transactional outbox job** (`b/outbox.py`) carrying `context_text`,
+   `response_text`, `observed_at`, floor/attempt and `source_call`. The job key is
+   deterministic (hash of tenant/run/call/context/response), so retries and redeploys
+   never double-enqueue.
+3. The **b-worker** polls the outbox every `worker_poll_seconds` (default 1 s), grabs the
+   job under a per-run lock, and runs `run_shadow_cycle`
+   (`src/dual_lobe/b/context_shadow.py`).
+4. **Skip gates** — a miss produces a `shadow_skipped` event and **no** memory write:
+   - observation disabled, or both channels off;
+   - job older than `b_state_ttl_seconds` (180 s) since `observed_at`;
+   - superseded (a newer `observed_at` is already stored);
+   - within the B cooldown (default 0);
+   - over the B RPM budget.
+5. If gates pass: one B call (temperature 0, timeout `b_timeout`, no tools). On success
+   `reviewed_state` writes **ContextMemory version +1** (observed_at = the interaction
+   timestamp, updated_at = now, source_call, floor/attempt) via `save_b_state`; events
+   `context_memory_updated` and `b_context_shadow` are appended (`oversight` if concerns).
+6. On B failure/invalid output it **still writes** a `degraded` state row, but preserves
+   the previous memory **verbatim** (version and age untouched, claims nulled) — a failed
+   review never renews memory.
+
+Measured timing (ux run, `observe-delay=12 s`): reviews landed ~13 s apart, each roughly
+1 s after the A reply finished. With no pause between turns, B lags one to two reviews
+behind; the delivered content is always the last completed usable snapshot.
+
+## Does it look up information / enrich context?
+
+**No — it never looks up anything external.** B's system prompt is explicit: it has no
+filesystem, browser, hidden reasoning, or independent factual oracle. There is no web
+search, RAG, tool call, or cross-conversation retrieval, and it cannot query facts from
+other runs' databases. Any factual content B contributes comes from the model's own
+knowledge and is treated as fallible, not evidence.
+
+What exists instead is a **memory-and-framing** layer over the current run only:
+
+1. It reads the conversation to that point, A's answer, and recorded events for this run
+   (budget ~18 KB, keeping the mission head and the latest failure tail).
+2. It **consolidates** that into a compact snapshot: original goal, ≤2 questions, one next
+   step, ≤2 context notes (missed prerequisites, alternate explanations, relevant supplied
+   info).
+3. It **persists** it as versioned memory (24 h TTL) scoped to run/floor/attempt/tenant,
+   and **feeds it forward** — re-injecting the last completed snapshot into the next A call
+   as `observer_memory` (plus short-lived `observer_claims`, 180 s).
+
+So "enrichment" = distill-from-record + retain + re-inject, within one conversation.
+External factual enrichment (searching the web, docs, or the user's codebase, then
+injecting the findings) would be a new feature; it is deliberately absent in v0.3.
+
+## Suggested improvements
+
+Recommendations from the live assessment, not yet implemented.
+
+**P1**
+- **B JSON robustness.** The observer degraded on 3 of 6 reviews in the ux run
+  (`ValidationError` — strict schema rejection of B's output). Add tolerant extraction
+  (strip code fences / locate the outermost JSON object), a single corrective retry that
+  passes the parse error back to B, and log the parse-error excerpt to see what B actually
+  returns. No extra model debate; B stays tool-free.
+- **Goal-anchor fix.** Anchor B's `goal` baseline to the **latest in-conversation user
+  message**, not the reviewed (N-1) interaction. This removes the false-positive
+  `SUSPICIOUS_SHIFT` class seen in the soak (a legitimate topic change was flagged because
+  the stored goal was one message behind).
+- **State-read retry.** Turn 3 of the ux run hit `memory=unavailable` from one transient
+  25 ms state read. One retry inside the deadline, with reason logging, improves injection
+  continuity while staying fail-open.
+
+**P2**
+- **Labeled eval for claim checks.** Unit tests verify the schema, not the accuracy of
+  `UNSUPPORTED / CONTRADICTION / SUSPICIOUS_SHIFT`. Add a small labeled evaluation set and
+  score precision/recall.
+- **Compliance measurement.** Receipts report request *composition*, not A's obedience.
+  Add a check that A never references the observer and corrects contradicted claims when
+  the reminder is present.
+- **Telemetry.** Expose memory age/version and the review-lag in receipts; log B call
+  latency and outbox queue depth (OTEL is present but off).
+
+**P3**
+- **Optional external enrichment.** A scoped, monitored lookup channel (web/docs/codebase
+  search) behind an opt-in flag, since v0.3 intentionally has none. This is the only way to
+  go beyond the current "distill the record" memory model.
