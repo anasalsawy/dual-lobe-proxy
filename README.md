@@ -3,6 +3,11 @@
 A text-only Chat Completions gateway with two peer model lanes, visible director
 mode, and shared persistent memory (v0.6).
 
+The selectable comparison policies are documented in [`variants/`](variants/).
+The default `peer-observer` is fail-open; `strict-gatekeeper` is an explicit
+fail-closed experiment that withholds A's complete answer until B reports proof
+coverage for every material claim.
+
 **Normal mode:** A responds while B reviews in the background.
 **Director mode:** B takes your conversational place, asks A follow-up questions,
 and directs another A turn. Watch labelled A/B exchanges in the response stream.
@@ -30,10 +35,11 @@ Your original messages remain unchanged. Memory loading still supplies input to 
 next model call; it is not an extra connection into an already generating model.
 See [the setup and conversation test](docs/THREE_PATH_SETUP.md).
 
-B can request calls from the same host tool plane supplied to A; the app executes
-those requests and returns results through the same inference loop. B has no
-separate executor, connector, browser or filesystem mount. If tools are absent or
-fail, B continues with conversation, memory and its own knowledge. Send an
+B can request calls from the same canonical peer tool plane supplied to A; the
+connected execution runtime returns results through the same inference loop. The
+proxy persists one redacted peer snapshot for both lanes, so B does not receive a
+second narrower reconstruction of A's context. If tools are absent or fail, B
+continues with conversation, memory and its own knowledge. Send an
 `artifacts` list on each request when the host can expose an inventory; B can then
 request the complete specific artifact needed to check an action claim. Director
 mode uses the same configured B provider.
@@ -218,6 +224,7 @@ delivers that choice; it does not calculate it from concern counts or keywords.
 | Setting | Default | Actual meaning |
 |---|---:|---|
 | `DUAL_LOBE_B_ENABLED` | true | Enable background observation and B context |
+| `DUAL_LOBE_DESIGN_VARIANT` | `peer-observer` | Select `peer-observer`, `strict-gatekeeper`, `parallel-debate`, `strategist-executor`, or `director`; see [`variants/`](variants/) |
 | `DUAL_LOBE_OBSERVATION_REMINDER` | true | Fixed monitoring instruction on observed A calls; independently switchable |
 | `DUAL_LOBE_MONITORING_ROLE` | system | `system` or `developer`; use a role supported by the provider |
 | `DUAL_LOBE_CONTEXT_MEMORY_ENABLED` | true | Maintain and automatically load broadening memory |

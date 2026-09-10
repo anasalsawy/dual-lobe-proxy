@@ -20,6 +20,8 @@ from ..state.memory import attach_observer_notes
 from . import prompts
 from .artifacts import bounded_artifacts
 from .host_tools import make_plan, planned_call_id
+from .peer_snapshot import (snapshot_artifacts, snapshot_messages,
+                             snapshot_tool_results, snapshot_tools)
 from .channels import completed_memory, knowledge_snapshot, memory_status, reviewed_state
 from .protocol import Review, ground_review, parse_review, usable_state
 
@@ -157,7 +159,18 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
     )
     target_output = (str(pending.get("target_output") or "")
                      if verification_followup else str(payload.get("response_text") or ""))
-    prompt_context = str(payload.get("context_text") or "")
+    # Review the exact canonical snapshot that the proxy gave A.  Older jobs
+    # without a snapshot retain their historical context_text fallback, but all
+    # newly-created jobs use this shared view so B cannot miss A-only memory,
+    # system/developer context, tools, or tool results.
+    peer_snapshot = payload.get("peer_snapshot") or {}
+    snapshot_context = snapshot_messages(peer_snapshot)
+    prompt_context = (json.dumps(snapshot_context, ensure_ascii=False)
+                      if snapshot_context else str(payload.get("context_text") or ""))
+    review_tools = snapshot_tools(peer_snapshot) or payload.get("host_tools", [])
+    review_artifacts = snapshot_artifacts(peer_snapshot) or bounded_artifacts(
+        payload.get("artifacts"), s.max_artifact_chars)
+    review_tool_results = snapshot_tool_results(peer_snapshot) or payload.get("tool_results", [])
     if verification_followup:
         prompt_context += (
             "\n\nVERIFICATION_FOLLOWUP: The host supplied results for B's requested "
@@ -171,9 +184,9 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
         json.dumps({"context_memory": prior_memory, "claim_review": prior_claims}, ensure_ascii=False),
         max_chars=s.max_shadow_input_chars,
         latest_request=str(payload.get("latest_user_text") or ""),
-        host_tools=payload.get("host_tools", []) if s.b_host_tools_enabled else [],
-        artifacts=bounded_artifacts(payload.get("artifacts"), s.max_artifact_chars),
-        tool_results=payload.get("tool_results", []),
+        host_tools=review_tools if s.b_host_tools_enabled else [],
+        artifacts=review_artifacts,
+        tool_results=review_tool_results,
     )
     try:
         review = await _obtain_review("lobe-b", prompt, tenant_id)

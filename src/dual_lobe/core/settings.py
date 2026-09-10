@@ -17,6 +17,13 @@ RolloutStage = Literal[
     "observation", "context", "integrity-observe", "integrity-intervene", "enforcement"
 ]
 
+# The default is the low-friction peer observer.  Other values are explicit
+# experimental policies so comparisons do not silently change the normal path.
+DesignVariant = Literal[
+    "peer-observer", "strict-gatekeeper", "parallel-debate",
+    "strategist-executor", "director",
+]
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -47,6 +54,7 @@ class Settings(BaseSettings):
     b_base_url: str | None = Field(default=None, validation_alias="DUAL_LOBE_B_BASE_URL")
     b_api_key: str | None = Field(default=None, validation_alias="DUAL_LOBE_B_API_KEY")
     b_dialect: str = Field(default="chat_completions", validation_alias="DUAL_LOBE_B_DIALECT")
+    design_variant: DesignVariant = Field(default="peer-observer", validation_alias="DUAL_LOBE_DESIGN_VARIANT")
 
     rollout_stage: RolloutStage = Field(default="context", validation_alias="DUAL_LOBE_ROLLOUT_STAGE")
     pulse_every: int = Field(default=1, ge=1, validation_alias="DUAL_LOBE_PULSE_EVERY")
