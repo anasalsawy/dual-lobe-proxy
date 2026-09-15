@@ -16,6 +16,18 @@ permissions, or a running agent's execution state between apps.
 
 See [director mode, memory, and the test commands](docs/DIRECTOR_AND_MEMORY.md).
 
+The full dual-lobe function register and acceptance contract is in
+[Dual-lobe functions and criteria](docs/DUAL_LOBE_FUNCTIONS_AND_CRITERIA.md).
+It defines the hard anti-deception rule that narrow evidence may support only a
+narrow claim, and distinguishes implemented advisory behavior from future
+acceptance/evidence gating.
+
+The cross-repository inventory is in
+[Dual-lobe design comparison](docs/DUAL_LOBE_DESIGN_COMPARISON.md). It compares
+the 24 dual-lobe-related designs and support assets found across the accessible
+repositories, including dynamics, authority, memory, anti-deception behavior,
+tests, performance evidence, and maturity.
+
 The three paths are now separate:
 
 | Purpose | Implementation |
