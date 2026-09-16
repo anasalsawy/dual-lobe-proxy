@@ -1,15 +1,20 @@
 # Deterministic benchmark toolkit
 
-This directory contains provider-independent task and scoring primitives. It is
-intentionally separate from live-provider evaluation: deterministic fixtures can
-validate scope and release semantics without credentials or model claims.
+The provider-independent primitives live in `src/dual_lobe/evaluation/`.
+They validate acceptance scope, evidence provenance, release decisions, and
+normalized benchmark records without requiring credentials or a model.
 
-## Evidence levels
+This is **not** yet a complete cross-design runner or a measured ranking. No
+claim about model quality, latency, cost, or a top-five design is supported by
+these primitives alone.
 
-Reports must distinguish measured runs from compatible reimplementations,
-source-only designs, and unavailable external designs. A model assessment is
-not an authenticated execution receipt, and advisory observer output is not a
-truth verdict.
+## Current guarantees
+
+- Criteria and evidence are explicitly scoped; narrow evidence cannot satisfy a broader criterion.
+- `host_receipt` is distinguishable from model, client, provider, and internal evidence.
+- Stale, conflicting, negative, and unknown evidence are not promoted to `FULL`.
+- Disabled release gates remain advisory.
+- Benchmark records validate non-negative metrics and aggregate deterministic summaries.
 
 ## Example
 
@@ -30,6 +35,10 @@ evidence = EvidenceRecord(
 assert evaluate_coverage(criterion, [evidence]).status == "FULL"
 ```
 
-Live-provider benchmarks require explicit credentials, model/provider metadata,
-redacted raw artifacts, bounded timeouts, and reproducible configuration. No
-ranking is implied by this package alone.
+## Not yet implemented here
+
+The repository still needs a common adapter protocol, task corpus, raw-event
+runner, control route, real-provider execution, uncertainty intervals, and a
+measured comparison of twenty or more designs. External designs must be
+labelled source-only, unavailable, compatible reimplementation, deterministic,
+or real-provider; do not conflate those evidence levels.
