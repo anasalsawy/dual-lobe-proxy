@@ -102,6 +102,11 @@ class Settings(BaseSettings):
     worker_max_concurrency: int = Field(default=2, ge=1, le=16, validation_alias="DUAL_LOBE_WORKER_MAX_CONCURRENCY")
     worker_lock_seconds: int = Field(default=90, validation_alias="DUAL_LOBE_WORKER_LOCK_SECONDS")
 
+    # Multi-agent recipient routing: detect if a message is for THIS agent or another
+    recipient_routing_enabled: bool = Field(default=False, validation_alias="DUAL_LOBE_RECIPIENT_ROUTING_ENABLED")
+    agent_name: str = Field(default="agent", validation_alias="DUAL_LOBE_AGENT_NAME")
+    recipient_routing_confidence_threshold: float = Field(default=0.6, ge=0.0, le=1.0, validation_alias="DUAL_LOBE_RECIPIENT_ROUTING_CONFIDENCE_THRESHOLD")
+
     @property
     def rls_url(self) -> str:
         if self.rls_database_url:

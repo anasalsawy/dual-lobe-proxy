@@ -16,6 +16,13 @@ permissions, or a running agent's execution state between apps.
 
 See [director mode, memory, and the test commands](docs/DIRECTOR_AND_MEMORY.md).
 
+**New: Multi-agent recipient routing** — When multiple agents operate in the same space,
+a new recipient router in Lobe B detects whether each message is directed at the current
+agent or another entity. Messages not intended for this agent are silently suppressed
+(no response generated), but the context is still ingested into memory so the agent
+remains aware. This solves the "talking over each other" problem common in multi-agent
+setups. See [recipient routing documentation](docs/RECIPIENT_ROUTING.md).
+
 The full dual-lobe function register and acceptance contract is in
 [Dual-lobe functions and criteria](docs/DUAL_LOBE_FUNCTIONS_AND_CRITERIA.md).
 It defines the hard anti-deception rule that narrow evidence may support only a

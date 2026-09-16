@@ -18,6 +18,7 @@ from ..state import repositories as repo
 from . import prompts
 from . import artifacts as evidence_artifacts
 from . import fetch as evidence_fetch
+from . import recipient_router
 from .channels import completed_memory, memory_status, reviewed_state
 from .protocol import Review, ground_review, parse_review, usable_state
 
@@ -118,6 +119,53 @@ async def _review_with_sensing(base_prompt: str, rebuild, previous: dict) -> tup
     return review, results, used
 
 
+async def _should_respond_to_message(
+    session: AsyncSession,
+    run_id: str,
+    tenant_id: int,
+    latest_user_text: str,
+    payload: dict,
+) -> tuple[bool, recipient_router.RecipientAnalysis | None]:
+    """Check if this agent should respond to the latest user message.
+    
+    Returns:
+        (should_respond, analysis) where should_respond is False if recipient
+        routing is enabled and this message is NOT directed at this agent.
+        Always ingests the message into memory regardless.
+    """
+    s = get_settings()
+    
+    if not s.recipient_routing_enabled or not latest_user_text:
+        return True, None
+    
+    try:
+        analysis, _ = await recipient_router.route_message(
+            session,
+            agent_name=s.agent_name,
+            message=latest_user_text,
+            tenant_id=tenant_id,
+            run_id=run_id,
+            context_for_memory=payload,
+        )
+        
+        # Check confidence threshold
+        should_respond = (
+            analysis.should_respond and
+            analysis.confidence >= s.recipient_routing_confidence_threshold
+        )
+        
+        if not should_respond:
+            LOG.info(
+                "Suppressing response: message not for %s (confidence=%.2f, reasoning=%s)",
+                s.agent_name, analysis.confidence, analysis.reasoning
+            )
+        
+        return should_respond, analysis
+    except Exception as exc:
+        LOG.exception("Recipient routing analysis failed; defaulting to respond")
+        return True, None
+
+
 async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
                            tenant_id: int) -> dict[str, Any]:
     # Caller owns the transaction and per-run lock, including marking the job done.
@@ -149,6 +197,30 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
         await repo.append_event(session, "shadow_skipped", tenant_id, run_id=run_id,
                                 actor="lobe-b", payload={"reason": reason})
         return {"ok": False, "skipped": reason}
+
+    # RECIPIENT ROUTING: check if this message is for this agent
+    latest_user_text = str(payload.get("latest_user_text") or "")
+    should_respond, routing_analysis = await _should_respond_to_message(
+        session, run_id, tenant_id, latest_user_text, payload
+    )
+    
+    if not should_respond and routing_analysis:
+        # Message is not directed at this agent; suppress response but ingest into memory
+        await repo.append_event(
+            session,
+            "response_suppressed_recipient_routing",
+            tenant_id,
+            run_id=run_id,
+            actor="lobe-b",
+            payload=routing_analysis.to_event_payload() if hasattr(routing_analysis, 'to_event_payload')
+            else {
+                "confidence": routing_analysis.confidence,
+                "reasoning": routing_analysis.reasoning,
+                "speaker": routing_analysis.speaker,
+                "detected_recipients": routing_analysis.detected_recipients,
+            }
+        )
+        return {"ok": True, "suppressed": "recipient_routing", "ingested_to_memory": True}
 
     events = await repo.list_events(session, run_id=run_id, limit=20)
     # B never sees old B assertions repackaged as independent evidence.
