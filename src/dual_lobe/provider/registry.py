@@ -32,19 +32,15 @@ def env_targets() -> dict[str, ProviderTarget]:
     base_fields = {f.name: getattr(base, f.name) for f in fields(base)}
     base_fields.pop("alias", None)
     flat = ProviderTarget(alias="sawii/dl-dialogue", **base_fields)
-    hierarchy = ProviderTarget(alias="sawii/dl-dialogue1", **base_fields)
+    chief = ProviderTarget(alias="sawii/dl-dialogue1", **base_fields)
+    moderator = ProviderTarget(alias="sawii/dl-dialogue2", **base_fields)
+    worker = ProviderTarget(alias="sawii/dl-dialogue3", **base_fields)
     return {
         "sawii/dual-lobe": base,
         "sawii/dl-dialogue": flat,
-        "sawii/dl-dialogue1": hierarchy,
-        "lobe-b": ProviderTarget(
-            alias="lobe-b",
-            base_url=s.resolved_b_base_url,
-            api_key=s.resolved_b_api_key,
-            model=s.resolved_b_model,
-            kind=s.b_dialect,
-            capabilities={"stream": False, "tools": False, "responses": False},
-        ),
+        "sawii/dl-dialogue1": chief,
+        "sawii/dl-dialogue2": moderator,
+        "sawii/dl-dialogue3": worker,
     }
 
 
@@ -89,7 +85,14 @@ class Registry:
         return self._adapters[target.alias]
 
     def models(self) -> list[dict[str, Any]]:
-        from ..core.settings import get_settings
+        # Only expose user-facing models, hide internal routing components
+        user_facing_models = {
+            "sawii/dual-lobe",
+            "sawii/dl-dialogue", 
+            "sawii/dl-dialogue1",
+            "sawii/dl-dialogue2",
+            "sawii/dl-dialogue3"
+        }
         result = [
             {
                 "id": t.alias,
@@ -100,13 +103,8 @@ class Registry:
                 "capabilities": t.capabilities,
             }
             for t in self._targets.values()
-            if t.enabled
+            if t.enabled and t.alias in user_facing_models
         ]
-        if get_settings().director_enabled and "sawii/dual-lobe" in self._targets and self._targets["sawii/dual-lobe"].enabled:
-            result.append({"id": "lobe-a-director", "object": "model", "owned_by": "local",
-                           "logical_model": self._targets["sawii/dual-lobe"].model,
-                           "kind": "chat_completions", "capabilities": {"stream": True, "tools": True,
-                           "director": True, "requires_run_header": True, "structured_output": False}})
         return result
 
 

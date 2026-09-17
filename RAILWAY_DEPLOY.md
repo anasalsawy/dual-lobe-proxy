@@ -14,7 +14,7 @@
    - `DUAL_LOBE_B_BASE_URL` = `https://api.deepinfra.com/v1/openai`
    - `RLS_DATABASE_URL` = `${{Postgres.DATABASE_URL}}`
    - `DUAL_LOBE_ROUTING_MODE` = `off`
-   - `DUAL_LOBE_HIERARCHY_ROLES` = `chief:0,l1:1,l2:2,worker:3`
+   - `DUAL_LOBE_HIERARCHY_ROLES` = `sawii/dl-dialogue1:0,sawii/dl-dialogue2:1,sawii/dl-dialogue3:2`
 7. Deploy. Railway will expose a public URL like `https://dual-lobe-proxy.up.railway.app`.
 8. Test with `curl https://<your-url>/healthz`.
 
