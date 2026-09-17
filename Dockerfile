@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy package files
 COPY pyproject.toml README.md ./
 COPY src ./src
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
 
 # Install the package
 RUN pip install --no-cache-dir -e "."
