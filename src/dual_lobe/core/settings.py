@@ -107,6 +107,12 @@ class Settings(BaseSettings):
     agent_name: str = Field(default="agent", validation_alias="DUAL_LOBE_AGENT_NAME")
     recipient_routing_confidence_threshold: float = Field(default=0.6, ge=0.0, le=1.0, validation_alias="DUAL_LOBE_RECIPIENT_ROUTING_CONFIDENCE_THRESHOLD")
 
+    # Implementation-auditor: static checks that catch UI/mock substitution, simulated
+    # progress, missing backends, deleted integrations, and unsubstantiated completion.
+    implementation_audit_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_IMPLEMENTATION_AUDIT_ENABLED")
+    implementation_audit_workspace: str | None = Field(default=None, validation_alias="DUAL_LOBE_IMPLEMENTATION_AUDIT_WORKSPACE")
+    implementation_audit_baseline_paths: list[str] | None = Field(default=None, validation_alias="DUAL_LOBE_IMPLEMENTATION_AUDIT_BASELINE_PATHS")
+
     @property
     def rls_url(self) -> str:
         if self.rls_database_url:

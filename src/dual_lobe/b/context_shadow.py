@@ -20,6 +20,7 @@ from . import artifacts as evidence_artifacts
 from . import fetch as evidence_fetch
 from . import recipient_router
 from .channels import completed_memory, memory_status, reviewed_state
+from .implementation_auditor import ImplementationAuditor, findings_to_text
 from .protocol import Review, ground_review, parse_review, usable_state
 
 LOG = logging.getLogger("dual_lobe.b.context_shadow")
@@ -240,6 +241,17 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
         prior_claims = previous.get("claim_review") or {"concerns": (previous.get("review") or {}).get("concerns", [])}
 
     def rebuild(sensed: str = "") -> str:
+        auditor_text = ""
+        if s.implementation_audit_enabled:
+            try:
+                auditor = ImplementationAuditor(s.implementation_audit_workspace or ".")
+                findings = auditor.run_all(
+                    response_text=str(payload.get("response_text") or ""),
+                    baseline_paths=s.implementation_audit_baseline_paths or [],
+                )
+                auditor_text = findings_to_text(findings)
+            except Exception as exc:
+                LOG.warning("Implementation auditor failed run=%s error_type=%s", run_id, type(exc).__name__)
         return prompts.build_cycle_prompt(
             str(payload.get("context_text") or ""),
             str(payload.get("response_text") or ""),
@@ -248,6 +260,7 @@ async def run_shadow_cycle(session: AsyncSession, job: dict[str, Any],
             max_chars=s.max_shadow_input_chars,
             latest_request=str(payload.get("latest_user_text") or ""),
             sensed=sensed,
+            auditor_text=auditor_text,
         )
 
     base_prompt = rebuild()
