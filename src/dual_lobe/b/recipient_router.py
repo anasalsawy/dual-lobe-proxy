@@ -9,6 +9,10 @@ current agent or another entity, allowing the agent to:
 3. Continue background operations without response overhead
 
 This solves the "talking over each other" problem in multi-agent rooms.
+
+Now also supports dynamic rule injection:
+- "Research agent, don't speak" -> mutes that agent
+- "IT agent, only respond to urgent" -> urgent-only mode
 """
 from __future__ import annotations
 
@@ -16,7 +20,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, List
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +28,7 @@ from ..core.settings import get_settings
 from ..provider.adapters import NormalizedRequest, response_dict
 from ..provider.registry import get_registry
 from ..state import repositories as repo
+from .rules import parse_rule_command, add_rule, get_active_rules, normalize_agent_name
 
 LOG = logging.getLogger("dual_lobe.b.recipient_router")
 
@@ -57,30 +62,35 @@ class RecipientAnalysis:
 
 
 RECIPIENT_ROUTER_SYSTEM = """You are a recipient analyzer for multi-agent conversations.
-Your ONLY job is to determine if an incoming message is directed at the current agent (YOU).
+Your job is to determine if an incoming message is directed at the current agent (YOU) and whether you should respond.
 
-You have NO other responsibilities:
-- Do NOT execute tasks
-- Do NOT evaluate claims
-- Do NOT reason about the message content beyond recipient detection
-- Do NOT use tools
-- Do NOT provide solutions or suggestions
+You MUST consider:
+1. Direct addressing (explicit mentions like "Agent Name, ...") - this usually means respond
+2. Broadcast messages ("everyone", "team", "all agents") - respond based on routing mode and rules  
+3. Your current routing mode (flat, hierarchy, or off)
+4. Your hierarchy rank (if in hierarchy mode) - lower rank = higher authority
+5. Speaker identity - who sent the message (human or which agent)
+6. Your active behavioral rules - THESE OVERRIDE ALL OTHER CONSIDERATIONS
+7. Task ownership and current responsibilities - if you're working on a task, don't interrupt unless directly needed
 
-TASK: Given a message, determine:
-1. Is this message directed AT YOU (the current agent)?
-2. What is your confidence (0.0-1.0)?
-3. Who is the speaker?
-4. What other recipients are mentioned (if any)?
-5. Is this a broadcast message ("everyone", "all agents", "team", "guys", general room address)?
+CRITICAL RULES:
+- Active behavioral rules ALWAYS take precedence over default routing behavior
+- If you have a rule like "don't speak" or "only respond when directly addressed", follow it strictly
+- Direct addressing generally overrides broadcast silence, unless your rule explicitly forbids it
 
-Recipient detection rules:
-- Explicit mentions: "Agent A, please...", "@agent_name", "Alice, can you..."
-- Context references: "the backend agent", "the frontend expert", "the one handling X"
-- Implicit addressing: If only ONE agent is present and they're being addressed, it's for them
-- Broadcast: "everyone", "all agents", "team" = directed at all
-- Unclear: When ambiguous and you can't tell, default to assuming it IS for you
+HIERARCHY BROADCAST DIRECTION RULES (when in hierarchy mode):
+- HUMAN BROADCASTS: Only highest-ranked agents respond to general broadcasts
+- AGENT-TO-AGENT BROADCASTS: Can only flow DOWN the hierarchy (higher rank → lower rank)
+  - Chief (rank 0) can broadcast to Moderators (rank 1) and Workers (rank 2)
+  - Moderator (rank 1) can broadcast to Workers (rank 2)  
+  - Same-level broadcasts are BLOCKED - use direct addressing instead
+  - UPWARD broadcasts (lower → higher) are BLOCKED - use direct addressing or escalation
+- AGENT-TO-AGENT CONVERSATION: Direct addressing works in both directions (up/down) when explicitly naming the recipient
+- TASK OWNERSHIP: If you're currently responsible for a task or domain, you should respond to relevant queries even in broadcasts
+- DON'T INTERRUPT: If you're busy with your own task and the message is a general broadcast not requiring your expertise, stay silent and let others respond
+- Human sovereignty: When the human is present, only respond when directly addressed unless given explicit authority
 
-Return ONLY this JSON object:
+Your ONLY output is a JSON object with these fields:
 {
   "should_respond": true|false,
   "confidence": 0.0-1.0,
@@ -132,8 +142,11 @@ def _apply_routing_mode(
     Modes:
       off      -> always respond (analysis ignored)
       flat     -> respond if addressed or broadcast; unchanged from router
-      hierarchy-> broadcast only reaches highest-ranked present agent;
-                   direct addressing still wins
+      hierarchy-> broadcast direction rules:
+                   - Human broadcasts: only highest-ranked present agent responds
+                   - Agent broadcasts: only allowed DOWN hierarchy (higher → lower rank)
+                   - Same-level or upward agent broadcasts: treated as noise (no response)
+                   - Direct addressing always works regardless of direction
     """
     if mode == "off":
         return RecipientAnalysis(
@@ -150,45 +163,100 @@ def _apply_routing_mode(
         return analysis
 
     if mode == "hierarchy":
-        # Direct addressing overrides hierarchy
+        # Direct addressing overrides hierarchy - always respond if directly addressed
         if not analysis.is_broadcast:
             return analysis
 
-        # Broadcast: only the highest-ranked agent among detected recipients responds.
-        # If no recipients detected, fall back to the current agent if it is the highest rank.
-        candidates = [r for r in analysis.detected_recipients if rank_of(r, hierarchy) is not None]
-        if not candidates:
-            # No known hierarchy members mentioned: current agent responds if it has a rank
-            if rank_of(agent_name, hierarchy) is not None:
+        # Determine if speaker is human or agent
+        speaker = analysis.speaker
+        speaker_is_human = speaker is None or speaker.lower() in ["user", "human", "anas"]
+        
+        if speaker_is_human:
+            # Human broadcast: only highest-ranked agents respond
+            candidates = [r for r in analysis.detected_recipients if rank_of(r, hierarchy) is not None]
+            if not candidates:
+                # No known hierarchy members mentioned: current agent responds if it has a rank
+                if rank_of(agent_name, hierarchy) is not None:
+                    return RecipientAnalysis(
+                        should_respond=True,
+                        confidence=analysis.confidence,
+                        reasoning=f"broadcast_fallback:{agent_name}",
+                        speaker=analysis.speaker,
+                        detected_recipients=analysis.detected_recipients,
+                        is_broadcast=True,
+                    )
+                return analysis
+
+            best = min(candidates, key=lambda r: rank_of(r, hierarchy))  # type: ignore[arg-type]
+            agent_rank = rank_of(agent_name, hierarchy)
+            best_rank = rank_of(best, hierarchy)
+            should = agent_rank is not None and best_rank is not None and agent_rank <= best_rank
+            return RecipientAnalysis(
+                should_respond=should,
+                confidence=analysis.confidence,
+                reasoning=f"broadcast_hierarchy:{best}",
+                speaker=analysis.speaker,
+                detected_recipients=analysis.detected_recipients,
+                is_broadcast=True,
+            )
+        else:
+            # Agent-to-agent broadcast: enforce DOWN hierarchy direction only
+            speaker_rank = rank_of(speaker, hierarchy) if speaker else None
+            agent_rank = rank_of(agent_name, hierarchy)
+            
+            # Can only broadcast DOWN the hierarchy (lower rank number = higher authority)
+            # Higher agent (rank 0) can broadcast to lower agents (rank 1, 2, etc.)
+            # Same level (rank 1 → rank 1) or upward (rank 2 → rank 1) is NOT allowed
+            if speaker_rank is not None and agent_rank is not None:
+                if speaker_rank < agent_rank:
+                    # Higher agent broadcasting to lower agent - ALLOW
+                    # Check if current agent is in the intended recipient group
+                    if agent_name in analysis.detected_recipients or "all" in [r.lower() for r in analysis.detected_recipients]:
+                        return RecipientAnalysis(
+                            should_respond=True,
+                            confidence=analysis.confidence,
+                            reasoning=f"broadcast_down:{speaker}",
+                            speaker=analysis.speaker,
+                            detected_recipients=analysis.detected_recipients,
+                            is_broadcast=True,
+                        )
+                    else:
+                        # Not addressed to this agent specifically
+                        return RecipientAnalysis(
+                            should_respond=False,
+                            confidence=analysis.confidence,
+                            reasoning=f"broadcast_not_for_me:{speaker}",
+                            speaker=analysis.speaker,
+                            detected_recipients=analysis.detected_recipients,
+                            is_broadcast=True,
+                        )
+                else:
+                    # Same level or upward broadcast - BLOCK (treat as noise)
+                    return RecipientAnalysis(
+                        should_respond=False,
+                        confidence=analysis.confidence,
+                        reasoning=f"broadcast_blocked:{speaker}",
+                        speaker=analysis.speaker,
+                        detected_recipients=analysis.detected_recipients,
+                        is_broadcast=True,
+                    )
+            else:
+                # Unknown ranks - safe default: treat as noise
                 return RecipientAnalysis(
-                    should_respond=True,
+                    should_respond=False,
                     confidence=analysis.confidence,
-                    reasoning=f"broadcast_fallback:{agent_name}",
+                    reasoning="broadcast_agent_unknown",
                     speaker=analysis.speaker,
                     detected_recipients=analysis.detected_recipients,
                     is_broadcast=True,
                 )
-            return analysis
-
-        best = min(candidates, key=lambda r: rank_of(r, hierarchy))  # type: ignore[arg-type]
-        agent_rank = rank_of(agent_name, hierarchy)
-        best_rank = rank_of(best, hierarchy)
-        should = agent_rank is not None and best_rank is not None and agent_rank <= best_rank
-        return RecipientAnalysis(
-            should_respond=should,
-            confidence=analysis.confidence,
-            reasoning=f"broadcast_hierarchy:{best}",
-            speaker=analysis.speaker,
-            detected_recipients=analysis.detected_recipients,
-            is_broadcast=True,
-        )
 
     # Unknown mode: safe default
     LOG.warning("Unknown routing mode %r; defaulting to flat", mode)
     return analysis
 
 
-async def _analyze_recipient(agent_name: str, message: str) -> str:
+async def _analyze_recipient(agent_name: str, message: str, active_rules: List[AgentRule] | None = None, routing_context: dict | None = None) -> str:
     """Call the router model to analyze recipient intention.
 
     Returns the raw model response (should be valid JSON).
@@ -196,6 +264,8 @@ async def _analyze_recipient(agent_name: str, message: str) -> str:
     Args:
         agent_name: Name of the current agent (sanitized)
         message: User message (sanitized)
+        active_rules: Active rules for this agent (if any)
+        routing_context: Additional context like hierarchy info, routing mode
     
     Raises:
         ValueError: If inputs are invalid
@@ -220,12 +290,42 @@ async def _analyze_recipient(agent_name: str, message: str) -> str:
         raise ValueError("message becomes empty after sanitization")
     
     s = get_settings()
-    prompt = f"""Current agent name/role: {agent_name}
-
-Message to analyze:
-{message}
-
-Determine if this message is directed at '{agent_name}'."""
+    
+    # Build prompt with all relevant context
+    prompt_parts = [f"Current agent name/role: {agent_name}"]
+    
+    # Add routing mode and hierarchy context
+    if routing_context:
+        mode = routing_context.get("mode", "flat")
+        prompt_parts.append(f"Current routing mode: {mode}")
+        
+        if mode == "hierarchy":
+            hierarchy = routing_context.get("hierarchy", {})
+            if hierarchy:
+                hierarchy_str = ", ".join([f"{role}:{rank}" for role, rank in hierarchy.items()])
+                prompt_parts.append(f"Hierarchy roles (lower number = higher rank): {hierarchy_str}")
+            
+            agent_rank = routing_context.get("agent_rank")
+            if agent_rank is not None:
+                prompt_parts.append(f"Your hierarchy rank: {agent_rank}")
+    
+    # Add active rules if present
+    if active_rules:
+        rule_texts = [rule.rule_text for rule in active_rules]
+        rules_str = " | ".join(rule_texts)
+        prompt_parts.append(f"Active behavioral rules for you: {rules_str}")
+    
+    prompt_parts.extend([
+        "",
+        "Message to analyze:",
+        message,
+        "",
+        f"Determine if this message is directed at '{agent_name}' and whether you should respond.",
+        "Consider your routing mode, hierarchy rank, and active behavioral rules when deciding.",
+        "Remember: direct addressing (explicitly calling your name) should generally override broadcast rules.",
+    ])
+    
+    prompt = "\n".join(prompt_parts)
 
     try:
         async with asyncio.timeout(10):
@@ -430,9 +530,37 @@ async def route_message(
         )
 
     try:
-        raw = await _analyze_recipient(agent_name, message)
+        # First, check if this message contains a rule-setting command
+        # Use permissive mode (empty known_agents) to accept any agent name
+        rule_result = parse_rule_command(message)
+        if rule_result:
+            target_agent, rule_text = rule_result
+            # Add the rule (this affects future messages)
+            add_rule(target_agent, rule_text)
+            LOG.info("Parsed rule command: %s -> %s", target_agent, rule_text)
+            
+            # Even if this message sets a rule, we still need to route it normally
+            # (the rule applies to FUTURE messages, not this one)
+        
+        # Get active rules for current agent
+        active_rules = get_active_rules(agent_name)
+        
+        # Build routing context for the LLM
+        routing_context = {
+            "mode": mode,
+        }
+        
+        if mode == "hierarchy":
+            hierarchy = parse_hierarchy_roles(s.hierarchy_roles)
+            routing_context["hierarchy"] = hierarchy
+            agent_rank = rank_of(agent_name, hierarchy)
+            routing_context["agent_rank"] = agent_rank
+        
+        # Call the router model with full context
+        raw = await _analyze_recipient(agent_name, message, active_rules, routing_context)
         analysis = _parse_recipient_analysis(raw)
 
+        # Apply routing mode logic (this can be overridden by active rules in the LLM analysis)
         hierarchy = parse_hierarchy_roles(s.hierarchy_roles)
         analysis = _apply_routing_mode(analysis, mode, agent_name, hierarchy)
 
@@ -452,6 +580,7 @@ async def route_message(
                 "speaker": analysis.speaker,
                 "detected_recipients": analysis.detected_recipients,
                 "is_broadcast": analysis.is_broadcast,
+                "active_rules_count": len(active_rules) if active_rules else 0,
             },
         )
 
