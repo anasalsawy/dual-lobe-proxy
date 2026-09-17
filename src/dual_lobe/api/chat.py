@@ -289,6 +289,8 @@ async def chat_completions(
         "sawii/dual-lobe": "off",
         "sawii/dl-dialogue": "flat",
         "sawii/dl-dialogue1": "hierarchy",
+        "sawii/dl-dialogue2": "hierarchy",
+        "sawii/dl-dialogue3": "hierarchy",
     }
     routing_mode = alias_to_mode.get(alias)
     if routing_mode:

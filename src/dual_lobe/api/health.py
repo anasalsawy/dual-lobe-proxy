@@ -27,8 +27,11 @@ async def readyz():
             await session.execute(text("SELECT 1"))
     except Exception:
         ledger = "down"
-    registry = "ok" if get_registry().target("lobe-a").enabled else "down"
-    rc = 200 if ledger == "ok" else 503
+    try:
+        registry = "ok" if get_registry().target("sawii/dual-lobe").enabled else "down"
+    except KeyError:
+        registry = "down"
+    rc = 200 if ledger == "ok" and registry == "ok" else 503
     return JSONResponse({"status": "ok" if rc == 200 else "unavailable", "ledger": ledger, "registry": registry}, status_code=rc)
 
 
