@@ -287,8 +287,8 @@ async def chat_completions(
     # Map routing model aliases to modes for recipient routing.
     alias_to_mode = {
         "sawii/dual-lobe": "off",
-        "lobe-a-flat": "flat",
-        "lobe-a-hierarchy": "hierarchy",
+        "sawii/dl-dialogue": "flat",
+        "sawii/dl-dialogue1": "hierarchy",
     }
     routing_mode = alias_to_mode.get(alias)
     if routing_mode:

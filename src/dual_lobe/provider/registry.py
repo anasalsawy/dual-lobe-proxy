@@ -31,12 +31,12 @@ def env_targets() -> dict[str, ProviderTarget]:
     )
     base_fields = {f.name: getattr(base, f.name) for f in fields(base)}
     base_fields.pop("alias", None)
-    flat = ProviderTarget(alias="lobe-a-flat", **base_fields)
-    hierarchy = ProviderTarget(alias="lobe-a-hierarchy", **base_fields)
+    flat = ProviderTarget(alias="sawii/dl-dialogue", **base_fields)
+    hierarchy = ProviderTarget(alias="sawii/dl-dialogue1", **base_fields)
     return {
         "sawii/dual-lobe": base,
-        "lobe-a-flat": flat,
-        "lobe-a-hierarchy": hierarchy,
+        "sawii/dl-dialogue": flat,
+        "sawii/dl-dialogue1": hierarchy,
         "lobe-b": ProviderTarget(
             alias="lobe-b",
             base_url=s.resolved_b_base_url,
