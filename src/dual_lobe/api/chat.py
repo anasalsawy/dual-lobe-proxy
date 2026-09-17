@@ -262,9 +262,9 @@ async def chat_completions(
     director_mode = alias == "lobe-a-director" or corr.get("mode") == "director"
     if director_mode and (not s.director_enabled or correlation.is_bypass(corr)):
         raise HTTPException(400, "Director mode is disabled or conflicts with bypass.")
-    if director_mode and alias not in ("lobe-a", "lobe-a-director"):
+    if director_mode and alias not in ("sawii/dual-lobe", "lobe-a-director"):
         raise HTTPException(400, "Use lobe-a-director or lobe-a with director mode.")
-    target_alias = "lobe-a" if director_mode else alias
+    target_alias = "sawii/dual-lobe" if director_mode else alias
     requested_space = request.headers.get("X-DL-Memory-ID")
     selected_space = requested_space if requested_space is not None else (s.default_memory_id if s.shared_memory_enabled else None)
     try:
@@ -286,7 +286,7 @@ async def chat_completions(
 
     # Map routing model aliases to modes for recipient routing.
     alias_to_mode = {
-        "lobe-a": "off",
+        "sawii/dual-lobe": "off",
         "lobe-a-flat": "flat",
         "lobe-a-hierarchy": "hierarchy",
     }

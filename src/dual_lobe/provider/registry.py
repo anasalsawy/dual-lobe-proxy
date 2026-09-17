@@ -22,7 +22,7 @@ def env_targets() -> dict[str, ProviderTarget]:
 
     s = get_settings()
     base = ProviderTarget(
-        alias="lobe-a",
+        alias="sawii/dual-lobe",
         base_url=s.a_base_url,
         api_key=s.a_api_key,
         model=s.a_model,
@@ -34,7 +34,7 @@ def env_targets() -> dict[str, ProviderTarget]:
     flat = ProviderTarget(alias="lobe-a-flat", **base_fields)
     hierarchy = ProviderTarget(alias="lobe-a-hierarchy", **base_fields)
     return {
-        "lobe-a": base,
+        "sawii/dual-lobe": base,
         "lobe-a-flat": flat,
         "lobe-a-hierarchy": hierarchy,
         "lobe-b": ProviderTarget(
@@ -82,7 +82,7 @@ class Registry:
             self.register(target)
 
     def target(self, alias: str | None = None) -> ProviderTarget:
-        return self._targets[alias or "lobe-a"]
+        return self._targets[alias or "sawii/dual-lobe"]
 
     def adapter(self, alias: str | None = None):
         target = self.target(alias)
@@ -102,9 +102,9 @@ class Registry:
             for t in self._targets.values()
             if t.enabled
         ]
-        if get_settings().director_enabled and "lobe-a" in self._targets and self._targets["lobe-a"].enabled:
+        if get_settings().director_enabled and "sawii/dual-lobe" in self._targets and self._targets["sawii/dual-lobe"].enabled:
             result.append({"id": "lobe-a-director", "object": "model", "owned_by": "local",
-                           "logical_model": self._targets["lobe-a"].model,
+                           "logical_model": self._targets["sawii/dual-lobe"].model,
                            "kind": "chat_completions", "capabilities": {"stream": True, "tools": True,
                            "director": True, "requires_run_header": True, "structured_output": False}})
         return result
