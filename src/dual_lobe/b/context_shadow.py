@@ -135,6 +135,7 @@ async def _should_respond_to_message(
         Always ingests the message into memory regardless.
     """
     s = get_settings()
+    mode = str(payload.get("routing_mode") or s.routing_mode or "off").strip().lower()
     
     if not s.recipient_routing_enabled or not latest_user_text:
         return True, None
@@ -147,6 +148,7 @@ async def _should_respond_to_message(
             tenant_id=tenant_id,
             run_id=run_id,
             context_for_memory=payload,
+            mode=mode,
         )
         
         # Check confidence threshold

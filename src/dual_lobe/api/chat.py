@@ -140,7 +140,8 @@ async def _read_context(tenant_id: int, run_id: str, floor: str, attempt: int) -
 async def _persist_observation(tenant_id: int, run_id: str, external_run: str,
                                corr: dict, target_alias: str, context_text: str,
                                audit: dict, observe: bool,
-                               latest_user_text: str = "") -> None:
+                               latest_user_text: str = "",
+                               routing_mode: str | None = None) -> None:
     """After response delivery. Failures cannot change an already-sent A answer."""
     s = get_settings()
     try:
@@ -173,7 +174,8 @@ async def _persist_observation(tenant_id: int, run_id: str, external_run: str,
                         attempt_id=int(corr.get("attempt", 1)), stage=s.rollout_stage,
                     )
                     payload.update(source_call=audit["call_id"], observed_at=audit["observed_at"],
-                                   latest_user_text=latest_user_text)
+                                   latest_user_text=latest_user_text,
+                                   routing_mode=routing_mode)
                     scope_context = context_text + f"\nSCOPE:{corr.get('floor', '')}:{corr.get('attempt', 1)}"
                     key = shadow_job_key(tenant_id, run_id, 0, scope_context, audit["output"])
                     await repo.enqueue_outbox(session, tenant_id, "b", key, payload)
@@ -282,6 +284,18 @@ async def chat_completions(
     if alias == "lobe-b":
         raise HTTPException(status_code=400, detail="lobe-b is internal; use lobe-a")
 
+    # Map routing model aliases to modes for recipient routing.
+    alias_to_mode = {
+        "lobe-a": "off",
+        "lobe-a-flat": "flat",
+        "lobe-a-hierarchy": "hierarchy",
+    }
+    routing_mode = alias_to_mode.get(alias)
+    if routing_mode:
+        # Ensure routing is enabled for flat/hierarchy aliases; off alias ignores global toggle.
+        if routing_mode != "off" and not s.recipient_routing_enabled:
+            raise HTTPException(status_code=400, detail=f"{alias} requires recipient routing enabled")
+
     limit = await limits.check_limits(principal.tenant_id, _token_estimate(messages))
     if not limit.allowed:
         raise HTTPException(status_code=429, detail="rate limit exceeded",
@@ -332,7 +346,7 @@ async def chat_completions(
         await record_memory(principal.tenant_id, memory_space, run_id, audit["call_id"], messages, responses)
     background = BackgroundTask(_persist_observation, principal.tenant_id, run_id,
                                 external_run, corr, alias, context_text, audit, observe,
-                                latest_user_text=latest_user_text)
+                                latest_user_text=latest_user_text, routing_mode=routing_mode)
     headers = {"X-Dual-Lobe-Run-Id": run_id, "X-Dual-Lobe-Observer": context.status,
                "X-Dual-Lobe-Call-Id": audit["call_id"],
                "X-Dual-Lobe-Memory": (f"v{context.memory_version}" if context.memory_text else context.memory_status),

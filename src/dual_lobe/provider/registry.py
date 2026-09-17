@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from dataclasses import fields
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,15 +21,22 @@ def env_targets() -> dict[str, ProviderTarget]:
     from ..core.settings import get_settings
 
     s = get_settings()
+    base = ProviderTarget(
+        alias="lobe-a",
+        base_url=s.a_base_url,
+        api_key=s.a_api_key,
+        model=s.a_model,
+        kind=s.a_dialect,
+        capabilities={"stream": True, "tools": True, "responses": False},
+    )
+    base_fields = {f.name: getattr(base, f.name) for f in fields(base)}
+    base_fields.pop("alias", None)
+    flat = ProviderTarget(alias="lobe-a-flat", **base_fields)
+    hierarchy = ProviderTarget(alias="lobe-a-hierarchy", **base_fields)
     return {
-        "lobe-a": ProviderTarget(
-            alias="lobe-a",
-            base_url=s.a_base_url,
-            api_key=s.a_api_key,
-            model=s.a_model,
-            kind=s.a_dialect,
-            capabilities={"stream": True, "tools": True, "responses": False},
-        ),
+        "lobe-a": base,
+        "lobe-a-flat": flat,
+        "lobe-a-hierarchy": hierarchy,
         "lobe-b": ProviderTarget(
             alias="lobe-b",
             base_url=s.resolved_b_base_url,

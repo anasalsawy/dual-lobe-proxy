@@ -35,12 +35,14 @@ class RecipientAnalysis:
     """Result of recipient routing analysis."""
 
     def __init__(self, should_respond: bool, confidence: float, reasoning: str,
-                 speaker: str | None = None, detected_recipients: list[str] | None = None):
+                 speaker: str | None = None, detected_recipients: list[str] | None = None,
+                 is_broadcast: bool = False):
         self.should_respond = should_respond
         self.confidence = confidence
         self.reasoning = reasoning
         self.speaker = speaker
         self.detected_recipients = detected_recipients or []
+        self.is_broadcast = is_broadcast
 
     def to_event_payload(self) -> dict[str, Any]:
         """Serialize for event logging."""
@@ -50,6 +52,7 @@ class RecipientAnalysis:
             "reasoning": self.reasoning,
             "speaker": self.speaker,
             "detected_recipients": self.detected_recipients,
+            "is_broadcast": self.is_broadcast,
         }
 
 
@@ -68,6 +71,7 @@ TASK: Given a message, determine:
 2. What is your confidence (0.0-1.0)?
 3. Who is the speaker?
 4. What other recipients are mentioned (if any)?
+5. Is this a broadcast message ("everyone", "all agents", "team", "guys", general room address)?
 
 Recipient detection rules:
 - Explicit mentions: "Agent A, please...", "@agent_name", "Alice, can you..."
@@ -82,8 +86,106 @@ Return ONLY this JSON object:
   "confidence": 0.0-1.0,
   "reasoning": "brief explanation (max 100 chars)",
   "speaker": "name or null",
-  "detected_recipients": ["list", "of", "names", "or", "roles"]
+  "detected_recipients": ["list", "of", "names", "or", "roles"],
+  "is_broadcast": true|false
 }""".strip()
+
+
+HierarchyRule = dict[str, Any]
+
+
+def parse_hierarchy_roles(raw: str) -> dict[str, int]:
+    """Parse 'chief:0,l1:1,l2:2' into a role -> rank map.
+
+    Lower number = higher rank. Empty input returns empty dict.
+    """
+    result: dict[str, int] = {}
+    if not raw:
+        return result
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if ":" not in entry:
+            continue
+        role, rank = entry.split(":", 1)
+        role = role.strip().lower()
+        try:
+            result[role] = int(rank.strip())
+        except ValueError:
+            continue
+    return result
+
+
+def rank_of(role: str, hierarchy: dict[str, int]) -> int | None:
+    return hierarchy.get(role.lower().strip())
+
+
+def _apply_routing_mode(
+    analysis: RecipientAnalysis,
+    mode: str,
+    agent_name: str,
+    hierarchy: dict[str, int],
+) -> RecipientAnalysis:
+    """Adjust the raw recipient analysis according to routing mode.
+
+    Modes:
+      off      -> always respond (analysis ignored)
+      flat     -> respond if addressed or broadcast; unchanged from router
+      hierarchy-> broadcast only reaches highest-ranked present agent;
+                   direct addressing still wins
+    """
+    if mode == "off":
+        return RecipientAnalysis(
+            should_respond=True,
+            confidence=1.0,
+            reasoning="routing_off",
+            speaker=analysis.speaker,
+            detected_recipients=analysis.detected_recipients,
+            is_broadcast=analysis.is_broadcast,
+        )
+
+    if mode == "flat":
+        # In flat mode, broadcast = respond. Direct addressing already decided by router.
+        return analysis
+
+    if mode == "hierarchy":
+        # Direct addressing overrides hierarchy
+        if not analysis.is_broadcast:
+            return analysis
+
+        # Broadcast: only the highest-ranked agent among detected recipients responds.
+        # If no recipients detected, fall back to the current agent if it is the highest rank.
+        candidates = [r for r in analysis.detected_recipients if rank_of(r, hierarchy) is not None]
+        if not candidates:
+            # No known hierarchy members mentioned: current agent responds if it has a rank
+            if rank_of(agent_name, hierarchy) is not None:
+                return RecipientAnalysis(
+                    should_respond=True,
+                    confidence=analysis.confidence,
+                    reasoning=f"broadcast_fallback:{agent_name}",
+                    speaker=analysis.speaker,
+                    detected_recipients=analysis.detected_recipients,
+                    is_broadcast=True,
+                )
+            return analysis
+
+        best = min(candidates, key=lambda r: rank_of(r, hierarchy))  # type: ignore[arg-type]
+        agent_rank = rank_of(agent_name, hierarchy)
+        best_rank = rank_of(best, hierarchy)
+        should = agent_rank is not None and best_rank is not None and agent_rank <= best_rank
+        return RecipientAnalysis(
+            should_respond=should,
+            confidence=analysis.confidence,
+            reasoning=f"broadcast_hierarchy:{best}",
+            speaker=analysis.speaker,
+            detected_recipients=analysis.detected_recipients,
+            is_broadcast=True,
+        )
+
+    # Unknown mode: safe default
+    LOG.warning("Unknown routing mode %r; defaulting to flat", mode)
+    return analysis
 
 
 async def _analyze_recipient(agent_name: str, message: str) -> str:
@@ -205,6 +307,10 @@ def _validate_recipient_analysis(obj: dict[str, Any]) -> tuple[bool, str | None]
     for item in detected_recipients:
         if not isinstance(item, str):
             return False, f"detected_recipients items must be strings, got {type(item)}"
+
+    is_broadcast = obj.get("is_broadcast")
+    if is_broadcast is not None and not isinstance(is_broadcast, bool):
+        return False, "is_broadcast must be boolean or null"
     
     return True, None
 
@@ -260,6 +366,7 @@ def _parse_recipient_analysis(content: str) -> RecipientAnalysis:
             reasoning=str(obj.get("reasoning", ""))[:500],
             speaker=obj.get("speaker"),
             detected_recipients=list(obj.get("detected_recipients") or []),
+            is_broadcast=bool(obj.get("is_broadcast", False)),
         )
     except Exception as exc:
         LOG.exception("Unexpected error creating RecipientAnalysis: %s", exc)
@@ -277,6 +384,7 @@ async def route_message(
     tenant_id: int,
     run_id: str,
     context_for_memory: dict[str, Any] | None = None,
+    mode: str | None = None,
 ) -> tuple[RecipientAnalysis, bool]:
     """Route a message to determine response responsibility.
 
@@ -287,6 +395,8 @@ async def route_message(
         tenant_id: Tenant for event logging
         run_id: Run ID for context
         context_for_memory: Optional context to store even if not responding
+        mode: Optional routing mode override ("off", "flat", "hierarchy").
+              If omitted, uses DUAL_LOBE_ROUTING_MODE from settings.
 
     Returns:
         Tuple of (RecipientAnalysis, should_ingest_into_memory)
@@ -306,6 +416,8 @@ async def route_message(
             True,
         )
 
+    mode = (mode or s.routing_mode or "off").strip().lower()
+
     # Short-circuit empty messages
     if not message or not message.strip():
         return (
@@ -321,6 +433,9 @@ async def route_message(
         raw = await _analyze_recipient(agent_name, message)
         analysis = _parse_recipient_analysis(raw)
 
+        hierarchy = parse_hierarchy_roles(s.hierarchy_roles)
+        analysis = _apply_routing_mode(analysis, mode, agent_name, hierarchy)
+
         # Log the routing decision
         await repo.append_event(
             session,
@@ -330,11 +445,13 @@ async def route_message(
             actor="lobe-b.router",
             payload={
                 "agent_name": agent_name,
+                "mode": mode,
                 "should_respond": analysis.should_respond,
                 "confidence": analysis.confidence,
                 "reasoning": analysis.reasoning,
                 "speaker": analysis.speaker,
                 "detected_recipients": analysis.detected_recipients,
+                "is_broadcast": analysis.is_broadcast,
             },
         )
 

@@ -107,6 +107,10 @@ class Settings(BaseSettings):
     agent_name: str = Field(default="agent", validation_alias="DUAL_LOBE_AGENT_NAME")
     recipient_routing_confidence_threshold: float = Field(default=0.6, ge=0.0, le=1.0, validation_alias="DUAL_LOBE_RECIPIENT_ROUTING_CONFIDENCE_THRESHOLD")
 
+    # Routing mode: "off" (single agent), "flat" (group chat), or "hierarchy" (ranked roles)
+    routing_mode: str = Field(default="off", validation_alias="DUAL_LOBE_ROUTING_MODE")
+    hierarchy_roles: str = Field(default="", validation_alias="DUAL_LOBE_HIERARCHY_ROLES")
+
     # Implementation-auditor: static checks that catch UI/mock substitution, simulated
     # progress, missing backends, deleted integrations, and unsubstantiated completion.
     implementation_audit_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_IMPLEMENTATION_AUDIT_ENABLED")
