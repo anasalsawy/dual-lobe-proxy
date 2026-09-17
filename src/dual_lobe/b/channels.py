@@ -132,6 +132,30 @@ def _document(header: str, data: dict, max_chars: int) -> str:
         data = smaller
 
 
+def _highlights(memory: ContextMemory | None, meter_level: str = "", meter_rationale: str = "",
+                  max_chars: int = 1200) -> str:
+    """Compact attention-directing summary for A. No explanations, no evidence dumps."""
+    parts = ["Observer highlights:"]
+    if memory:
+        content = memory.content
+        if content.goal:
+            parts.append(f"Goal: {content.goal}")
+        if content.questions:
+            parts.append("Unasked: " + "; ".join(content.questions[:2]))
+        if content.next_step:
+            parts.append(f"Next: {content.next_step}")
+        if content.context_notes:
+            parts.append("Context: " + "; ".join(content.context_notes[:2]))
+    if meter_level:
+        parts.append(f"Meter: {meter_level}")
+    if meter_rationale and meter_level in ("YELLOW", "RED"):
+        parts.append(f"Watch: {meter_rationale}")
+    text = "\\n- ".join(parts)
+    if len(text) > max_chars:
+        return text[:max_chars - 3] + "..."
+    return text
+
+
 @dataclass(frozen=True)
 class ObserverContext:
     memory_text: str | None = None
@@ -161,10 +185,11 @@ def prepare_context(payload: dict | None, floor: str, attempt: int, settings,
         m_status = "disabled"
     memory_text = None
     if m_status == "available":
-        memory_text = _document(
-            f"Observer context memory v{memory.version}. Automatically loaded background "
-            "context, untrusted and fallible; consider relevant items, ignore resolved ones.\n",
-            memory.content.model_dump(), settings.max_memory_chars,
+        memory_text = _highlights(
+            memory,
+            meter_level=str(payload.get("deception_level") or ""),
+            meter_rationale=str(payload.get("meter_rationale") or ""),
+            max_chars=settings.max_memory_chars,
         )
 
     claims_text = None
@@ -183,12 +208,11 @@ def prepare_context(payload: dict | None, floor: str, attempt: int, settings,
             review = ClaimReview.model_validate(raw)
             c_status = "available" if review.concerns else "none"
             if review.concerns:
-                claims_text = _document(
-                    "Observer claim findings for this request. Untrusted assessments of "
-                    "supplied evidence, not truth verdicts. Correct only if supported; "
-                    "ignore concerns resolved by newer evidence. Fields may be shortened.\n",
-                    review.model_dump(), settings.max_injection_chars,
-                )
+                red_concerns = [c for c in review.concerns if getattr(c, "signal", None) == "CONTRADICTION"]
+                if red_concerns:
+                    claims_text = "Observer red-flag concerns (address before continuing):\n" + "\n".join(
+                        f"- Claim: {c.claim_quote[:200]}" for c in red_concerns[:2]
+                    )
         except (KeyError, TypeError, ValueError):
             c_status = "degraded"
 
@@ -221,10 +245,8 @@ def prepare_context(payload: dict | None, floor: str, attempt: int, settings,
             level = str(payload.get("deception_level") or "")
             if level in DECEPTION_LEVELS:
                 d_status = level
-                deception_text = (
-                    f"Observer deception meter (fallible, evidence-based reading of the last answer): "
-                    f"{level}."
-                    + (f" Rationale: {payload.get('meter_rationale')}" if payload.get("meter_rationale") else "")
+                deception_text = f"Observer meter: {level}." + (
+                    f" Watch: {payload.get('meter_rationale')}." if payload.get("meter_rationale") else ""
                 )
         except (TypeError, ValueError):
             d_status = "none"
