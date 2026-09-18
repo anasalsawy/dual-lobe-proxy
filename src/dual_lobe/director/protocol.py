@@ -160,7 +160,15 @@ class Completion:
             raise ValueError("Director mode requires a single completion choice")
         text = ""
         for c in choices:
-            if c.get("index", 0) != 0 or self.finish is not None:
+            if c.get("index", 0) != 0:
+                raise ValueError("Unexpected choice or data after completion")
+            if self.finish is not None:
+                # Some providers (e.g. DeepInfra) send a second terminal chunk
+                # after finish_reason that only carries usage data. Accept it
+                # silently as long as it has no new content or tool calls.
+                delta = c.get("delta") or {}
+                if not delta.get("content") and not delta.get("tool_calls") and not delta.get("refusal"):
+                    continue
                 raise ValueError("Unexpected choice or data after completion")
             delta = c.get("delta") or {}
             text = delta.get("content") or ""
