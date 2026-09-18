@@ -35,12 +35,32 @@ def env_targets() -> dict[str, ProviderTarget]:
     chief = ProviderTarget(alias="sawii/dl-dialogue1", **base_fields)
     moderator = ProviderTarget(alias="sawii/dl-dialogue2", **base_fields)
     worker = ProviderTarget(alias="sawii/dl-dialogue3", **base_fields)
+    # Internal aliases for B-lobe shadow cycles and director mode.
+    # Not exposed in /v1/models (filtered out by user_facing_models set).
+    lobe_a = ProviderTarget(
+        alias="lobe-a",
+        base_url=s.a_base_url,
+        api_key=s.a_api_key,
+        model=s.a_model,
+        kind=s.a_dialect,
+        capabilities={"stream": True, "tools": True, "responses": False},
+    )
+    lobe_b = ProviderTarget(
+        alias="lobe-b",
+        base_url=s.resolved_b_base_url,
+        api_key=s.resolved_b_api_key,
+        model=s.resolved_b_model,
+        kind=s.b_dialect,
+        capabilities={"stream": False, "tools": False, "responses": False},
+    )
     return {
         "sawii/dual-lobe": base,
         "sawii/dl-dialogue": flat,
         "sawii/dl-dialogue1": chief,
         "sawii/dl-dialogue2": moderator,
         "sawii/dl-dialogue3": worker,
+        "lobe-a": lobe_a,
+        "lobe-b": lobe_b,
     }
 
 
