@@ -19,6 +19,15 @@ LOG = logging.getLogger("dual_lobe.api")
 async def lifespan(app: FastAPI):
     s = get_settings()
     TRACER.configure(s.otel_enabled)
+    # Seed bootstrap API keys into the database on startup. Idempotent: skips
+    # keys that already exist. Runs after migrations (see Dockerfile/railway.json).
+    from ..core.bootstrap import seed as bootstrap_seed
+    try:
+        created = await bootstrap_seed()
+        if created:
+            LOG.info("bootstrap: created %d API key(s)", len(created))
+    except Exception as exc:
+        LOG.error("bootstrap seed failed: %s", exc)
     LOG.info("dual-lobe gateway starting host=%s port=%d stage=%s", s.host, s.port, s.rollout_stage)
     try:
         yield
