@@ -303,6 +303,23 @@ async def chat_completions(
         if routing_mode != "off" and not s.recipient_routing_enabled:
             raise HTTPException(status_code=400, detail=f"{alias} requires recipient routing enabled")
 
+    limit = await limits.check_limits(principal.tenant_id, _token_estimate(messages))
+    if not limit.allowed:
+        raise HTTPException(status_code=429, detail="rate limit exceeded",
+                            headers={"Retry-After": str(int(limit.retry_after + 1))})
+    observe = (s.b_enabled and (s.context_memory_enabled or s.claim_checks_enabled
+                                or s.deception_meter_enabled)
+               and not correlation.is_bypass(corr))
+    external_run = str(corr.get("run") or uuid.uuid4())
+    floor, attempt = str(corr.get("floor", "")), int(corr.get("attempt", 1))
+    async with tenant_session(principal.tenant_id) as session:
+        run = await repo.get_or_create_run(
+            session, principal.tenant_id, external_run, floor_id=floor,
+            attempt=attempt, goal=_original_goal(messages),
+        )
+        run_id = str(run.id)
+        await session.commit()
+
     # Pre-emptive routing check: if routing is enabled for this alias, ask the
     # router LLM (lobe-b) whether this agent should respond BEFORE calling the
     # upstream model. If the rules say "don't respond", return a suppressed
@@ -317,7 +334,7 @@ async def chat_completions(
                         agent_name=alias,
                         message=latest_user_text,
                         tenant_id=principal.tenant_id,
-                        run_id=str(uuid.uuid4()),
+                        run_id=run_id,
                         mode=routing_mode,
                     )
                     await session.commit()
@@ -357,23 +374,6 @@ async def chat_completions(
                 LOG.warning("Pre-emptive routing check failed for %s: %s; proceeding with request",
                             alias, type(exc).__name__)
                 # On routing failure, fail open — let the request through.
-
-    limit = await limits.check_limits(principal.tenant_id, _token_estimate(messages))
-    if not limit.allowed:
-        raise HTTPException(status_code=429, detail="rate limit exceeded",
-                            headers={"Retry-After": str(int(limit.retry_after + 1))})
-    observe = (s.b_enabled and (s.context_memory_enabled or s.claim_checks_enabled
-                                or s.deception_meter_enabled)
-               and not correlation.is_bypass(corr))
-    external_run = str(corr.get("run") or uuid.uuid4())
-    floor, attempt = str(corr.get("floor", "")), int(corr.get("attempt", 1))
-    async with tenant_session(principal.tenant_id) as session:
-        run = await repo.get_or_create_run(
-            session, principal.tenant_id, external_run, floor_id=floor,
-            attempt=attempt, goal=_original_goal(messages),
-        )
-        run_id = str(run.id)
-        await session.commit()
     if director_mode:
         from . import director
         return await director.response(payload, request, principal, run_id, external_run, corr,
