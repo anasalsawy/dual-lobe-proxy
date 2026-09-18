@@ -231,6 +231,7 @@ async def _stream_body(adapter, req, public_model: str, audit: dict, save_memory
     except Exception as exc:
         audit["status"] = "INCOMPLETE"
         audit["error_type"] = type(exc).__name__
+        LOG.warning("stream body error: %s: %s", type(exc).__name__, exc)
         # Flush any buffered terminal chunks so the client sees finish_reason.
         for wire in terminal:
             yield wire
