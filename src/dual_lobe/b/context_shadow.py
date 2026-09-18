@@ -136,14 +136,19 @@ async def _should_respond_to_message(
     """
     s = get_settings()
     mode = str(payload.get("routing_mode") or s.routing_mode or "off").strip().lower()
-    
+
     if not s.recipient_routing_enabled or not latest_user_text:
         return True, None
-    
+
+    # Derive agent_name from the alias that was called, not the global setting.
+    # The payload stores the provider alias (e.g. "sawii/dl-dialogue2") which
+    # maps to a hierarchy role. Fall back to the global agent_name.
+    agent_name = str(payload.get("provider_alias") or s.agent_name)
+
     try:
         analysis, _ = await recipient_router.route_message(
             session,
-            agent_name=s.agent_name,
+            agent_name=agent_name,
             message=latest_user_text,
             tenant_id=tenant_id,
             run_id=run_id,

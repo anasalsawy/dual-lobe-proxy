@@ -108,6 +108,8 @@ def parse_hierarchy_roles(raw: str) -> dict[str, int]:
     """Parse 'chief:0,l1:1,l2:2' into a role -> rank map.
 
     Lower number = higher rank. Empty input returns empty dict.
+    Also adds short-name aliases (e.g. 'dl-dialogue1' for 'sawii/dl-dialogue1')
+    so rank_of can resolve names the LLM returns without the full prefix.
     """
     result: dict[str, int] = {}
     if not raw:
@@ -121,14 +123,29 @@ def parse_hierarchy_roles(raw: str) -> dict[str, int]:
         role, rank = entry.split(":", 1)
         role = role.strip().lower()
         try:
-            result[role] = int(rank.strip())
+            r = int(rank.strip())
+            result[role] = r
+            # Add short name without sawii/ prefix for fuzzy LLM matching
+            if "/" in role:
+                short = role.split("/")[-1]
+                result[short] = r
         except ValueError:
             continue
     return result
 
 
 def rank_of(role: str, hierarchy: dict[str, int]) -> int | None:
-    return hierarchy.get(role.lower().strip())
+    if not role:
+        return None
+    role = role.lower().strip()
+    # Try exact match, then short-name match (strip sawii/ prefix)
+    if role in hierarchy:
+        return hierarchy[role]
+    if "/" in role:
+        short = role.split("/")[-1]
+        if short in hierarchy:
+            return hierarchy[short]
+    return None
 
 
 def _apply_routing_mode(

@@ -175,7 +175,8 @@ async def _persist_observation(tenant_id: int, run_id: str, external_run: str,
                     )
                     payload.update(source_call=audit["call_id"], observed_at=audit["observed_at"],
                                    latest_user_text=latest_user_text,
-                                   routing_mode=routing_mode)
+                                   routing_mode=routing_mode,
+                                   provider_alias=target_alias)
                     scope_context = context_text + f"\nSCOPE:{corr.get('floor', '')}:{corr.get('attempt', 1)}"
                     key = shadow_job_key(tenant_id, run_id, 0, scope_context, audit["output"])
                     await repo.enqueue_outbox(session, tenant_id, "b", key, payload)
