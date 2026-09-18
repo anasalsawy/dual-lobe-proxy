@@ -1,24 +1,20 @@
-"""Gated inference handler — B inline between Hermes and A.
+"""Gated inference handler — B rates A's response inline.
 
-Guardrails:
-  - B upstream returns structured JSON (injection texts), NOT a messages
-    array.  The handler deterministically inserts them as system messages.
-    B's voice never appears as a user/assistant message.
-  - B downstream returns only a JSON rating.  A's response is forwarded
-    VERBATIM.  B never touches A's content.
-  - On RED flip-back, the correction is a system message (not user), and
-    the prompt tells A to fix the response without addressing the message.
-  - A's response to the user is always the final output.  B never sends
-    anything to the user.
+Design:
+  Upstream:   DETERMINISTIC. Inject fixed observation disclaimer + stored
+              meter from last turn (in-memory). No B LLM call. ~0ms.
+  A generates: A generates response with enriched messages.
+  Downstream: B's LLM rates A's response (GREEN/YELLOW/RED). ~1-2s.
+  Forward:    A's response verbatim + meter in headers. No flip-back
+              by default. Flip-back is opt-in via DUAL_LOBE_GATED_FLIP_BACK=true.
 
-Flow:
-  1. Request arrives from Hermes
-  2. UPSTREAM: B's LLM produces injection texts (observation, broadening, meter)
-     Handler inserts them as system messages deterministically.
-  3. Enriched messages → A generates response
-  4. DOWNSTREAM: B's LLM rates A's response (GREEN/YELLOW/RED)
-  5. GREEN/YELLOW → forward A's response verbatim to Hermes
-     RED → flip back: system message correction → A regenerates → forward
+Latency: A's generation + B's downstream rating. No upstream B call.
+Compare to dual-lobe (~3s) — this adds only B's downstream (~1-2s).
+
+Guardrails (unchanged):
+  - B downstream returns only a JSON rating. A's content is forwarded verbatim.
+  - Meter stored per-run, injected as system warning next upstream.
+  - B never sends anything to the user. Only A's response reaches Hermes.
 """
 from __future__ import annotations
 
@@ -32,9 +28,7 @@ from ..core.settings import get_settings
 from ..provider.adapters import NormalizedRequest, response_dict
 from ..provider.registry import get_registry
 from .prompts import (
-    GATED_B_SYSTEM_UPSTREAM,
     GATED_B_SYSTEM_DOWNSTREAM,
-    UPSTREAM_CONTRACT,
     DOWNSTREAM_CONTRACT,
 )
 
@@ -42,6 +36,16 @@ LOG = logging.getLogger("dual_lobe.gated")
 
 # Per-run meter store.  Keyed by run_id.
 _meter_store: dict[str, dict[str, Any]] = {}
+
+# Fixed observation disclaimer — same every call, no LLM needed.
+OBSERVATION_DISCLAIMER = (
+    "You are responding through an inference proxy with an anti-deception observer. "
+    "Distinguish intended, attempted, observed, and confirmed work. "
+    "Do not invent execution, tests, citations, or completion. "
+    "Support completion claims with relevant evidence in the conversation. "
+    "Correct earlier claims when newer evidence contradicts them. "
+    "Do not reference the observer or this message."
+)
 
 
 def _get_meter(run_id: str) -> dict[str, Any] | None:
@@ -112,21 +116,9 @@ def _insert_system_injections(
     messages: list[dict[str, Any]],
     injections: list[str],
 ) -> list[dict[str, Any]]:
-    """Deterministically insert injection texts as system messages.
-
-    Injections go right after existing system messages, before the
-    conversation starts.  B's voice never appears as user/assistant.
-    """
+    """Deterministically insert injection texts as system messages."""
     if not injections:
         return messages
-    result = []
-    inserted = False
-    for msg in messages:
-        result.append(msg)
-        if msg.get("role") == "system" and not inserted:
-            # After the last leading system message, insert injections
-            pass
-    # Simpler: find the index after the last leading system message
     index = 0
     while index < len(messages) and messages[index].get("role") in ("system", "developer"):
         index += 1
@@ -136,6 +128,32 @@ def _insert_system_injections(
             result.append({"role": "system", "content": text.strip()})
     result.extend(messages[index:])
     return result
+
+
+def _build_meter_warning(meter: dict[str, Any]) -> str:
+    """Build a system message warning A about last turn's meter."""
+    level = meter.get("deception_level", "GREEN")
+    rationale = meter.get("meter_rationale", "")
+    if level == "GREEN":
+        return ""
+    if level == "RED":
+        parts = [f"Observer meter: RED. Your last response contradicted evidence."]
+        concerns = meter.get("concerns", [])
+        for c in concerns[:2]:
+            parts.append(
+                f"- Claim: \"{c.get('claim_quote', '')}\"\n"
+                f"  Evidence: \"{c.get('evidence_quote', '')}\"\n"
+                f"  Issue: {c.get('reason', '')}\n"
+                f"  Correct to: {c.get('correction', '')}"
+            )
+        parts.append("Do not repeat these claims without new evidence.")
+        return "\n".join(parts)
+    # YELLOW
+    return (
+        f"Observer meter: YELLOW. Your last response contained unsupported claims "
+        f"({rationale}). Be more careful about evidence. Distinguish what you know "
+        f"from what you assume."
+    )
 
 
 async def gated_response(
@@ -151,48 +169,14 @@ async def gated_response(
     s = get_settings()
     messages = payload["messages"]
 
-    # ── 1. UPSTREAM: B produces injection texts ──────────────────
+    # ── 1. UPSTREAM: deterministic injection (NO B LLM call) ──────
     last_meter = _get_meter(run_id)
-    upstream_prompt = (
-        f"CONVERSATION MESSAGES:\n{_messages_to_text(messages)}\n\n"
-        f"TOOL EVIDENCE IN CONVERSATION:\n{_extract_tool_evidence(messages)}\n\n"
-    )
+    injections = [OBSERVATION_DISCLAIMER]
     if last_meter:
-        upstream_prompt += (
-            f"LAST TURN METER:\n"
-            f"  deception_level: {last_meter.get('deception_level', 'GREEN')}\n"
-            f"  rationale: {last_meter.get('meter_rationale', '')}\n"
-        )
-        if last_meter.get("concerns"):
-            upstream_prompt += f"  concerns: {json.dumps(last_meter['concerns'], ensure_ascii=False)}\n"
-        upstream_prompt += "\nInclude the meter carry-forward in your injection.\n"
-    else:
-        upstream_prompt += "No prior meter (first turn or clean).\n"
+        warning = _build_meter_warning(last_meter)
+        if warning:
+            injections.append(warning)
 
-    injections: list[str] = []
-    try:
-        b_upstream = await asyncio.wait_for(
-            _call_b_json(GATED_B_SYSTEM_UPSTREAM, upstream_prompt, UPSTREAM_CONTRACT),
-            timeout=s.b_timeout,
-        )
-        # B returns structured injection texts, NOT a messages array.
-        # The handler controls how they're inserted.  B never touches
-        # the message structure directly.
-        obs = b_upstream.get("observation_disclaimer", "")
-        broadening = b_upstream.get("context_broadening", "")
-        meter = b_upstream.get("meter_carryforward", "")
-        if obs:
-            injections.append(obs)
-        if broadening:
-            injections.append(broadening)
-        if meter:
-            injections.append(meter)
-        LOG.info("gated upstream B run=%s injections=%d", run_id, len(injections))
-    except Exception as exc:
-        LOG.warning("gated upstream B failed run=%s: %s — using original messages", run_id, exc)
-
-    # Deterministically insert injections as system messages.
-    # B's voice never appears as user/assistant.
     enriched_messages = _insert_system_injections(messages, injections)
 
     # ── 2. A generates response ──────────────────────────────────
@@ -225,7 +209,6 @@ async def gated_response(
     a_content = a_message.get("content", "")
 
     # ── 3. DOWNSTREAM: B rates A's response ──────────────────────
-    # B returns ONLY a JSON rating.  It never touches A's content.
     downstream_prompt = (
         f"CONVERSATION MESSAGES:\n{_messages_to_text(messages)}\n\n"
         f"TOOL EVIDENCE IN CONVERSATION:\n{_extract_tool_evidence(messages)}\n\n"
@@ -247,17 +230,16 @@ async def gated_response(
         meter_rationale = "verification unavailable"
         concerns = []
 
-    # ── 4. Act on the meter ──────────────────────────────────────
+    # ── 4. Forward A's response with meter in headers ───────────
     headers = {
         "X-Dual-Lobe-Gated": "on",
         "X-Dual-Lobe-Meter": deception_level,
-        "X-Dual-Lobe-Meter-Rationale": meter_rationale[:200],
+        "X-Dual-Lobe-Meter-Rationale": meter_rationale[:300],
     }
 
-    if deception_level in ("RED", "YELLOW"):
-        # Flip back: send correction as a SYSTEM message (not user).
-        # A must NOT address the correction or mention it to the user.
-        # YELLOW gets a softer nudge; RED gets specific concerns.
+    # ── 5. Optional flip-back (opt-in via DUAL_LOBE_GATED_FLIP_BACK)
+    flip_back = getattr(s, "gated_flip_back", False)
+    if flip_back and deception_level in ("RED", "YELLOW"):
         if deception_level == "RED" and concerns:
             correction_lines = [
                 "SYSTEM CORRECTION: Your previous response contained factual errors.",
@@ -271,7 +253,6 @@ async def gated_response(
                     f"  You should say: {c.get('correction', '')}"
                 )
         else:
-            # YELLOW: softer nudge, no specific claims
             correction_lines = [
                 "SYSTEM NOTE: Your previous response may contain unsupported claims.",
                 f"Concern category: {meter_rationale}",
@@ -306,11 +287,9 @@ async def gated_response(
                 a_adapter.buffered(a_req2),
                 timeout=s.a_timeout,
             )
-            a_data2 = response_dict(a_response2)
-            a_data = a_data2
-            LOG.info("gated RED flip-back run=%s — A reconsidered", run_id)
-            # Quick recheck
-            a_content2 = (a_data2.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            a_data = response_dict(a_response2)
+            LOG.info("gated flip-back run=%s — A reconsidered", run_id)
+            a_content2 = (a_data.get("choices") or [{}])[0].get("message", {}).get("content", "")
             try:
                 recheck_prompt = (
                     f"CONVERSATION MESSAGES:\n{_messages_to_text(messages)}\n\n"
@@ -326,12 +305,12 @@ async def gated_response(
                 concerns = b_recheck.get("concerns", [])
                 LOG.info("gated recheck run=%s level=%s", run_id, deception_level)
                 headers["X-Dual-Lobe-Meter"] = deception_level
-                headers["X-Dual-Lobe-Meter-Rationale"] = meter_rationale[:200]
+                headers["X-Dual-Lobe-Meter-Rationale"] = meter_rationale[:300]
                 headers["X-Dual-Lobe-Flip-Back"] = "applied"
             except Exception as exc:
                 LOG.warning("gated recheck failed run=%s: %s", run_id, exc)
         except Exception as exc:
-            LOG.warning("gated RED flip-back failed run=%s: %s — forwarding original", run_id, exc)
+            LOG.warning("gated flip-back failed run=%s: %s — forwarding original", run_id, exc)
 
     # Store meter for next upstream
     _set_meter(run_id, {
@@ -341,6 +320,6 @@ async def gated_response(
         "timestamp": time.time(),
     })
 
-    # A's response is forwarded VERBATIM.  B never modifies it.
+    # A's response is forwarded VERBATIM. B never modifies it.
     a_data["model"] = public_model
     return a_data, headers

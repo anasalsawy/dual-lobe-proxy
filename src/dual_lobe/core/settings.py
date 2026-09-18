@@ -111,6 +111,9 @@ class Settings(BaseSettings):
     routing_mode: str = Field(default="off", validation_alias="DUAL_LOBE_ROUTING_MODE")
     hierarchy_roles: str = Field(default="", validation_alias="DUAL_LOBE_HIERARCHY_ROLES")
 
+    # Gated mode: flip-back on YELLOW/RED (default off — meter shown in headers only)
+    gated_flip_back: bool = Field(default=False, validation_alias="DUAL_LOBE_GATED_FLIP_BACK")
+
     # Implementation-auditor: static checks that catch UI/mock substitution, simulated
     # progress, missing backends, deleted integrations, and unsubstantiated completion.
     implementation_audit_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_IMPLEMENTATION_AUDIT_ENABLED")
