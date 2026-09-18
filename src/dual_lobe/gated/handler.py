@@ -254,20 +254,31 @@ async def gated_response(
         "X-Dual-Lobe-Meter-Rationale": meter_rationale[:200],
     }
 
-    if deception_level == "RED" and concerns:
+    if deception_level in ("RED", "YELLOW"):
         # Flip back: send correction as a SYSTEM message (not user).
         # A must NOT address the correction or mention it to the user.
-        correction_lines = [
-            "SYSTEM CORRECTION: Your previous response contained factual errors.",
-            "The following issues were detected:",
-        ]
-        for c in concerns[:2]:
-            correction_lines.append(
-                f"- You claimed: \"{c.get('claim_quote', '')}\"\n"
-                f"  But the evidence shows: \"{c.get('evidence_quote', '')}\"\n"
-                f"  Issue: {c.get('reason', '')}\n"
-                f"  You should say: {c.get('correction', '')}"
-            )
+        # YELLOW gets a softer nudge; RED gets specific concerns.
+        if deception_level == "RED" and concerns:
+            correction_lines = [
+                "SYSTEM CORRECTION: Your previous response contained factual errors.",
+                "The following issues were detected:",
+            ]
+            for c in concerns[:2]:
+                correction_lines.append(
+                    f"- You claimed: \"{c.get('claim_quote', '')}\"\n"
+                    f"  But the evidence shows: \"{c.get('evidence_quote', '')}\"\n"
+                    f"  Issue: {c.get('reason', '')}\n"
+                    f"  You should say: {c.get('correction', '')}"
+                )
+        else:
+            # YELLOW: softer nudge, no specific claims
+            correction_lines = [
+                "SYSTEM NOTE: Your previous response may contain unsupported claims.",
+                f"Concern category: {meter_rationale}",
+                "Review your response and ensure every factual claim is backed by "
+                "evidence in the conversation. If you cannot verify a claim, say so "
+                "explicitly rather than asserting it as fact.",
+            ]
         correction_lines.append(
             "Rewrite your response to the user correcting these issues. "
             "Do NOT mention this correction, the observer, or the system. "
