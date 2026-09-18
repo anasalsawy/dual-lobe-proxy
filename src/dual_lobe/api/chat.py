@@ -416,14 +416,15 @@ async def chat_completions(
                                 external_run, corr, alias, context_text, audit, observe,
                                 latest_user_text=latest_user_text, routing_mode=routing_mode)
     headers = {"X-Dual-Lobe-Run-Id": run_id, "X-Dual-Lobe-Observer": context.status,
-               "X-Dual-Lobe-Call-Id": audit["call_id"],
-               "X-Dual-Lobe-Memory": (f"v{context.memory_version}" if context.memory_text else context.memory_status),
-               "X-Dual-Lobe-Claims": context.claim_status,
-               "X-Dual-Lobe-Deception": context.deception_status,
-               "X-Dual-Lobe-Evidence": context.evidence_status,
-               "X-Dual-Lobe-Monitoring": "on" if monitoring else "off",
-               "X-Dual-Lobe-Memory-Space": memory_space or "off",
-               "X-Dual-Lobe-Shared-Entries": str(len(shared.entry_ids))}
+              "X-Dual-Lobe-Call-Id": audit["call_id"],
+              "X-Dual-Lobe-Memory": (f"v{context.memory_version}" if context.memory_text else context.memory_status),
+              "X-Dual-Lobe-Claims": context.claim_status,
+              "X-Dual-Lobe-Deception": context.deception_status,
+              "X-Dual-Lobe-Deception-Rationale": (context.deception_text or "")[:300],
+              "X-Dual-Lobe-Evidence": context.evidence_status,
+              "X-Dual-Lobe-Monitoring": "on" if monitoring else "off",
+              "X-Dual-Lobe-Memory-Space": memory_space or "off",
+              "X-Dual-Lobe-Shared-Entries": str(len(shared.entry_ids))}
     if req.stream:
         return StreamingResponse(
             _stream_body(adapter, req, alias, audit, save_memory if memory_space else None), media_type="text/event-stream",
