@@ -320,6 +320,12 @@ async def chat_completions(
         run_id = str(run.id)
         await session.commit()
 
+    # Gated mode: B sits inline.  Completely separate code path.
+    if alias == "sawii/dl-gated":
+        from ..gated.handler import gated_response
+        data, gate_headers = await gated_response(payload, run_id, principal.tenant_id, alias)
+        return JSONResponse(data, status_code=200, headers=gate_headers)
+
     # Pre-emptive routing check: if routing is enabled for this alias, ask the
     # router LLM (lobe-b) whether this agent should respond BEFORE calling the
     # upstream model. If the rules say "don't respond", return a suppressed
