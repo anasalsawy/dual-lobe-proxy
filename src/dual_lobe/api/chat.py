@@ -231,6 +231,9 @@ async def _stream_body(adapter, req, public_model: str, audit: dict, save_memory
     except Exception as exc:
         audit["status"] = "INCOMPLETE"
         audit["error_type"] = type(exc).__name__
+        # Flush any buffered terminal chunks so the client sees finish_reason.
+        for wire in terminal:
+            yield wire
         # Once SSE has started, HTTP status cannot change. Never fabricate stop.
         yield 'data: {"error":{"type":"upstream_stream_error","message":"Stream interrupted; partial output only."}}\n\n'
     finally:

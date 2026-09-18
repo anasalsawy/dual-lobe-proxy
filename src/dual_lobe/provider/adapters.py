@@ -125,6 +125,11 @@ class ChatCompletionsAdapter:
                     # Forward every choice/tool fragment without reconstruction.
                     yield chunk
             if data_lines:
+                # The stream may end with [DONE] still in the buffer if the
+                # upstream didn't send a trailing blank line after it.
+                remaining = "\n".join(data_lines).strip()
+                if remaining == "[DONE]":
+                    return
                 raise ValueError("upstream SSE ended in a partial event")
 
 
