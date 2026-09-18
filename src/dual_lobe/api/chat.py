@@ -378,7 +378,7 @@ async def chat_completions(
         status_code = 200
     except Exception as exc:
         audit["status"], audit["error_type"] = "FAILED", type(exc).__name__
-        LOG.warning("upstream call failed: %s: %s", type(exc).__name__, exc)
+        LOG.warning("upstream call failed: %s: %s", type(exc).__name__, exc, exc_info=True)
         data = {"error": {"type": "upstream_error", "message": "Upstream request failed."}}
         status_code = 502
     audit["latency_ms"] = int((time.monotonic() - started) * 1000)
