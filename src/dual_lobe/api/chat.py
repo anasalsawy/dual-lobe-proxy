@@ -17,6 +17,7 @@ from starlette.background import BackgroundTask
 from ..b.outbox import shadow_job_key, shadow_payload
 from ..b.channels import ObserverContext, prepare_context
 from ..b.prompts import OBSERVATION_REMINDER, head_tail
+from ..b.recipient_router import route_message as _route_message
 from ..core import stage as stage_mod
 from ..core.engine import tenant_session
 from ..core.redact import redact_payload
@@ -301,6 +302,61 @@ async def chat_completions(
         # Ensure routing is enabled for flat/hierarchy aliases; off alias ignores global toggle.
         if routing_mode != "off" and not s.recipient_routing_enabled:
             raise HTTPException(status_code=400, detail=f"{alias} requires recipient routing enabled")
+
+    # Pre-emptive routing check: if routing is enabled for this alias, ask the
+    # router LLM (lobe-b) whether this agent should respond BEFORE calling the
+    # upstream model. If the rules say "don't respond", return a suppressed
+    # response immediately — no upstream tokens spent, no response generated.
+    if routing_mode and routing_mode != "off" and s.recipient_routing_enabled:
+        latest_user_text = _latest_user_text(messages)
+        if latest_user_text:
+            try:
+                async with tenant_session(principal.tenant_id) as session:
+                    routing_analysis, _ = await _route_message(
+                        session,
+                        agent_name=alias,
+                        message=latest_user_text,
+                        tenant_id=principal.tenant_id,
+                        run_id=str(uuid.uuid4()),
+                        mode=routing_mode,
+                    )
+                    await session.commit()
+                should_respond = (
+                    routing_analysis.should_respond
+                    and routing_analysis.confidence >= s.recipient_routing_confidence_threshold
+                )
+                if not should_respond:
+                    LOG.info("Pre-emptive routing suppressed response for %s (confidence=%.2f, reasoning=%s)",
+                             alias, routing_analysis.confidence, routing_analysis.reasoning)
+                    # Return a minimal "suppressed" response — no upstream call made.
+                    suppressed = {
+                        "id": f"chatcmpl-suppressed-{uuid.uuid4().hex[:24]}",
+                        "object": "chat.completion",
+                        "created": int(time.time()),
+                        "model": alias,
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                            },
+                            "finish_reason": "stop",
+                        }],
+                        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                    }
+                    return JSONResponse(
+                        suppressed,
+                        status_code=200,
+                        headers={
+                            "X-Dual-Lobe-Routing": "suppressed",
+                            "X-Dual-Lobe-Routing-Reasoning": routing_analysis.reasoning[:200],
+                            "X-Dual-Lobe-Routing-Confidence": str(routing_analysis.confidence),
+                        },
+                    )
+            except Exception as exc:
+                LOG.warning("Pre-emptive routing check failed for %s: %s; proceeding with request",
+                            alias, type(exc).__name__)
+                # On routing failure, fail open — let the request through.
 
     limit = await limits.check_limits(principal.tenant_id, _token_estimate(messages))
     if not limit.allowed:
