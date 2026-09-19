@@ -323,12 +323,12 @@ async def gated_response(
     })
 
     # Append meter to A's response body so the user sees it.
-    # Only append when A actually says something to the user (not tool calls).
+    # Show meter whenever A produces text content, even if also making tool calls.
     # B never modifies A's actual content — this is appended AFTER A's response.
     has_user_content = False
     for choice in a_data.get("choices", []):
         msg = choice.get("message", {})
-        if msg.get("content") and not msg.get("tool_calls"):
+        if msg.get("content"):
             has_user_content = True
             break
 
@@ -342,7 +342,7 @@ async def gated_response(
 
         for choice in a_data.get("choices", []):
             msg = choice.get("message", {})
-            if msg.get("content") and not msg.get("tool_calls"):
+            if msg.get("content"):
                 msg["content"] = msg["content"] + meter_line
 
     a_data["model"] = public_model
