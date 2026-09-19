@@ -31,12 +31,17 @@ from ..roles import get_role_persona
 from .prompts import (
     GATED_B_SYSTEM_DOWNSTREAM,
     DOWNSTREAM_CONTRACT,
+    FLAT_DECOMPOSITION_SYSTEM,
+    DECOMPOSITION_CONTRACT,
 )
 
 LOG = logging.getLogger("dual_lobe.gated")
 
 # Per-run meter store.  Keyed by run_id.
 _meter_store: dict[str, dict[str, Any]] = {}
+
+# Per-run work packets.  Keyed by run_id.  Stored after B decomposes.
+_packet_store: dict[str, list[dict[str, Any]]] = {}
 
 # Fixed observation disclaimer — same every call, no LLM needed.
 OBSERVATION_DISCLAIMER = (
@@ -245,6 +250,41 @@ async def gated_response(
         "X-Dual-Lobe-Meter": deception_level,
         "X-Dual-Lobe-Meter-Rationale": meter_rationale[:300],
     }
+
+    # ── 4b. Flat-mode decomposition: B breaks task into work packets ─
+    # Only runs for sawii/dl-dialogue (flat mode). B decomposes the user's
+    # task into independent vertical slices for parallel execution.
+    if public_model == "sawii/dl-dialogue":
+        existing_packets = _packet_store.get(run_id, [])
+        decomp_prompt = (
+            f"CONVERSATION MESSAGES:\n{_messages_to_text(messages)}\n\n"
+        )
+        if existing_packets:
+            decomp_prompt += f"EXISTING PACKETS:\n{json.dumps(existing_packets, ensure_ascii=False)}\n\n"
+        decomp_prompt += "Decompose the user's task into independent work packets.\n"
+        try:
+            b_decomp = await asyncio.wait_for(
+                _call_b_json(FLAT_DECOMPOSITION_SYSTEM, decomp_prompt, DECOMPOSITION_CONTRACT),
+                timeout=s.b_timeout,
+            )
+            packets = b_decomp.get("packets", [])
+            merge_notes = b_decomp.get("merge_notes", "")
+            if packets:
+                _packet_store[run_id] = packets
+                LOG.info("gated decomposition run=%s packets=%d", run_id, len(packets))
+                headers["X-Dual-Lobe-Packets"] = str(len(packets))
+                # Inject packet summary into A's response so the user sees the plan
+                packet_summary = "\n\n> 📋 **Task Decomposition:**\n"
+                for p in packets:
+                    packet_summary += f"> - {p.get('id', '?')}: {p.get('mission', '')[:80]}\n"
+                if merge_notes:
+                    packet_summary += f"> \n> Merge: {merge_notes[:120]}\n"
+                for choice in a_data.get("choices", []):
+                    msg = choice.get("message", {})
+                    if msg.get("content"):
+                        msg["content"] = msg["content"] + packet_summary
+        except Exception as exc:
+            LOG.warning("gated decomposition failed run=%s: %s", run_id, exc)
 
     # ── 5. Optional flip-back (opt-in via DUAL_LOBE_GATED_FLIP_BACK)
     flip_back = getattr(s, "gated_flip_back", False)
