@@ -298,7 +298,6 @@ async def chat_completions(
         "sawii/dl-dialogue3": "hierarchy",
     }
     routing_mode = alias_to_mode.get(alias)
-    print(f"CHAT: alias={alias} routing_mode={routing_mode} routing_enabled={s.recipient_routing_enabled}", flush=True)
     if routing_mode:
         # Ensure routing is enabled for flat/hierarchy aliases; off alias ignores global toggle.
         if routing_mode != "off" and not s.recipient_routing_enabled:
@@ -325,6 +324,22 @@ async def chat_completions(
     if alias == "sawii/dl-gated":
         from ..gated.handler import gated_response
         data, gate_headers = await gated_response(payload, run_id, principal.tenant_id, alias)
+        # If Hermes requested streaming, convert the buffered response to SSE
+        if payload.get("stream", False):
+            import json as _json
+            async def _gated_stream():
+                chunk = dict(data)
+                chunk["object"] = "chat.completion.chunk"
+                for c in chunk.get("choices", []):
+                    c["delta"] = c.pop("message", {})
+                    c.pop("finish_reason", None)
+                    c["finish_reason"] = "stop"
+                yield f"data: {_json.dumps(chunk, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+            return StreamingResponse(
+                _gated_stream(), media_type="text/event-stream",
+                headers={**gate_headers, "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
         return JSONResponse(data, status_code=200, headers=gate_headers)
 
     # Pre-emptive routing check: if routing is enabled for this alias, ask the
@@ -332,8 +347,7 @@ async def chat_completions(
     # upstream model. If the rules say "don't respond", return a suppressed
     # response immediately — no upstream tokens spent, no response generated.
     if routing_mode and routing_mode != "off" and s.recipient_routing_enabled:
-        print(f"ROUTING CHECK: alias={alias} mode={routing_mode} routing_enabled={s.recipient_routing_enabled}", flush=True)
-        LOG.info("Pre-emptive routing check starting for %s mode=%s agent=%s", alias, routing_mode, alias)
+        LOG.info("Pre-emptive routing check starting for %s mode=%s", alias, routing_mode)
         latest_user_text = _latest_user_text(messages)
         if latest_user_text:
             try:

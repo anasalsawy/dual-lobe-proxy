@@ -192,8 +192,11 @@ def _apply_routing_mode(
             # Human broadcast: only highest-ranked agents respond
             candidates = [r for r in analysis.detected_recipients if rank_of(r, hierarchy) is not None]
             if not candidates:
-                # No known hierarchy members mentioned: current agent responds if it has a rank
-                if rank_of(agent_name, hierarchy) is not None:
+                # No known hierarchy members mentioned in the broadcast.
+                # Only the highest-ranked agent (rank 0) should respond.
+                # Lower-ranked agents stay silent.
+                agent_rank = rank_of(agent_name, hierarchy)
+                if agent_rank is not None and agent_rank == 0:
                     return RecipientAnalysis(
                         should_respond=True,
                         confidence=analysis.confidence,
@@ -202,7 +205,14 @@ def _apply_routing_mode(
                         detected_recipients=analysis.detected_recipients,
                         is_broadcast=True,
                     )
-                return analysis
+                return RecipientAnalysis(
+                    should_respond=False,
+                    confidence=analysis.confidence,
+                    reasoning=f"broadcast_not_highest:{agent_name}",
+                    speaker=analysis.speaker,
+                    detected_recipients=analysis.detected_recipients,
+                    is_broadcast=True,
+                )
 
             best = min(candidates, key=lambda r: rank_of(r, hierarchy))  # type: ignore[arg-type]
             agent_rank = rank_of(agent_name, hierarchy)
