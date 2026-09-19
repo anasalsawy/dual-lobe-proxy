@@ -77,7 +77,8 @@ Determine:
 ROUTING RULES:
 - Direct addressing: if the message explicitly names this agent, should_respond = true. Always.
 - Broadcasts flow DOWNWARD only. A higher tier can broadcast to lower tiers. A lower tier CANNOT broadcast up. Same-tier broadcasts are blocked.
-- Human broadcasts: only the highest tier present responds.
+- Human broadcasts: only the highest tier present responds. If the message is a general question to no one in particular (e.g. "what's your name?" "who are you?"), it's a broadcast — only highest tier responds.
+- Follow-up messages: if the conversation context shows the user was recently talking to this agent by name, a short follow-up like "yes", "go ahead", "ok" is still directed at this agent.
 - If this agent is busy with a task and the message is a broadcast not requiring its expertise, stay silent.
 
 Use the agent's actual name (from the system prompt or messages) for identifying who is speaking and who is addressed. If no name is found, use the tier identifier.
@@ -275,7 +276,7 @@ def _apply_routing_mode(
     return analysis
 
 
-async def _analyze_recipient(agent_name: str, message: str, active_rules: List[AgentRule] | None = None, routing_context: dict | None = None, system_prompt: str | None = None) -> str:
+async def _analyze_recipient(agent_name: str, message: str, active_rules: List[AgentRule] | None = None, routing_context: dict | None = None, system_prompt: str | None = None, conversation_history: list[dict] | None = None) -> str:
     """Call the router model to analyze recipient intention.
 
     Returns the raw model response (should be valid JSON).
@@ -342,11 +343,33 @@ async def _analyze_recipient(agent_name: str, message: str, active_rules: List[A
     
     prompt_parts.extend([
         "",
+    ])
+
+    # Add recent conversation history so B can understand follow-up messages
+    if conversation_history:
+        history_lines = []
+        # Only include last 6 messages to keep prompt short
+        for msg in conversation_history[-6:]:
+            role = msg.get("role", "?")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                content = " ".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
+            text = str(content or "")[:200]
+            if msg.get("name"):
+                text = f"[{msg['name']}] {text}"
+            history_lines.append(f"  [{role}] {text}")
+        if history_lines:
+            prompt_parts.append("Recent conversation context:")
+            prompt_parts.extend(history_lines)
+            prompt_parts.append("")
+
+    prompt_parts.extend([
         "Message to analyze:",
         message,
         "",
         f"Determine if this message is directed at this agent and whether you should respond.",
         "The agent's name may appear in the system prompt above — use it to detect direct addressing.",
+        "Use the conversation context to understand follow-up messages (e.g. 'yes' or 'go ahead' after addressing this agent).",
         "Consider your routing mode, tier info, and active behavioral rules when deciding.",
         "Remember: direct addressing (explicitly calling the agent's name) should generally override broadcast rules.",
     ])
@@ -595,8 +618,11 @@ async def route_message(
                 system_prompt = str(msg["content"])[:500]
                 break
 
+        # Extract conversation history for context (last 6 messages)
+        conv_history = (context_for_memory or {}).get("messages", [])[-6:] if context_for_memory else []
+
         # Call the router model with full context
-        raw = await _analyze_recipient(agent_name, message, active_rules, routing_context, system_prompt=system_prompt)
+        raw = await _analyze_recipient(agent_name, message, active_rules, routing_context, system_prompt=system_prompt, conversation_history=conv_history)
         analysis = _parse_recipient_analysis(raw)
 
         # B's LLM makes the full routing decision — no Python override.
