@@ -75,9 +75,10 @@ Determine:
 3. Should this agent respond?
 
 ROUTING RULES:
-- Direct addressing: if the message explicitly names this agent, should_respond = true. Always. This applies to all speakers (human or agent).
-- Follow-up: if the conversation context shows recent uninterrupted contact with this agent by name, and the message is a short continuation (e.g. "yes", "go ahead", "ok", "do it") directed at one person, then it's still directed at this agent — should_respond = true. This does NOT apply to initial messages like "hi guys" or "hey" that start a new conversation. Plural address words like "guys", "everyone", "team", "y'all" are NOT follow-ups — they're broadcasts.
-- Broadcast: if the message is not addressed to anyone by name and is not a follow-up, it's a broadcast. Broadcasts flow DOWNWARD only — higher tier can broadcast to lower, lower cannot broadcast up, same-tier broadcasts are blocked. Only the highest tier present responds to a broadcast.
+- If the message is directed at this agent by name, should_respond = true.
+- If the message is a continuation of recent direct contact with this agent (follow-up in the same conversation thread), should_respond = true.
+- Otherwise it's a broadcast. Broadcasts flow downward only — higher tier to lower, not up, not same-tier. Only the highest tier present responds to a broadcast.
+- These rules apply to all speakers, human or agent.
 
 Use the agent's actual name (from the system prompt or messages) for identifying who is speaking and who is addressed. If no name is found, use the tier identifier.
 
