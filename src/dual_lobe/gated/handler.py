@@ -254,6 +254,8 @@ async def gated_response(
     # ── 4b. Flat-mode decomposition: B breaks task into work packets ─
     # Only runs for sawii/dl-dialogue (flat mode). B decomposes the user's
     # task into independent vertical slices for parallel execution.
+    # SKIP decomposition if the user explicitly assigned tasks by name.
+    # Only decompose UNASSIGNED work.
     if public_model == "sawii/dl-dialogue":
         existing_packets = _packet_store.get(run_id, [])
         decomp_prompt = (
@@ -261,7 +263,14 @@ async def gated_response(
         )
         if existing_packets:
             decomp_prompt += f"EXISTING PACKETS:\n{json.dumps(existing_packets, ensure_ascii=False)}\n\n"
-        decomp_prompt += "Decompose the user's task into independent work packets.\n"
+        decomp_prompt += (
+            "Analyze the user's request. First check if the user has EXPLICITLY assigned "
+            "tasks to specific agents by name (e.g. 'Alice, do X. Bob, do Y.').\n\n"
+            "If the user assigned ALL tasks by name → return empty packets, no decomposition needed.\n"
+            "If the user assigned SOME tasks by name → decompose only the UNASSIGNED part.\n"
+            "If the user assigned NO tasks by name → decompose the entire task.\n\n"
+            "Decompose into independent vertical work packets.\n"
+        )
         try:
             b_decomp = await asyncio.wait_for(
                 _call_b_json(FLAT_DECOMPOSITION_SYSTEM, decomp_prompt, DECOMPOSITION_CONTRACT),
@@ -283,6 +292,8 @@ async def gated_response(
                     msg = choice.get("message", {})
                     if msg.get("content"):
                         msg["content"] = msg["content"] + packet_summary
+            else:
+                LOG.info("gated decomposition run=%s — no packets (user assigned tasks)", run_id)
         except Exception as exc:
             LOG.warning("gated decomposition failed run=%s: %s", run_id, exc)
 
