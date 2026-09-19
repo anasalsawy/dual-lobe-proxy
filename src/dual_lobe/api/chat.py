@@ -368,6 +368,7 @@ async def chat_completions(
                         tenant_id=principal.tenant_id,
                         run_id=run_id,
                         mode=routing_mode,
+                        context_for_memory={"messages": messages},
                     )
                     await session.commit()
                 should_respond = (

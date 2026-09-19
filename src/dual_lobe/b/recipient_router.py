@@ -275,7 +275,7 @@ def _apply_routing_mode(
     return analysis
 
 
-async def _analyze_recipient(agent_name: str, message: str, active_rules: List[AgentRule] | None = None, routing_context: dict | None = None) -> str:
+async def _analyze_recipient(agent_name: str, message: str, active_rules: List[AgentRule] | None = None, routing_context: dict | None = None, system_prompt: str | None = None) -> str:
     """Call the router model to analyze recipient intention.
 
     Returns the raw model response (should be valid JSON).
@@ -313,6 +313,10 @@ async def _analyze_recipient(agent_name: str, message: str, active_rules: List[A
     # Build prompt with all relevant context
     prompt_parts = [f"Current agent: {agent_name}"]
 
+    # Include system prompt so B can see the agent's actual name
+    if system_prompt:
+        prompt_parts.append(f"Agent system prompt: {system_prompt[:500]}")
+
     # Add routing mode and tier context
     if routing_context:
         mode = routing_context.get("mode", "flat")
@@ -341,9 +345,10 @@ async def _analyze_recipient(agent_name: str, message: str, active_rules: List[A
         "Message to analyze:",
         message,
         "",
-        f"Determine if this message is directed at '{agent_name}' and whether you should respond.",
-        "Consider your routing mode, hierarchy rank, and active behavioral rules when deciding.",
-        "Remember: direct addressing (explicitly calling your name) should generally override broadcast rules.",
+        f"Determine if this message is directed at this agent and whether you should respond.",
+        "The agent's name may appear in the system prompt above — use it to detect direct addressing.",
+        "Consider your routing mode, tier info, and active behavioral rules when deciding.",
+        "Remember: direct addressing (explicitly calling the agent's name) should generally override broadcast rules.",
     ])
     
     prompt = "\n".join(prompt_parts)
@@ -583,8 +588,15 @@ async def route_message(
                 hierarchy = parse_hierarchy_roles(s.hierarchy_roles)
                 routing_context["hierarchy"] = hierarchy
         
+        # Extract system prompt from messages for the routing LLM
+        system_prompt = None
+        for msg in (context_for_memory or {}).get("messages", []):
+            if msg.get("role") in ("system", "developer") and msg.get("content"):
+                system_prompt = str(msg["content"])[:500]
+                break
+
         # Call the router model with full context
-        raw = await _analyze_recipient(agent_name, message, active_rules, routing_context)
+        raw = await _analyze_recipient(agent_name, message, active_rules, routing_context, system_prompt=system_prompt)
         analysis = _parse_recipient_analysis(raw)
 
         # B's LLM makes the full routing decision — no Python override.
