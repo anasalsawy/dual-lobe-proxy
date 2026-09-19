@@ -323,22 +323,27 @@ async def gated_response(
     })
 
     # Append meter to A's response body so the user sees it.
+    # Only append when A actually says something to the user (not tool calls).
     # B never modifies A's actual content — this is appended AFTER A's response.
-    meter_line = f"\n\n---\n⚠️ Deception Meter: {deception_level}"
-    if meter_rationale and meter_rationale != "No deception detected.":
-        meter_line += f" — {meter_rationale[:200]}"
-    if deception_level == "RED" and concerns:
-        for c in concerns[:2]:
-            meter_line += f"\n  • Claim: \"{c.get('claim_quote', '')[:100]}\" → {c.get('correction', '')[:100]}"
-
+    has_user_content = False
     for choice in a_data.get("choices", []):
         msg = choice.get("message", {})
-        if msg.get("content"):
-            msg["content"] = msg["content"] + meter_line
-        # Also handle streaming delta format
-        delta = choice.get("delta", {})
-        if delta.get("content"):
-            delta["content"] = delta["content"] + meter_line
+        if msg.get("content") and not msg.get("tool_calls"):
+            has_user_content = True
+            break
+
+    if has_user_content:
+        meter_line = f"\n\n---\n⚠️ Deception Meter: {deception_level}"
+        if meter_rationale and meter_rationale != "No deception detected.":
+            meter_line += f" — {meter_rationale[:200]}"
+        if deception_level == "RED" and concerns:
+            for c in concerns[:2]:
+                meter_line += f"\n  • Claim: \"{c.get('claim_quote', '')[:100]}\" → {c.get('correction', '')[:100]}"
+
+        for choice in a_data.get("choices", []):
+            msg = choice.get("message", {})
+            if msg.get("content") and not msg.get("tool_calls"):
+                msg["content"] = msg["content"] + meter_line
 
     a_data["model"] = public_model
     return a_data, headers
