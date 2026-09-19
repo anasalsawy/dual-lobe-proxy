@@ -27,6 +27,7 @@ from typing import Any
 from ..core.settings import get_settings
 from ..provider.adapters import NormalizedRequest, response_dict
 from ..provider.registry import get_registry
+from ..roles import get_role_persona
 from .prompts import (
     GATED_B_SYSTEM_DOWNSTREAM,
     DOWNSTREAM_CONTRACT,
@@ -174,6 +175,12 @@ async def gated_response(
     # ── 1. UPSTREAM: deterministic injection (NO B LLM call) ──────
     last_meter = _get_meter(run_id)
     injections = [OBSERVATION_DISCLAIMER]
+
+    # Inject hierarchy role persona if this is a dl-dialogue alias
+    role_persona = get_role_persona(public_model)
+    if role_persona:
+        injections.append(role_persona)
+
     if last_meter:
         warning = _build_meter_warning(last_meter)
         if warning:

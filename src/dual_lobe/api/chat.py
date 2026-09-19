@@ -24,6 +24,7 @@ from ..core.redact import redact_payload
 from ..core.settings import get_settings
 from ..provider.adapters import resolve_request, response_dict
 from ..provider.registry import get_registry
+from ..roles import get_role_persona
 from ..state import repositories as repo
 from ..state.memory import load_memory, record_memory, validate_space
 from ..director.protocol import Completion
@@ -64,6 +65,14 @@ def _latest_user_text(messages: list[dict]) -> str:
             content = "\n".join(str(p.get("text", "")) for p in content)
         return head_tail(str(content or ""), 1600)
     return ""
+
+
+def _insert_role_persona(messages: list[dict], persona: str) -> list[dict]:
+    """Insert hierarchy role persona as a system message after existing system messages."""
+    index = 0
+    while index < len(messages) and messages[index].get("role") in ("system", "developer"):
+        index += 1
+    return messages[:index] + [{"role": "system", "content": persona}] + messages[index:]
 
 
 def _effective_messages(messages: list[dict], context: ObserverContext, reminder: bool,
@@ -414,6 +423,10 @@ async def chat_completions(
     except Exception:
         raise HTTPException(503, "Shared memory is unavailable; no model was invoked.") from None
     req.messages = _effective_messages(messages, context, monitoring, s.monitoring_role, shared_text=shared.text)
+    # Inject hierarchy role persona as a system message for dl-dialogue aliases
+    role_persona = get_role_persona(alias)
+    if role_persona:
+        req.messages = _insert_role_persona(req.messages, role_persona)
     req.timeout = s.a_timeout
     adapter = get_registry().adapter(alias)
     context_text = head_tail(
