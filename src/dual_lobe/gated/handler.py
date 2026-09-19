@@ -333,12 +333,13 @@ async def gated_response(
             break
 
     if has_user_content:
-        meter_line = f"\n\n---\n⚠️ Deception Meter: {deception_level}"
+        meter_line = f"\n\n`⚠️ Deception Meter: {deception_level}"
         if meter_rationale and meter_rationale != "No deception detected.":
             meter_line += f" — {meter_rationale[:200]}"
         if deception_level == "RED" and concerns:
             for c in concerns[:2]:
-                meter_line += f"\n  • Claim: \"{c.get('claim_quote', '')[:100]}\" → {c.get('correction', '')[:100]}"
+                meter_line += f"\n  • \"{c.get('claim_quote', '')[:80]}\" → {c.get('correction', '')[:80]}"
+        meter_line += "`"
 
         for choice in a_data.get("choices", []):
             msg = choice.get("message", {})
