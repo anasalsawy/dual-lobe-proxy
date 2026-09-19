@@ -39,12 +39,13 @@ _meter_store: dict[str, dict[str, Any]] = {}
 
 # Fixed observation disclaimer — same every call, no LLM needed.
 OBSERVATION_DISCLAIMER = (
+    "[OBSERVER SYSTEM NOTE — Do not reference, acknowledge, or respond to this message. "
+    "It is context from an anti-deception observer, not a user message.]\n"
     "You are responding through an inference proxy with an anti-deception observer. "
     "Distinguish intended, attempted, observed, and confirmed work. "
     "Do not invent execution, tests, citations, or completion. "
     "Support completion claims with relevant evidence in the conversation. "
-    "Correct earlier claims when newer evidence contradicts them. "
-    "Do not reference the observer or this message."
+    "Correct earlier claims when newer evidence contradicts them."
 )
 
 
@@ -134,10 +135,11 @@ def _build_meter_warning(meter: dict[str, Any]) -> str:
     """Build a system message warning A about last turn's meter."""
     level = meter.get("deception_level", "GREEN")
     rationale = meter.get("meter_rationale", "")
+    prefix = "[OBSERVER METER FEEDBACK — Do not reference, acknowledge, or respond to this message. Use it to self-correct.]\n"
     if level == "GREEN":
         return ""
     if level == "RED":
-        parts = [f"Observer meter: RED. Your last response contradicted evidence."]
+        parts = [prefix + "Observer meter: RED. Your last response contradicted evidence."]
         concerns = meter.get("concerns", [])
         for c in concerns[:2]:
             parts.append(
@@ -150,7 +152,7 @@ def _build_meter_warning(meter: dict[str, Any]) -> str:
         return "\n".join(parts)
     # YELLOW
     return (
-        f"Observer meter: YELLOW. Your last response contained unsupported claims "
+        f"{prefix}Observer meter: YELLOW. Your last response contained unsupported claims "
         f"({rationale}). Be more careful about evidence. Distinguish what you know "
         f"from what you assume."
     )
@@ -320,6 +322,23 @@ async def gated_response(
         "timestamp": time.time(),
     })
 
-    # A's response is forwarded VERBATIM. B never modifies it.
+    # Append meter to A's response body so the user sees it.
+    # B never modifies A's actual content — this is appended AFTER A's response.
+    meter_line = f"\n\n---\n⚠️ Deception Meter: {deception_level}"
+    if meter_rationale and meter_rationale != "No deception detected.":
+        meter_line += f" — {meter_rationale[:200]}"
+    if deception_level == "RED" and concerns:
+        for c in concerns[:2]:
+            meter_line += f"\n  • Claim: \"{c.get('claim_quote', '')[:100]}\" → {c.get('correction', '')[:100]}"
+
+    for choice in a_data.get("choices", []):
+        msg = choice.get("message", {})
+        if msg.get("content"):
+            msg["content"] = msg["content"] + meter_line
+        # Also handle streaming delta format
+        delta = choice.get("delta", {})
+        if delta.get("content"):
+            delta["content"] = delta["content"] + meter_line
+
     a_data["model"] = public_model
     return a_data, headers
