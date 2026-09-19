@@ -78,7 +78,6 @@ ROUTING RULES:
 - Direct addressing: if the message explicitly names this agent, should_respond = true. Always.
 - Broadcasts flow DOWNWARD only. A higher tier can broadcast to lower tiers. A lower tier CANNOT broadcast up. Same-tier broadcasts are blocked.
 - Human broadcasts: only the highest tier present responds.
-- If no tiers are above this agent, this agent is the coordinator and should respond to human broadcasts.
 - If this agent is busy with a task and the message is a broadcast not requiring its expertise, stay silent.
 
 Use the agent's actual name (from the system prompt or messages) for identifying who is speaking and who is addressed. If no name is found, use the tier identifier.
