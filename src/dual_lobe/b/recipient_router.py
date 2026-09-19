@@ -64,31 +64,24 @@ class RecipientAnalysis:
 RECIPIENT_ROUTER_SYSTEM = """You are a recipient analyzer for multi-agent conversations.
 Your job is to determine if an incoming message is directed at the current agent (YOU) and whether you should respond.
 
-You MUST consider:
-1. Direct addressing (explicit mentions like "Agent Name, ...") - this usually means respond
-2. Broadcast messages ("everyone", "team", "all agents") - respond based on routing mode and rules  
-3. Your current routing mode (flat, hierarchy, or off)
-4. Your hierarchy rank (if in hierarchy mode) - lower rank = higher authority
-5. Speaker identity - who sent the message (human or which agent)
-6. Your active behavioral rules - THESE OVERRIDE ALL OTHER CONSIDERATIONS
-7. Task ownership and current responsibilities - if you're working on a task, don't interrupt unless directly needed
+You will receive:
+- The agent's tier and which tiers are higher/lower
+- The conversation messages (which may include the agent's name from the system prompt)
+- The incoming message to analyze
 
-CRITICAL RULES:
-- Active behavioral rules ALWAYS take precedence over default routing behavior
-- If you have a rule like "don't speak" or "only respond when directly addressed", follow it strictly
-- Direct addressing generally overrides broadcast silence, unless your rule explicitly forbids it
+Determine:
+1. Who is the speaker? (human or which agent — extract the name from the messages)
+2. Is this a direct address to this agent (by name) or a broadcast?
+3. Should this agent respond?
 
-HIERARCHY BROADCAST DIRECTION RULES (when in hierarchy mode):
-- HUMAN BROADCASTS: Only highest-ranked agents respond to general broadcasts
-- AGENT-TO-AGENT BROADCASTS: Can only flow DOWN the hierarchy (higher rank → lower rank)
-  - Chief (rank 0) can broadcast to Moderators (rank 1) and Workers (rank 2)
-  - Moderator (rank 1) can broadcast to Workers (rank 2)  
-  - Same-level broadcasts are BLOCKED - use direct addressing instead
-  - UPWARD broadcasts (lower → higher) are BLOCKED - use direct addressing or escalation
-- AGENT-TO-AGENT CONVERSATION: Direct addressing works in both directions (up/down) when explicitly naming the recipient
-- TASK OWNERSHIP: If you're currently responsible for a task or domain, you should respond to relevant queries even in broadcasts
-- DON'T INTERRUPT: If you're busy with your own task and the message is a general broadcast not requiring your expertise, stay silent and let others respond
-- Human sovereignty: When the human is present, only respond when directly addressed unless given explicit authority
+ROUTING RULES:
+- Direct addressing: if the message explicitly names this agent, should_respond = true. Always.
+- Broadcasts flow DOWNWARD only. A higher tier can broadcast to lower tiers. A lower tier CANNOT broadcast up. Same-tier broadcasts are blocked.
+- Human broadcasts: only the highest tier present responds.
+- If no tiers are above this agent, this agent is the coordinator and should respond to human broadcasts.
+- If this agent is busy with a task and the message is a broadcast not requiring its expertise, stay silent.
+
+Use the agent's actual name (from the system prompt or messages) for identifying who is speaking and who is addressed. If no name is found, use the tier identifier.
 
 Your ONLY output is a JSON object with these fields:
 {
@@ -96,7 +89,7 @@ Your ONLY output is a JSON object with these fields:
   "confidence": 0.0-1.0,
   "reasoning": "brief explanation (max 100 chars)",
   "speaker": "name or null",
-  "detected_recipients": ["list", "of", "names", "or", "roles"],
+  "detected_recipients": ["list", "of", "names"],
   "is_broadcast": true|false
 }""".strip()
 
@@ -319,22 +312,24 @@ async def _analyze_recipient(agent_name: str, message: str, active_rules: List[A
     s = get_settings()
     
     # Build prompt with all relevant context
-    prompt_parts = [f"Current agent name/role: {agent_name}"]
-    
-    # Add routing mode and hierarchy context
+    prompt_parts = [f"Current agent: {agent_name}"]
+
+    # Add routing mode and tier context
     if routing_context:
         mode = routing_context.get("mode", "flat")
-        prompt_parts.append(f"Current routing mode: {mode}")
-        
+        prompt_parts.append(f"Routing mode: {mode}")
+
         if mode == "hierarchy":
-            hierarchy = routing_context.get("hierarchy", {})
-            if hierarchy:
-                hierarchy_str = ", ".join([f"{role}:{rank}" for role, rank in hierarchy.items()])
-                prompt_parts.append(f"Hierarchy roles (lower number = higher rank): {hierarchy_str}")
-            
-            agent_rank = routing_context.get("agent_rank")
-            if agent_rank is not None:
-                prompt_parts.append(f"Your hierarchy rank: {agent_rank}")
+            # Pass tier info — B's LLM does the full routing decision
+            tier_info = routing_context.get("tier_info", "")
+            if tier_info:
+                prompt_parts.append(tier_info)
+            else:
+                # Fallback: pass hierarchy dict if tier_info not available
+                hierarchy = routing_context.get("hierarchy", {})
+                if hierarchy:
+                    hierarchy_str = ", ".join([f"{role}:{rank}" for role, rank in hierarchy.items()])
+                    prompt_parts.append(f"Hierarchy (lower number = higher rank): {hierarchy_str}")
     
     # Add active rules if present
     if active_rules:
@@ -576,20 +571,26 @@ async def route_message(
         routing_context = {
             "mode": mode,
         }
-        
+
         if mode == "hierarchy":
-            hierarchy = parse_hierarchy_roles(s.hierarchy_roles)
-            routing_context["hierarchy"] = hierarchy
-            agent_rank = rank_of(agent_name, hierarchy)
-            routing_context["agent_rank"] = agent_rank
+            from ..roles import get_role_persona
+            # Pass the tier persona text — B's LLM uses this to understand
+            # the tier hierarchy and make routing decisions
+            tier_persona = get_role_persona(agent_name)
+            if tier_persona:
+                routing_context["tier_info"] = tier_persona
+            else:
+                # Fallback to hierarchy dict if no persona
+                hierarchy = parse_hierarchy_roles(s.hierarchy_roles)
+                routing_context["hierarchy"] = hierarchy
         
         # Call the router model with full context
         raw = await _analyze_recipient(agent_name, message, active_rules, routing_context)
         analysis = _parse_recipient_analysis(raw)
 
-        # Apply routing mode logic (this can be overridden by active rules in the LLM analysis)
-        hierarchy = parse_hierarchy_roles(s.hierarchy_roles)
-        analysis = _apply_routing_mode(analysis, mode, agent_name, hierarchy)
+        # B's LLM makes the full routing decision — no Python override.
+        # The hierarchy rules are in B's prompt, B reads the agent's name
+        # from the messages, and B decides should_respond directly.
 
         # Log the routing decision
         await repo.append_event(
