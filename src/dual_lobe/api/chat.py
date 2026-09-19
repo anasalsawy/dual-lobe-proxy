@@ -330,7 +330,7 @@ async def chat_completions(
         await session.commit()
 
     # Gated mode: B sits inline.  Completely separate code path.
-    if alias in ("sawii/dl-gated", "sawii/dl-dialogue"):
+    if alias in ("sawii/dl-gated", "sawii/dl-dialogue", "sawii/dual-lobe"):
         from ..gated.handler import gated_response
         data, gate_headers = await gated_response(payload, run_id, principal.tenant_id, alias)
         # If Hermes requested streaming, convert the buffered response to SSE
