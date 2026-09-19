@@ -76,7 +76,7 @@ Determine:
 
 ROUTING RULES:
 - If the message is directed at this agent by name, should_respond = true.
-- If the message addresses everyone in the room (e.g. "guys", "everyone", "team", "all of you"), should_respond = true for all agents — this is a direct address to all, not a broadcast.
+- If the message explicitly includes all agents (e.g. "everyone", "everybody", "all of you"), should_respond = true for all agents — this is a direct address to all.
 - If the message is a continuation of recent direct contact with this agent (follow-up in the same conversation thread), should_respond = true.
 - Otherwise it's a broadcast. Broadcasts go ONE tier down only — T1 broadcasts to T2, T2 broadcasts to T3, T3 cannot broadcast (nobody below). Same-tier and upward broadcasts are blocked.
 - Humans are outside the hierarchy. A human broadcast reaches all tiers. A human message with no recipient defaults to the highest tier (T1).
