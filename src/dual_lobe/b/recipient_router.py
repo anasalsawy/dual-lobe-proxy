@@ -619,8 +619,10 @@ async def route_message(
                 system_prompt = str(msg["content"])[:500]
                 break
 
-        # Extract conversation history for context (last 6 messages)
-        conv_history = (context_for_memory or {}).get("messages", [])[-6:] if context_for_memory else []
+        # Extract conversation history for context (last 6 messages, excluding the current message being analyzed)
+        all_msgs = (context_for_memory or {}).get("messages", [])
+        # Exclude the last message (it's the current message being analyzed separately)
+        conv_history = all_msgs[-7:-1] if len(all_msgs) > 1 else []
 
         # Call the router model with full context
         raw = await _analyze_recipient(agent_name, message, active_rules, routing_context, system_prompt=system_prompt, conversation_history=conv_history)
