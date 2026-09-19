@@ -55,6 +55,32 @@ OBSERVATION_DISCLAIMER = (
 )
 
 
+def _detect_agent_name(messages: list[dict]) -> str | None:
+    """Try to detect the agent's name from the system prompt.
+    Returns the name if found, None if not.
+    """
+    for msg in messages:
+        if msg.get("role") not in ("system", "developer"):
+            continue
+        content = msg.get("content", "")
+        if not isinstance(content, str):
+            continue
+        # Common patterns: "You are Alice", "Your name is Alice", "You are Alice, a..."
+        import re
+        patterns = [
+            r"(?:you are|your name is)\s+([A-Za-z0-9_-]{2,30})",
+            r"(?:act as|role[:\s]+)\s+([A-Za-z0-9_-]{2,30})",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, content, re.IGNORECASE)
+            if match:
+                name = match.group(1).strip()
+                # Filter out common non-name words
+                if name.lower() not in ("a", "an", "the", "an", "expert", "assistant", "agent", "helpful", "code", "developer", "python"):
+                    return name
+    return None
+
+
 def _get_meter(run_id: str) -> dict[str, Any] | None:
     return _meter_store.get(run_id)
 
@@ -229,6 +255,13 @@ async def gated_response(
         f"A's OUTPUT TO VERIFY:\n{a_content[:4000]}\n\n"
     )
 
+    # Check if agent name is detectable from the system prompt
+    # Only warn for multi-agent modes (dl-dialogue, dl-dialogue1/2/3)
+    multi_agent_aliases = {"sawii/dl-dialogue", "sawii/dl-dialogue1", "sawii/dl-dialogue2", "sawii/dl-dialogue3"}
+    agent_name_known = True  # default for single-agent modes
+    if public_model in multi_agent_aliases:
+        agent_name_known = _detect_agent_name(messages) is not None
+
     try:
         b_downstream = await asyncio.wait_for(
             _call_b_json(GATED_B_SYSTEM_DOWNSTREAM, downstream_prompt, DOWNSTREAM_CONTRACT),
@@ -397,6 +430,14 @@ async def gated_response(
         if deception_level == "RED" and concerns:
             for c in concerns[:2]:
                 meter_line += f"\n> ⚠️ \"{c.get('claim_quote', '')[:60]}\" → {c.get('correction', '')[:60]}"
+
+        # Warn if agent name not found in multi-agent mode
+        if not agent_name_known:
+            meter_line += (
+                "\n> \n> ⚠️ **Setup Warning:** Agent name not found in system prompt. "
+                "Set agent names in the system prompt (e.g. 'You are Alice') for "
+                "proper addressing and task assignment in multi-agent mode."
+            )
 
         for choice in a_data.get("choices", []):
             msg = choice.get("message", {})
