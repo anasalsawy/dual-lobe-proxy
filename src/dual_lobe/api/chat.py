@@ -331,6 +331,7 @@ async def chat_completions(
     # upstream model. If the rules say "don't respond", return a suppressed
     # response immediately — no upstream tokens spent, no response generated.
     if routing_mode and routing_mode != "off" and s.recipient_routing_enabled:
+        LOG.info("Pre-emptive routing check starting for %s mode=%s agent=%s", alias, routing_mode, alias)
         latest_user_text = _latest_user_text(messages)
         if latest_user_text:
             try:
