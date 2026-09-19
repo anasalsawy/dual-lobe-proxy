@@ -298,6 +298,7 @@ async def chat_completions(
         "sawii/dl-dialogue3": "hierarchy",
     }
     routing_mode = alias_to_mode.get(alias)
+    print(f"CHAT: alias={alias} routing_mode={routing_mode} routing_enabled={s.recipient_routing_enabled}", flush=True)
     if routing_mode:
         # Ensure routing is enabled for flat/hierarchy aliases; off alias ignores global toggle.
         if routing_mode != "off" and not s.recipient_routing_enabled:
@@ -331,6 +332,7 @@ async def chat_completions(
     # upstream model. If the rules say "don't respond", return a suppressed
     # response immediately — no upstream tokens spent, no response generated.
     if routing_mode and routing_mode != "off" and s.recipient_routing_enabled:
+        print(f"ROUTING CHECK: alias={alias} mode={routing_mode} routing_enabled={s.recipient_routing_enabled}", flush=True)
         LOG.info("Pre-emptive routing check starting for %s mode=%s agent=%s", alias, routing_mode, alias)
         latest_user_text = _latest_user_text(messages)
         if latest_user_text:
