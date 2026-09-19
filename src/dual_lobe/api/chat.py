@@ -371,10 +371,7 @@ async def chat_completions(
                         context_for_memory={"messages": messages},
                     )
                     await session.commit()
-                should_respond = (
-                    routing_analysis.should_respond
-                    and routing_analysis.confidence >= s.recipient_routing_confidence_threshold
-                )
+                should_respond = routing_analysis.should_respond
                 if not should_respond:
                     LOG.info("Pre-emptive routing suppressed response for %s (confidence=%.2f, reasoning=%s)",
                              alias, routing_analysis.confidence, routing_analysis.reasoning)
