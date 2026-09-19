@@ -3,9 +3,11 @@
 B never touches the message array directly.  It returns structured JSON:
   - Upstream:   injection texts (observation, broadening, meter)
   - Downstream: deception rating (GREEN/YELLOW/RED) + concerns
-  - Flat mode:  decomposition into independent work packets
 
 The handler deterministically inserts/forwards.  B's voice never leaks.
+
+Decomposition is NOT B's job. Agents decompose and delegate through the
+conversation. B watches and verifies.
 """
 from __future__ import annotations
 
@@ -101,61 +103,6 @@ Maximum two concerns.  Empty for GREEN and YELLOW.
 """.strip()
 
 
-# Flat-mode decomposition: B breaks the task into independent work packets.
-# Used ONLY when the alias is sawii/dl-dialogue (flat mode).
-# B sees the full conversation and the user's task. It decomposes into
-# independent vertical slices — each agent gets a complete piece, not
-# a horizontal layer. Packets are stored in shared memory for agents
-# to pick up on their next turn.
-
-FLAT_DECOMPOSITION_SYSTEM = """\
-You are Gate-B in flat decomposition mode.  The user's task needs to be
-broken into independent work packets for parallel execution by multiple
-agents.
-
-You will receive:
-- The full conversation messages including the user's original request.
-- Any prior work packets already assigned (from shared memory).
-
-DECOMPOSITION RULES:
-1. Split into VERTICAL slices, not horizontal layers. Each slice is a
-   complete, independent unit. Do NOT split into "models, then API, then
-   frontend" — those depend on each other. Instead split by feature or
-   domain: "User management (model + API + tests)" is one slice,
-   "Post management (model + API + tests)" is another.
-
-2. Each packet must be INDEPENDENT — no dependencies on other packets.
-   If packet B needs packet A's output, they must be merged into one
-   packet or A must be done first (sequential, not parallel).
-
-3. Each packet must be SOLVABLE by a single agent working alone.
-
-4. Coverage: the packets must collectively cover the entire task.
-
-5. Non-redundancy: no two packets should overlap.
-
-6. Keep it simple: 2-4 packets maximum. More packets = more coordination
-   overhead. Only split when the pieces are genuinely independent.
-
-Each work packet gets:
-- id: a short identifier
-- mission: what to build (complete vertical slice)
-- context: relevant details from the user's request
-- deliverables: what the agent should produce
-
-Return ONLY a JSON object:
-{
-  "packets": [{
-    "id": "pkt-1",
-    "mission": "build the complete X feature including model, API, and tests",
-    "context": "relevant details from the user's request for this slice",
-    "deliverables": ["list of files or outputs this agent should produce"]
-  }],
-  "merge_notes": "what needs to be done to combine the packets after parallel execution"
-}
-""".strip()
-
-
 UPSTREAM_CONTRACT = """\
 Return ONLY one JSON object:
 {
@@ -179,18 +126,4 @@ Return ONLY one JSON object:
   }]
 }
 Maximum two concerns, RED only.  Empty for GREEN and YELLOW.
-""".strip()
-
-
-DECOMPOSITION_CONTRACT = """\
-Return ONLY one JSON object:
-{
-  "packets": [{
-    "id": "pkt-1",
-    "mission": "what to build",
-    "context": "relevant details",
-    "deliverables": ["list of outputs"]
-  }],
-  "merge_notes": "how to combine after parallel execution"
-}
 """.strip()
