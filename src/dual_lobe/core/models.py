@@ -110,6 +110,18 @@ class DirectorSession(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class DualLobeEntry(Base):
+    """Ring-buffer entry for dual-lobe mode. Isolated from memory_entries."""
+    __tablename__ = "dual_lobe_entries"
+
+    seq: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id", ondelete="SET NULL"), nullable=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    body: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class ProviderAttempt(Base):
     __tablename__ = "provider_attempts"
 

@@ -300,7 +300,7 @@ async def chat_completions(
 
     # Map routing model aliases to modes for recipient routing.
     alias_to_mode = {
-        "sawii/dual-lobe": "off",
+        "sawii/dual-lobe-old": "off",
         "sawii/dl-dialogue": "flat",
         "sawii/dl-dialogue1": "hierarchy",
         "sawii/dl-dialogue2": "hierarchy",
@@ -329,8 +329,39 @@ async def chat_completions(
         run_id = str(run.id)
         await session.commit()
 
+    # Dual-lobe mode: isolated. Answers as usual, rates with B, then keeps
+    # working in a private background exchange. Separate module and store.
+    if alias == "sawii/dual-lobe":
+        from ..dl import handler as dl_handler
+        try:
+            data, dl_headers, dl_background = await dl_handler.dual_lobe_response(
+                payload, run_id, principal.tenant_id, alias, task=str(run.goal or ""),
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        background = BackgroundTask(dl_background) if dl_background else None
+        if payload.get("stream", False):
+            import json as _json
+
+            async def _dl_stream():
+                chunk = dict(data)
+                chunk["object"] = "chat.completion.chunk"
+                for c in chunk.get("choices", []):
+                    c["delta"] = c.pop("message", {})
+                    c.pop("finish_reason", None)
+                    c["finish_reason"] = "stop"
+                yield f"data: {_json.dumps(chunk, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                _dl_stream(), media_type="text/event-stream",
+                headers={**dl_headers, "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                background=background,
+            )
+        return JSONResponse(data, status_code=200, headers=dl_headers, background=background)
+
     # Gated mode: B sits inline.  Completely separate code path.
-    if alias in ("sawii/dl-gated", "sawii/dl-dialogue", "sawii/dual-lobe"):
+    if alias in ("sawii/dl-gated", "sawii/dl-dialogue", "sawii/dual-lobe-old"):
         from ..gated.handler import gated_response
         data, gate_headers = await gated_response(payload, run_id, principal.tenant_id, alias)
         # If Hermes requested streaming, convert the buffered response to SSE

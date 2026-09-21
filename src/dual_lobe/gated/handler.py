@@ -158,6 +158,32 @@ def _insert_system_injections(
     return result
 
 
+def _build_assist_injections(meter: dict[str, Any]) -> list[dict[str, Any]]:
+    """Turn B's assist material into a tool call/result pair for A.
+
+    B's material arrives as a tool result rather than a system note, so A reads
+    it as evidence in its own tool flow. The id is a fixed, non-colliding name:
+    the pair is self-consistent and A sees a completed call with a result.
+    Returns [] when B produced nothing.
+    """
+    material = str(meter.get("assist", "") or "").strip()
+    if not material:
+        return []
+    call_id = "observer_assist"
+    return [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": call_id,
+                "type": "function",
+                "function": {"name": "observer_assist", "arguments": "{}"},
+            }],
+        },
+        {"role": "tool", "tool_call_id": call_id, "content": material},
+    ]
+
+
 def _build_meter_warning(meter: dict[str, Any]) -> str:
     """Build a system message warning A about last turn's meter."""
     level = meter.get("deception_level", "GREEN")
@@ -168,12 +194,10 @@ def _build_meter_warning(meter: dict[str, Any]) -> str:
     if level == "RED":
         parts = [prefix + "Observer meter: RED. Your last response contradicted evidence."]
         concerns = meter.get("concerns", [])
-        for c in concerns[:2]:
+        for c in concerns[:3]:
             parts.append(
-                f"- Claim: \"{c.get('claim_quote', '')}\"\n"
-                f"  Evidence: \"{c.get('evidence_quote', '')}\"\n"
-                f"  Issue: {c.get('reason', '')}\n"
-                f"  Correct to: {c.get('correction', '')}"
+                f"- \"{c.get('claim_quote', '')}\" — {c.get('reason', '')} — "
+                f"evidence: \"{c.get('evidence_quote', '')}\" → {c.get('correction', '')}"
             )
         parts.append("Do not repeat these claims without new evidence.")
         return "\n".join(parts)
@@ -213,6 +237,11 @@ async def gated_response(
             injections.append(warning)
 
     enriched_messages = _insert_system_injections(messages, injections)
+
+    # B's assist material from the last call, delivered as a tool result so A
+    # reads it in its own tool flow. Same injection point as the meter warning.
+    if last_meter:
+        enriched_messages = enriched_messages + _build_assist_injections(last_meter)
 
     # ── 2. A generates response ──────────────────────────────────
     a_adapter = get_registry().adapter("lobe-a")
@@ -287,12 +316,10 @@ async def gated_response(
                 "SYSTEM CORRECTION: Your previous response contained factual errors.",
                 "The following issues were detected:",
             ]
-            for c in concerns[:2]:
+            for c in concerns[:3]:
                 correction_lines.append(
-                    f"- You claimed: \"{c.get('claim_quote', '')}\"\n"
-                    f"  But the evidence shows: \"{c.get('evidence_quote', '')}\"\n"
-                    f"  Issue: {c.get('reason', '')}\n"
-                    f"  You should say: {c.get('correction', '')}"
+                    f"- \"{c.get('claim_quote', '')}\" — {c.get('reason', '')} — "
+                    f"evidence: \"{c.get('evidence_quote', '')}\" → {c.get('correction', '')}"
                 )
         else:
             correction_lines = [
@@ -359,6 +386,8 @@ async def gated_response(
         "deception_level": deception_level,
         "meter_rationale": meter_rationale,
         "concerns": concerns,
+        "assist": str(b_downstream.get("assist", "") or "").strip()
+                  if isinstance(b_downstream, dict) else "",
         "timestamp": time.time(),
     })
 
@@ -377,8 +406,10 @@ async def gated_response(
         if meter_rationale and meter_rationale != "No deception detected.":
             meter_line += f"\n> {meter_rationale[:150]}"
         if deception_level == "RED" and concerns:
-            for c in concerns[:2]:
-                meter_line += f"\n> ⚠️ \"{c.get('claim_quote', '')[:60]}\" → {c.get('correction', '')[:60]}"
+            for c in concerns[:3]:
+                meter_line += (f"\n> ⚠️ \"{c.get('claim_quote', '')}\" — "
+                               f"{c.get('reason', '')} — evidence: "
+                               f"\"{c.get('evidence_quote', '')}\"")
 
         # Warn if agent name not found in multi-agent mode
         if not agent_name_known:

@@ -1,0 +1,209 @@
+*** Begin Patch
+*** Update File: src/dual_lobe/provider/registry.py
+@@ Fix model registry to only expose user-facing models @@
+"""Provider target registry and /v1/models endpoint.
+
+The host environment (Railway vars, .env) declares concrete providers.
+This module maps those to the model aliases exposed by the proxy API.
+
+Aliases ``sawii/dual-lobe``, ``sawii/dl-dialogue*`` are the public contract.
+Internal aliases like ``lobe-a``/``lobe-b`` are resolved from the environment contract
+but are NOT exposed in /v1/models to avoid user confusion.
+
+Mode and routing details are chosen per alias at call time,
+not in this registry (see director.py and recipient_router.py).
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, cast
+
+from ..core import settings as settings_mod
+from ..core.models import ProviderRegistry
+from .adapters import InferenceAdapter
+from .contracts import ProviderTarget
+
+LOG = logging.getLogger("dual_lobe.provider")
+
+
+def build_registry() -> ProviderRegistry:
+    """Build provider target registry from environment variables.
+
+    Resolves lobe-a/lobe-b to their DeepInfra/OAI/etc. providers
+    and assigns them to the public model aliases.
+    """
+    s = settings_mod.get_settings()
+    base_fields = dict(
+        provider=s.primary_provider,
+        base_url=s.primary_base_url,
+        api_key=s.primary_api_key,
+        model=s.primary_model,
+        timeout=s.primary_timeout,
+        max_retries=s.primary_max_retries,
+        enabled=True,
+    )
+
+    # Public model aliases - these are what users see in /v1/models
+    base = ProviderTarget(alias="sawii/dual-lobe", **base_fields)
+    flat = ProviderTarget(alias="sawii/dl-dialogue", **base_fields)
+    chief = ProviderTarget(alias="sawii/dl-dialogue1", **base_fields)
+    moderator = ProviderTarget(alias="sawii/dl-dialogue2", **base_fields)
+    worker = ProviderTarget(alias="sawii/dl-dialogue3", **base_fields)
+
+    # Build the registry mapping
+    registry = {
+        "sawii/dual-lobe": base,
+        "sawii/dl-dialogue": flat,
+        "sawii/dl-dialogue1": chief,
+        "sawii/dl-dialogue2": moderator,
+        "sawii/dl-dialogue3": worker,
+    }
+
+    # Resolve lobe-a and lobe-b from environment for internal routing
+    # These are NOT exposed in the public /v1/models endpoint
+    if s.lobe_a_base_url:
+        lobe_a = ProviderTarget(
+            alias="lobe-a",
+            provider=s.lobe_a_provider,
+            base_url=s.lobe_a_base_url,
+            api_key=s.lobe_a_api_key,
+            model=s.lobe_a_model,
+            timeout=s.lobe_a_timeout,
+            max_retries=s.lobe_a_max_retries,
+            enabled=True,
+        )
+        registry["lobe-a"] = lobe_a
+
+    if s.lobe_b_base_url:
+        lobe_b = ProviderTarget(
+            alias="lobe-b",
+            provider=s.lobe_b_provider,
+            base_url=s.lobe_b_base_url,
+            api_key=s.lobe_b_api_key,
+            model=s.lobe_b_model,
+            timeout=s.lobe_b_timeout,
+            max_retries=s.lobe_b_max_retries,
+            enabled=True,
+        )
+        registry["lobe-b"] = lobe_b
+
+    return cast(ProviderRegistry, registry)
+
+
+class ProviderRegistry:
+    """Registry of provider targets indexed by public model alias."""
+
+    _targets: dict[str, ProviderTarget]
+
+    def __init__(self, targets: dict[str, ProviderTarget]):
+        self._targets = targets
+
+    def get(self, alias: str | None = None) -> ProviderTarget:
+        """Get provider target by alias.
+
+        If alias is None, returns the default target (sawii/dual-lobe).
+        """
+        return self._targets[alias or "sawii/dual-lobe"]
+
+    def models(self) -> list[dict[str, Any]]:
+        """Return list of models for /v1/models endpoint.
+        
+        Only expose user-facing models, hide internal routing components
+        """
+        user_facing_models = {
+            "sawii/dual-lobe",
+            "sawii/dl-dialogue",
+            "sawii/dl-dialogue1",
+            "sawii/dl-dialogue2",
+            "sawii/dl-dialogue3"
+        }
+        result = []
+        for alias, t in self._targets.items():
+            if t.enabled and alias in user_facing_models:
+                result.append({"id": alias, "object": "model", "owned_by": "local",
+                               "logical_model": t.model, "provider": t.provider})
+        
+        # NOTE: Internal routing components like lobe-a-director and lobe-b are NOT
+        # exposed in the public /v1/models endpoint to avoid user confusion
+        # They are used internally by the proxy routing logic only
+        return result
+
+    def adapter_for(self, alias: str) -> InferenceAdapter:
+        """Get inference adapter for the given alias."""
+        target = self.get(alias)
+        return InferenceAdapter(
+            provider=target.provider,
+            base_url=target.base_url,
+            api_key=target.api_key,
+            model=target.model,
+            timeout=target.timeout,
+            max_retries=target.max_retries,
+        )
+*** Update File: RAILWAY_DEPLOY.md
+@@ Update hierarchy roles in deployment guide @@
+# Deploy to Railway
+
+1. Push this repo to GitHub.
+2. Go to https://railway.app and create a new project.
+3. Choose **Deploy from GitHub repo** and select `dual-lobe-proxy`.
+4. Railway will detect `railway.json` and use the Dockerfile.
+5. Add a **PostgreSQL** service to the project (Railway provisions one).
+6. In the dual-lobe service Variables tab, add:
+   - `DUAL_LOBE_A_API_KEY`
+   - `DUAL_LOBE_B_API_KEY`
+   - `DUAL_LOBE_A_MODEL` (e.g. `Qwen/Qwen3-Max`)
+   - `DUAL_LOBE_B_MODEL` (e.g. `Qwen/Qwen3-Max`)
+   - `DUAL_LOBE_A_BASE_URL` = `https://api.deepinfra.com/v1/openai`
+   - `DUAL_LOBE_B_BASE_URL` = `https://api.deepinfra.com/v1/openai`
+   - `RLS_DATABASE_URL` = `${{Postgres.DATABASE_URL}}`
+   - `DUAL_LOBE_ROUTING_MODE` = `off`
+   - `DUAL_LOBE_HIERARCHY_ROLES` = `sawii/dl-dialogue1:0,sawii/dl-dialogue2:1,sawii/dl-dialogue3:2`
+7. Deploy. Railway will expose a public URL like `https://dual-lobe-proxy.up.railway.app`.
+8. Test with `curl https://<your-url>/healthz`.
+
+The service listens on `$PORT` (set by Railway).
+*** Update File: .env.railway.example
+@@ Update hierarchy roles in example environment file @@
+# Railway environment variables for DeepInfra
+# Copy these to Railway dashboard as environment variables
+
+# Database (Railway PostgreSQL)
+POSTGRES_USER=${{POSTGRES_USER}}
+POSTGRES_PASSWORD=${{POSTGRES_PASSWORD}}
+POSTGRES_DB=${{POSTGRES_DB}}
+POSTGRES_PORT=${{PGPORT}}
+DATABASE_URL=${{DATABASE_URL}}
+RLS_DATABASE_URL=${{RLS_DATABASE_URL}}
+
+# Proxy Configuration
+DUAL_LOBE_PORT=${{PORT}}
+DUAL_LOBE_BOOTSTRAP_KEYS=${{DUAL_LOBE_BOOTSTRAP_KEYS}}
+
+# Model Configuration (using DeepInfra)
+DUAL_LOBE_A_MODEL=Qwen/Qwen3-Max
+DUAL_LOBE_A_BASE_URL=https://api.deepinfra.com/v1/openai
+DUAL_LOBE_A_API_KEY=${{DEEPINFRA_API_KEY}}
+DUAL_LOBE_A_DIALECT=chat_completions
+
+# Enable Lobe B (Observer/Router) - can use same or different model
+DUAL_LOBE_B_ENABLED=true
+DUAL_LOBE_B_MODEL=Qwen/Qwen3-Max
+DUAL_LOBE_B_BASE_URL=https://api.deepinfra.com/v1/openai
+DUAL_LOBE_B_API_KEY=${{DEEPINFRA_API_KEY}}
+
+# Memory and Context
+DUAL_LOBE_SHARED_MEMORY_ENABLED=true
+DUAL_LOBE_DEFAULT_MEMORY_ID=main
+DUAL_LOBE_CONTEXT_MEMORY_ENABLED=true
+DUAL_LOBE_CLAIM_CHECKS_ENABLED=true
+
+# Director Mode (for autonomous agents)
+DUAL_LOBE_DIRECTOR_ENABLED=true
+
+# Hierarchy Roles Configuration (Human Sovereign rules)
+DUAL_LOBE_HIERARCHY_ROLES=sawii/dl-dialogue1:0,sawii/dl-dialogue2:1,sawii/dl-dialogue3:2
+
+# Performance
+DUAL_LOBE_LOG_LEVEL=INFO
+*** End Patch

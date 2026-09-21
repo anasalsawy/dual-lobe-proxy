@@ -22,7 +22,7 @@ def env_targets() -> dict[str, ProviderTarget]:
 
     s = get_settings()
     base = ProviderTarget(
-        alias="sawii/dual-lobe",
+        alias="sawii/dual-lobe-old",
         base_url=s.a_base_url,
         api_key=s.a_api_key,
         model=s.a_model,
@@ -36,6 +36,7 @@ def env_targets() -> dict[str, ProviderTarget]:
     moderator = ProviderTarget(alias="sawii/dl-dialogue2", **base_fields)
     worker = ProviderTarget(alias="sawii/dl-dialogue3", **base_fields)
     gated = ProviderTarget(alias="sawii/dl-gated", **base_fields)
+    dual_lobe = ProviderTarget(alias="sawii/dual-lobe", **base_fields)
     # Internal aliases for B-lobe shadow cycles and director mode.
     # Not exposed in /v1/models (filtered out by user_facing_models set).
     lobe_a = ProviderTarget(
@@ -55,7 +56,8 @@ def env_targets() -> dict[str, ProviderTarget]:
         capabilities={"stream": False, "tools": False, "responses": False},
     )
     return {
-        "sawii/dual-lobe": base,
+        "sawii/dual-lobe-old": base,
+        "sawii/dual-lobe": dual_lobe,
         "sawii/dl-dialogue": flat,
         "sawii/dl-dialogue1": chief,
         "sawii/dl-dialogue2": moderator,
@@ -110,6 +112,7 @@ class Registry:
         # Only expose user-facing models, hide internal routing components
         user_facing_models = {
             "sawii/dual-lobe",
+            "sawii/dual-lobe-old",
             "sawii/dl-dialogue",
             "sawii/dl-dialogue1",
             "sawii/dl-dialogue2",
