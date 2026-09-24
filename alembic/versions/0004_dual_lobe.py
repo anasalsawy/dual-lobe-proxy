@@ -1,15 +1,19 @@
 """Dual-lobe mode ring-buffer store (isolated from memory_entries)."""
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 from sqlalchemy.dialects import postgresql
 
-revision = "0003"
-down_revision = "0002"
+revision = "0004"
+down_revision = "0003"
 branch_labels = None
 depends_on = None
 
 
 def upgrade():
+    bind = op.get_bind()
+    if inspect(bind).has_table("dual_lobe_entries"):
+        return
     op.create_table(
         "dual_lobe_entries",
         sa.Column("seq", sa.BigInteger(), primary_key=True, autoincrement=True),

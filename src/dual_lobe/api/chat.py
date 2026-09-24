@@ -39,6 +39,14 @@ def _token_estimate(messages: list[dict[str, Any]]) -> int:
     return len(json.dumps(messages, ensure_ascii=False)) // 4
 
 
+def _headers(values: dict[str, Any]) -> dict[str, str]:
+    """HTTP header values must be latin-1; model output often is not."""
+    return {
+        str(key): str(value).encode("latin-1", "replace").decode("latin-1")
+        for key, value in values.items()
+    }
+
+
 def _messages_text(messages: list[dict[str, Any]], max_chars: int) -> str:
     # Preserve tool requests AND results. Do not collect hidden reasoning fields.
     parts = []
@@ -500,7 +508,7 @@ async def chat_completions(
 
             return StreamingResponse(
                 _dl_interleaved_stream(), media_type="text/event-stream",
-                headers={
+                headers=_headers({
                     "X-Dual-Lobe-Mode": "interleaved-shadow",
                     "X-Dual-Lobe-Meter": "LIVE",
                     "X-Dual-Lobe-Wait-Policy": "no-wait-unless-intervention",
@@ -509,7 +517,7 @@ async def chat_completions(
                     "X-DL-Internal-Run-ID": run_id,
                     "Cache-Control": "no-cache",
                     "X-Accel-Buffering": "no",
-                },
+                }),
             )
 
         if payload.get("stream", False):
@@ -635,7 +643,7 @@ async def chat_completions(
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         background = BackgroundTask(dl_background) if dl_background else None
-        dl_headers = dict(dl_headers)
+        dl_headers = _headers(dl_headers)
         dl_headers["X-DL-Run-ID"] = external_run
         dl_headers["X-DL-Internal-Run-ID"] = run_id
         return JSONResponse(data, status_code=200, headers=dl_headers, background=background)
@@ -648,6 +656,7 @@ async def chat_completions(
         data, co_headers = await coauthor_response(
             payload, run_id, principal.tenant_id, alias
         )
+        co_headers = _headers(co_headers)
         if payload.get("stream", False):
             import json as _json
 
@@ -671,6 +680,7 @@ async def chat_completions(
     if alias in ("sawii/dl-gated", "sawii/dl-dialogue", "sawii/dual-lobe-old"):
         from ..gated.handler import gated_response
         data, gate_headers = await gated_response(payload, run_id, principal.tenant_id, alias)
+        gate_headers = _headers(gate_headers)
         # If Hermes requested streaming, convert the buffered response to SSE
         if payload.get("stream", False):
             import json as _json
@@ -732,11 +742,11 @@ async def chat_completions(
                     return JSONResponse(
                         suppressed,
                         status_code=200,
-                        headers={
+                        headers=_headers({
                             "X-Dual-Lobe-Routing": "suppressed",
                             "X-Dual-Lobe-Routing-Reasoning": routing_analysis.reasoning[:200],
                             "X-Dual-Lobe-Routing-Confidence": str(routing_analysis.confidence),
-                        },
+                        }),
                     )
             except Exception as exc:
                 LOG.warning("Pre-emptive routing check failed for %s: %s; proceeding with request",
@@ -781,7 +791,7 @@ async def chat_completions(
     background = BackgroundTask(_persist_observation, principal.tenant_id, run_id,
                                 external_run, corr, alias, context_text, audit, observe,
                                 latest_user_text=latest_user_text, routing_mode=routing_mode)
-    headers = {"X-Dual-Lobe-Run-Id": run_id, "X-Dual-Lobe-Observer": context.status,
+    headers = _headers({"X-Dual-Lobe-Run-Id": run_id, "X-Dual-Lobe-Observer": context.status,
               "X-Dual-Lobe-Call-Id": audit["call_id"],
               "X-Dual-Lobe-Memory": (f"v{context.memory_version}" if context.memory_text else context.memory_status),
               "X-Dual-Lobe-Claims": context.claim_status,
@@ -790,7 +800,7 @@ async def chat_completions(
               "X-Dual-Lobe-Evidence": context.evidence_status,
               "X-Dual-Lobe-Monitoring": "on" if monitoring else "off",
               "X-Dual-Lobe-Memory-Space": memory_space or "off",
-              "X-Dual-Lobe-Shared-Entries": str(len(shared.entry_ids))}
+              "X-Dual-Lobe-Shared-Entries": str(len(shared.entry_ids))})
     if req.stream:
         return StreamingResponse(
             _stream_body(adapter, req, alias, audit, save_memory if memory_space else None), media_type="text/event-stream",

@@ -100,7 +100,8 @@ class ChatCompletionsAdapter:
             self._endpoint(), headers=self._headers(),
             json={**self._base_kwargs(req), "stream": False}, timeout=req.timeout,
         )
-        gate.observe(response.headers, response.status_code)
+        gate.observe(response.headers, response.status_code,
+                     body=response.text if response.status_code == 429 else "")
         response.raise_for_status()
         data = response.json()
         if isinstance(data, dict):
@@ -114,7 +115,14 @@ class ChatCompletionsAdapter:
             "POST", self._endpoint(), headers=self._headers(),
             json={**self._base_kwargs(req), "stream": True}, timeout=req.timeout,
         ) as response:
-            gate.observe(response.headers, response.status_code)
+            if response.status_code == 429:
+                try:
+                    body = (await response.aread()).decode("utf-8", "replace")
+                except Exception:  # noqa: BLE001
+                    body = ""
+                gate.observe(response.headers, response.status_code, body=body)
+            else:
+                gate.observe(response.headers, response.status_code)
             response.raise_for_status()
             data_lines: list[str] = []
             event_size = 0

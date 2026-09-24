@@ -15,9 +15,11 @@ which uses this module as its single pacing function:
 4. ``RateGate.acquire`` blocks the caller until the request fits inside the
    current RPM/TPM/daily window, so the upstream is never asked for more than
    it allows.
-5. A 429 still shrinks the budget and parks the gate for ``Retry-After``
-   (exponential fallback when absent); sustained success grows it back toward
-   the ceiling reported by the provider.
+5. A 429 still shrinks the budget and parks the gate for ``Retry-After`` —
+   read from the response header, or from the 429 body when the provider only
+   states the wait there (Gemini: "Please retry in 26.7s") — with an
+   exponential fallback when absent; sustained success grows it back toward the
+   ceiling reported by the provider.
 
 The gate is process-local (like ``api/limits.py``) and keyed by provider host +
 API key, because upstream budgets are per credential, not per lobe alias.
@@ -181,6 +183,22 @@ def _seconds(value: str | None) -> float | None:
     return None
 
 
+def _retry_from_body(body: str) -> float | None:
+    """Some providers (Gemini) only report the wait inside the 429 body."""
+    if not body:
+        return None
+    patterns = (
+        r"(?:retry|try again|backoff)\D{0,30}?(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds)\b",
+        r'"retry[_-]?(?:after|delay)"\s*:\s*"?(\d+(?:\.\d+)?)',
+        r"retry[_-]?after\D{0,20}?(\d+(?:\.\d+)?)\s*(?:s|sec|seconds)?",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, body, re.I)
+        if match:
+            return float(match.group(1))
+    return None
+
+
 class RateGate:
     """Paces one upstream credential so its published budget is never exceeded."""
 
@@ -303,7 +321,7 @@ class RateGate:
         self._prune(time.monotonic())
 
     # -- header discovery ------------------------------------------------
-    def observe(self, headers: Any, status: int | None = None) -> None:
+    def observe(self, headers: Any, status: int | None = None, body: str = "") -> None:
         try:
             status = int(status) if status is not None else None
         except (TypeError, ValueError):
@@ -341,15 +359,17 @@ class RateGate:
             self._pause_until = max(self._pause_until, now_mono + (reset or 5.0))
 
         if status == 429:
-            self.note_rejected(lowered)
+            self.note_rejected(lowered, body)
         elif status is not None and 200 <= status < 300:
             self.note_success()
 
-    def note_rejected(self, headers: dict[str, str]) -> None:
+    def note_rejected(self, headers: dict[str, str], body: str = "") -> None:
         retry = _seconds(_header(headers, "retry-after"))
         if retry is None:
             retry_ms = _number(_header(headers, "retry-after-ms"))
             retry = (retry_ms / 1000.0) if retry_ms else None
+        if retry is None:
+            retry = _retry_from_body(body)
         if retry is None:
             retry = min(MAX_BACKOFF, 2.0 ** min(6, self._consecutive_ok + 1))
         retry = max(1.0, min(MAX_BACKOFF, retry))

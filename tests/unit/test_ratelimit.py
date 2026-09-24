@@ -58,6 +58,28 @@ def test_429_backs_off_and_shrinks_budget():
     assert gate.last_429_at is not None
 
 
+def test_429_body_retry_hint_is_honoured():
+    gate = RateGate("gemini|test", "gemini", rpm=15, tpm=None, rpd=None, max_wait=0.05)
+    body = (
+        '{"error": {"code": 429, "message": "You exceeded your current quota. '
+        '* Quota exceeded for metric: generativelanguage.googleapis.com/'
+        'generate_content_free_tier_requests, limit: 20, model: gemini-3.5-flash\\n'
+        'Please retry in 26.769731486s.", "status": "RESOURCE_EXHAUSTED"}}'
+    )
+    gate.observe({}, 429, body=body)
+    paused = gate._pause_until - time.monotonic()
+    assert 26 <= paused <= 27
+    assert gate._rpm < 15
+
+
+def test_429_without_hint_falls_back_to_exponential_backoff():
+    gate = RateGate("gemini|test", "gemini", rpm=15, tpm=None, rpd=None, max_wait=0.05)
+    gate.observe({}, 429)
+    paused = gate._pause_until - time.monotonic()
+    assert 0 < paused <= 4
+    assert gate._rpm < 15
+
+
 def test_record_usage_feeds_tpm_window():
     gate = RateGate("gemini|test", "gemini", rpm=None, tpm=100, rpd=None, max_wait=0.05)
     gate.record_usage({"prompt_tokens": 40, "completion_tokens": 40, "total_tokens": 80})

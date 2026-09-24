@@ -117,27 +117,37 @@ async def _call_b_json(system_prompt: str, user_prompt: str, contract: str) -> d
     """Call lobe-b, parse JSON response.  Raises on failure."""
     s = get_settings()
     adapter = get_registry().adapter("lobe-b")
-    req = NormalizedRequest(
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt + "\n\n" + contract},
-        ],
-        temperature=0,
-        max_tokens=s.b_max_output_tokens,
-        timeout=s.b_timeout,
-    )
-    response = await adapter.buffered(req)
-    data = response_dict(response)
-    content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
-    if not content:
-        raise ValueError("B returned empty content")
-    content = content.strip()
-    if content.startswith("```"):
-        content = content.split("\n", 1)[-1]
-        if content.endswith("```"):
-            content = content[:-3]
+    prompt = user_prompt + "\n\n" + contract
+    last_error: Exception = ValueError("B did not respond")
+    for attempt in range(2):
+        if attempt:
+            prompt += "\n\nReturn ONLY the JSON object. No prose, no code fences."
+        req = NormalizedRequest(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0,
+            max_tokens=s.b_max_output_tokens,
+            timeout=s.b_timeout,
+        )
+        response = await adapter.buffered(req)
+        data = response_dict(response)
+        content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+        if not content:
+            last_error = ValueError("B returned empty content")
+            continue
         content = content.strip()
-    return json.loads(content)
+        if content.startswith("```"):
+            content = content.split("\n", 1)[-1]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+    raise last_error
 
 
 def _insert_system_injections(
@@ -286,6 +296,7 @@ async def gated_response(
     if public_model in multi_agent_aliases:
         agent_name_known = _detect_agent_name(messages) is not None
 
+    b_downstream: dict = {}
     try:
         b_downstream = await asyncio.wait_for(
             _call_b_json(GATED_B_SYSTEM_DOWNSTREAM, downstream_prompt, DOWNSTREAM_CONTRACT),

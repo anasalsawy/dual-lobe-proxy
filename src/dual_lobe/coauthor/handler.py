@@ -134,20 +134,29 @@ def _clean_json_content(content: str) -> dict[str, Any]:
 async def _call_b(system: str, user: str, *, max_tokens: int | None = None) -> dict[str, Any]:
     s = get_settings()
     adapter = get_registry().adapter("lobe-b")
-    req = NormalizedRequest(
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        temperature=0,
-        max_tokens=max_tokens or min(s.b_max_output_tokens, 1000),
-        stream=False,
-        timeout=s.b_timeout,
-    )
-    response = await adapter.buffered(req)
-    data = response_dict(response)
-    message = (data.get("choices") or [{}])[0].get("message") or {}
-    return _clean_json_content(str(message.get("content") or ""))
+    last_error: Exception = ValueError("B did not respond")
+    for attempt in range(2):
+        prompt = user + (
+            "\n\nRespond ONLY with the JSON object. No prose, no code fences." if attempt else ""
+        )
+        req = NormalizedRequest(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0,
+            max_tokens=max_tokens or min(s.b_max_output_tokens, 1000),
+            stream=False,
+            timeout=s.b_timeout,
+        )
+        response = await adapter.buffered(req)
+        data = response_dict(response)
+        message = (data.get("choices") or [{}])[0].get("message") or {}
+        try:
+            return _clean_json_content(str(message.get("content") or ""))
+        except (json.JSONDecodeError, ValueError) as exc:
+            last_error = exc
+    raise last_error
 
 
 def _replace_latest_user_view(
