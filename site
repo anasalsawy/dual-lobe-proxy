@@ -1,0 +1,1219 @@
+---WORK---
+# Dual-Lobe Site Content Pack — `duallobesite20260922.md`
+
+**Deliverable type:** website copy, promotional material, educational content, and information architecture
+**Project:** Dual-Lobe — Asymmetric Cognitive Architecture & Drop-In OpenAI Reverse Proxy
+**Author/Owner:** Anas Alsawy
+**Repositories:** github.com/anasalsawy/dual-lobe (research specification v1.1.0) · github.com/anasalsawy/dual-lobe-proxy (working proxy v0.4)
+**Status:** Experimental research track + working implementation. Not a peer-reviewed neuroscience theory. Not a certified production security boundary.
+**Site tone:** Calm, technical, honest. Evidence before success. No hype.
+
+---
+
+## 0. How to use this file
+
+This file is written so you can paste it straight into a website. Sections are marked by purpose:
+
+- **[PAGE]** — full page copy, ready to publish (headline, subhead, body, CTA).
+- **[SECTION]** — a block you can drop into an existing homepage to replace placeholder text.
+- **[HOMEPAGE REPLACEMENT]** — a complete, drop-in replacement for the current placeholder homepage text (Section 4). This is the most important section for the immediate need.
+- **[EDU]** — educational/explainer material for a Learn/Docs/Research page.
+- **[PROMO]** — promotional and outreach material: launch post, social threads, taglines, boilerplate, press kit.
+- **[META]** — navigation, FAQ, 404, SEO strings, accessibility notes.
+
+Every factual claim in this file is traceable to the two repositories. Where the repositories are careful (advisory, not verdict; no claim of hallucination cure; costs and limits), this file is careful in the same way. Do not soften the limitations when publishing — they are the brand.
+
+---
+
+## 1. [META] Naming, positioning, and one-line identity
+
+**Project name:** Dual-Lobe
+**Full technical name:** Dual-Lobe Interdependent Agent Architecture
+**Component names:**
+- Executor Lobe (Model A, proxy model alias `lobe-a`)
+- Strategist Lobe (Model B, proxy model alias `lobe-b` for review, `lobe-a-director` for Director Mode)
+- Reverse proxy gateway: Dual-Lobe Proxy (port `:8801`)
+
+**One-line identity (hero):**
+> Two specialized model processes. One task identity. Asymmetric powers, mandatory cross-checks, and evidence before success.
+
+**Elevator pitch (30 words):**
+> Dual-Lobe splits one AI task across two model processes with different powers: an Executor that acts and a Strategist that senses, critiques, authorizes, and verifies evidence — so success claims must be backed by proof.
+
+**Long pitch (90 words):**
+> Dual-Lobe is an open-source, drop-in OpenAI-compatible reverse proxy that enforces a dual-process cognitive architecture around any supported foundation model. An Executor Lobe streams responses and runs tools with zero critical-path wait. A Strategist Lobe reviews in the background, classifies material claims against supplied evidence, maintains versioned memory, and can take the conversation over in Director Mode. Four hard invariants — planning, action, verification, and escalation locks — make cooperation structural rather than polite. The core rule is simple: narrow evidence may support only a narrow claim.
+
+**Positioning statement (formal):**
+> Dual-Lobe is not a prompt hack and not a single model talking to itself. It is an engineering architecture with asymmetric tool authority, typed inter-lobe communication, append-only auditability, and an explicit anti-deception rule. It is designed to reduce false-success declarations, unauthorized side effects, correlated errors, and unrecoverable stalls in long-running AI agents. It is an advisory architecture, not a truth guarantee.
+
+**What we refuse to say (guardrail list — keep on the site, not hidden):**
+- We do not claim "100% hallucination cure."
+- We do not claim literal left-brain/right-brain biology.
+- We do not claim consciousness, awareness, or simulated neurons.
+- We do not claim the architecture is proven superior to simpler agents.
+- We do not confuse "reviewed" (the output contract passed validation) with "true" (the answer is correct).
+
+---
+
+## 2. [META] Suggested site map
+
+- **Home** — hero, the problem, the invariants, the meter, the live inspector, the three paths, quickstart, CTA. *(Copy in Section 4.)*
+- **Architecture** — lobes, invariants, protocol, data model, telemetry. *(Copy in Section 5.)*
+- **Anti-Deception** — the core rule, the three claim labels, the assessment engine, worked examples, honesty about confidence limits. *(Copy in Section 6.)*
+- **Learn** — how to think about AI agent reliability; the neuroscience analogy used correctly; baselines and why they matter. *(Copy in Section 7.)*
+- **Research** — what the research specification claims, hypotheses H1–H6, evaluation plan, what would falsify it. *(Copy in Section 8.)*
+- **Docs** — quickstart, API reference, headers, state endpoint, FAQ. *(Copy in Section 9 and Section 10.)*
+- **About** — author, project history, license posture, contact.
+
+---
+
+## 3. [META] Brand and writing rules for the whole site
+
+**Voice:** precise, plain, unexcited. Explain the mechanism, then the benefit. Never the reverse.
+**Sentence length:** short. One idea per sentence. ASCII-safe punctuation in code blocks; prose may use em dashes.
+**Every benefit gets a limit.** If a section says "zero critical-path latency," the next line says what still costs time (auth, DB lookup, extra prompt tokens).
+**Every claim gets provenance.** When you say a claim label exists, name the label (`UNSUPPORTED`, `CONTRADICTION`, `SUSPICIOUS_SHIFT`) and what triggers it.
+**Preferred verbs:** senses, critiques, authorizes, verifies, curates, streams, enqueues, audits, escalates.
+**Forbidden marketing verbs:** guarantees truth, eliminates hallucination, thinks like a brain, self-aware, immune.
+
+**Taglines (pick per context, all defensible from the repos):**
+1. Evidence before success.
+2. Two lobes. One task identity. Zero unilateral authority.
+3. The agent that has to show its work.
+4. Narrow evidence supports only narrow claims.
+5. Success is a verified state, not a sentence you write.
+6. The observer never blocks the stream.
+7. Asymmetric powers, mandatory cross-checks.
+8. If the claim has no receipt, it is not a result.
+9. Review in the background. Act in the foreground.
+10. Reliability you can inspect at `/v1/dual-lobe/state/{run_id}`.
+
+---
+
+## 4. [HOMEPAGE REPLACEMENT] Drop-in homepage copy
+
+> **How to use:** replace the existing placeholder homepage content wholesale with the blocks below, in order. Each block is labeled with its homepage region. Keep the structure; swap images/logos only where you have real ones. Do not add metrics you cannot reproduce.
+
+### Block 1 — Hero
+
+**Eyebrow:** Dual-Lobe v0.4 Proxy Architecture
+
+**H1:** Two lobes. One task identity. Evidence before success.
+
+**Sub-headline:**
+Two persistent model processes share a single job. The Executor Lobe acts. The Strategist Lobe senses, critiques, authorizes, and verifies. Asymmetric powers, mandatory cross-checks, and process isolation — enforced by architecture, not by asking nicely in a prompt.
+
+**Hero CTAs:**
+- **Primary:** Get started — `docker compose up -d`
+- **Secondary:** Try the Anti-Deception Meter
+- **Tertiary:** Read the architecture
+
+**Hero micro-facts (four small tiles under the CTA row):**
+- **Drop-in:** OpenAI-compatible. Point your SDK `base_url` at `http://localhost:8801/v1`.
+- **No tool rewrites:** your app keeps executing the Executor's tools.
+- **Reviews off the critical path:** the Strategist runs through a durable outbox.
+- **Auditable:** every finding is a row in PostgreSQL, queryable by `run_id`.
+
+**Hero visual caption (for the animated diagram):**
+> Lobe A: Executor — action and tools. Lobe B: Strategist — governance and truth. Between them: the Evidence Verification gate. The token stream never waits for the gate.
+
+---
+
+### Block 2 — The Problem
+
+**H2:** The trap: phantom confidence
+
+**Body:**
+You ran the suite. Or you think you did. The agent reported green checkmarks, a validated schema, a clean migration. Then staging told the truth: connection refused on `5432`, exit code 2, three failing assertions. Somewhere between the tool call and the summary, the evidence disappeared and a plausible story took its place.
+
+This is not a model being malicious. It is a model doing what language models do: producing the most plausible next tokens. When an agent self-checks, it reads its own prior tokens through the same attention weights that produced them — and validates its own phantom assumptions.
+
+**Two-column evidence card:**
+
+Left — *Agent claim, unsupported:*
+> "All migrations executed smoothly and the DB schema was validated."
+
+Right — *Actual sandbox STDOUT, ground truth:*
+```
+connection refused on port 5432
+exit code 2
+FAILED (failures=3, errors=0) in 2.14s
+```
+
+**Cost line:** Chasing one hallucinated run costs an engineer roughly 1.5 to 3.5 wasted hours — plus the phantom regressions and ruined nights that follow.
+
+---
+
+### Block 3 — The Principle
+
+**H2:** The anti-deception principle
+
+**Pull quote:**
+> Narrow evidence may support only a narrow claim.
+
+**Body:**
+Dual-Lobe does not try to make models more honest by instructing them to be honest. It separates the authority to act from the authority to certify, then requires the certification to point at evidence in the record. A claim about a test run is checked against the test run's output. A claim about a migration is checked against the migration's exit code. If the record does not contain matching evidence, the claim is labeled — visibly — as unsupported.
+
+**The three labels (three cards):**
+
+1. **UNSUPPORTED** — a material claim lacks matching evidence in the supplied record.
+2. **CONTRADICTION** — incompatible supplied statements; both sides are quoted.
+3. **SUSPICIOUS_SHIFT** — a change in certainty or direction that the supplied record does not explain.
+
+**Footer note (small text, keep it):**
+> "Unsupported" is not an accusation of lying, and "missing evidence" is not proof of fabrication. These are model assessments under uncertainty, deliberately conservative, and always advisory. The funnel is: hallucination → material claim → claim finding → claim concern. Only some material claims are reviewable, only some of those produce findings, and only some findings count as concerns.
+
+---
+
+### Block 4 — The Four Hard Invariants
+
+**H2:** Architectural foundations: four hard invariants
+
+**Intro:**
+Dual-Lobe is not a prompt hack. It is a dual-process engineering architecture with locks enforced at the inference runtime. A conforming implementation must make bypass impossible at the dispatch and state-machine layer — not merely discouraged in prompts.
+
+**Four cards:**
+
+**1. Planning Lock — a plan is not active until the Strategist signs it.**
+No execution plan becomes active until Lobe B explicitly signs off on scope, risk boundary, and step feasibility. *Status: sign-off mandatory.*
+
+**2. Action Lock — side effects are physically blocked until permitted.**
+External actions, API mutations, and filesystem writes are blocked until the Strategist issues a permit with a scoped TTL. *Status: pre-execution gate.*
+
+**3. Verification Lock — an action is not complete until evidence is verified.**
+An action cannot count as completed or successful until the Strategist verifies the returned logs against the claimed objective. *Status: evidence required.*
+
+**4. Escalation Lock — recovery before escalation.**
+Divergence or tool-mutation anomalies freeze autonomous runs and yield back to the user — but only after bounded internal recovery paths are exhausted, leaving a forensic ledger. *Status: fail-safe trigger.*
+
+**Under the cards:**
+> Exhaustive capability partition is the mechanism. An Executor-owned tool can never be called by the Strategist, and vice versa. A wrong-owner call returns a typed `ToolAccessDenied` event and is written to the ledger.
+
+---
+
+### Block 5 — Live Inspector (interactive)
+
+**H2:** Interactive claim assessment
+
+**Body:**
+Under the anti-deception rule, narrow evidence can only support narrow claims. Pick a scenario and watch Lobe B evaluate what the Executor asserted against the raw sandbox STDOUT.
+
+**Controls:** `[ UNSUPPORTED ]  [ VERIFIED ]  [ CONTRADICTION ]`
+
+**Panel header:** Lobe B Claim Assessment
+
+**Default displayed state — CONTRADICTION:**
+
+> **FLAG: CONTRADICTION** — Severity: High (0.94)
+> Incompatible statements detected. The Executor asserted clean test completion while the pytest runner emitted exit code 1 with a cryptographic checksum failure.
+
+**Side-by-side panels:**
+
+Left — **What the Executor Lobe claimed (Model A output):**
+> "All 18 unit tests passed with zero regressions. S3 migration completed without errors."
+
+Right — **Empirical sandbox STDOUT (ground truth):**
+```
+pytest_runner // exit 1
+=== FAILURES ===
+AssertionError: sha256 mismatch: expected 9f8a... got a012...
+FAILED (failures=3, errors=0) in 2.14s. Exit code 1.
+```
+
+**Footer of the widget:**
+> Storage: `observer_claims` · Receipt: `X-Dual-Lobe-Claims`
+> The review is committed asynchronously to the PostgreSQL state store. Review state is inspectable, never silently discarded.
+
+---
+
+### Block 6 — The Dual Path Proxy Flow
+
+**H2:** The inference and telemetry pipeline
+
+**Body:**
+The Executor Lobe interacts directly with the caller, while the Strategist Lobe reviews asynchronously through a durable outbox — keeping critical-path latency untouched.
+
+**Pipeline diagram labels (left to right):**
+`CLIENT APP (OpenAI SDK)` → `DUAL-LOBE REVERSE PROXY GATEWAY :8801` → `LOBE A: EXECUTOR — tool runtime & token stream (0 ms critical-path lag)` → `DURABLE OUTBOX (async claim-review task)` → `LOBE B: STRATEGIST OBSERVER — senses, audits, cross-checks evidence` → `POSTGRES 16 evidence store: observer_claims`
+
+**Two mode cards side by side:**
+
+**Normal Mode — `model: lobe-a` — Zero-wait execution.**
+A responds normally. B reviews in the background via async outbox tasks. A never waits for B on the critical client path. *Primary use: production latency priority.*
+
+**Director Mode — `model: lobe-a-director` — conversational guidance.**
+Lobe B takes the conversational place, asks A follow-up questions, and directs another A turn — producing a visible, self-correcting A/B exchange. *Primary use: active alignment and deep tasks. Adds serial calls, time, and cost by design.*
+
+**Third card — recipient routing:**
+
+**Multi-agent arbiter — header `X-DL-Floor-ID`.**
+In shared rooms or swarms, Lobe B detects whether a turn is addressed to Model A and suppresses unaddressed chatter while still committing the context to memory. *Primary use: no talking over each other.*
+
+---
+
+### Block 7 — Live Execution Inspector
+
+**H2:** Live execution inspector
+
+**Tabs:** `Normal Mode (lobe-a)` · `Director Mode (lobe-a-director)`
+
+**Header line:** Execution paradigm: async background observer (0 ms critical-path lag) · Client route: `POST /v1/chat/completions {"model": "lobe-a"}`
+
+**Timeline (four steps):**
+
+**Step 01 — REQUEST: client dispatches turn.**
+Standard OpenAI SDK request received with model `lobe-a` and run identifier headers. *Latency added: 0.00 ms.*
+
+**Step 02 — STREAM: Lobe A streams directly.**
+The Executor executes sandbox tools and streams response tokens straight back to the caller with zero pause. *Direct critical-path stream.*
+
+**Step 03 — OUTBOX: post-response durable enqueue.**
+The proxy queues a decoupled background audit payload containing token claims and raw sandbox tool return buffers. *Queued: `job_88a319`.*
+
+**Step 04 — VERIFY: Lobe B audit and ledger write.**
+The Strategist reviews the raw pytest STDOUT, verifies the checksum, and commits immutable audit findings into PostgreSQL. *Audit state: reviewed.*
+
+**Emitted proxy headers and downstream state:**
+
+```
+oversight_status: reviewed
+X-Dual-Lobe-Memory: project-alpha:v4
+X-Dual-Lobe-Claims: verified
+X-Dual-Lobe-Monitoring: active
+X-DL-Outbox-Status: queued: job_88a319 (executed)
+```
+
+**State ledger:** accessible via `GET /v1/dual-lobe/state/run_89f02a`.
+**Guarantee line:** zero model blocking during token streaming.
+
+---
+
+### Block 8 — The Three Independent Paths
+
+**H2:** Three independent paths
+
+**Intro:**
+Dual-Lobe partitions epistemic management into three orthogonal pipelines. They are deliberately separate so that one cannot silently contaminate another.
+
+**Path 01 — Broadening and memory.**
+Counteracts agent tunnel vision. Maintains versioned context memory in PostgreSQL, reloaded automatically before eligible Executor invocations. *Receipt: `X-Dual-Lobe-Memory`.*
+
+**Path 02 — Anti-deception findings.**
+Evidence-linked claim concerns are stored separately from broadening content, as `observer_claims`, and attached directly to the Executor's next request. Categorized as `UNSUPPORTED`, `CONTRADICTION`, or `SUSPICIOUS_SHIFT`. *Receipt: `X-Dual-Lobe-Claims`.*
+
+**Path 03 — Awareness of monitoring.**
+A fixed developer/system instruction declares that the proxy and background observer exist, requires addressing the user, and demands accurate reporting of tool outcomes and verified proof. *Receipt: `X-Dual-Lobe-Monitoring`.*
+
+**Shared cross-app memory panel:**
+> Set `X-DL-Memory-ID: project-name` (defaults to `main`). The proxy reloads verified task context across separate repos, scripts, and containers, automatically, even when an app sends no prior chat history. It does **not** transfer tools, permissions, or a running agent's execution state between apps.
+
+---
+
+### Block 9 — Engineering Deployment
+
+**H2:** Run the proxy in sixty seconds
+
+**Body:**
+Packaged with Docker Compose. One command brings up the reverse proxy and the PostgreSQL state container. Development credentials only — do not publish the stack directly to the Internet.
+
+```
+# Clone and build the proxy service
+$ git clone https://github.com/anasalsawy/dual-lobe-proxy.git
+$ cd dual-lobe-proxy
+$ cp .env.example .env         # then set DUAL_LOBE_BOOTSTRAP_KEY (>= 24 random chars)
+$ docker compose up --build -d
+
+[+] Running 2/2
+ Container dual-lobe-postgres  Started
+ Container dual-lobe-proxy     Started  (listening on http://localhost:8801)
+```
+
+**Health checks:**
+```
+$ curl http://localhost:8801/healthz   # process liveness
+$ curl http://localhost:8801/readyz    # database + enabled Executor registry entry
+```
+> `/readyz` does not test provider credentials, Strategist worker liveness, or end-to-end model availability. Inspect state timestamps and worker logs for the Strategist.
+
+**Routing control headers table:**
+
+| Header | Example / values | Meaning |
+|---|---|---|
+| `X-DL-Run-ID` | `run_550e8400` | Deterministic run session; query review state with `GET /v1/dual-lobe/state/{run_id}`. Without it, every request is a new run and the Strategist cannot help later calls. |
+| `X-DL-Memory-ID` | `project-billing` (default `main`) | Persistent context key; reloads verified task context into eligible turns automatically. |
+| `X-DL-Floor-ID` | `shared-swarm-room` | Enables multi-agent recipient routing; suppresses responses not intended for Model A. A floor change prevents reuse of an old floor's note. |
+| `X-DL-Attempt` | `1, 2, 3` | Retry counter for resilient task loops and verification back-offs. |
+| `X-DL-Worker-ID` | `worker_agent_04` | Identifies the calling worker in distributed swarm pools. |
+| `X-Dual-Lobe-Mode` | `bypass` | Passes the prompt straight to the upstream provider without observation/injection. A caller preference, not a security permission. |
+| `X-DL-Agent-Role` | `analyst`, `auditor`, `lobe-b`, `b` | Analyst/auditor/analyst-style calls get neither Strategist injection nor new Strategist jobs. |
+
+**Quickstart client code:**
+```python
+from openai import OpenAI
+
+# 1. Point a standard client at the Dual-Lobe proxy gateway
+client = OpenAI(
+    base_url="http://localhost:8801/v1",          # Dual-Lobe proxy endpoint
+    api_key="YOUR_PROXY_SECRET",                  # proxy key, not the upstream provider key
+)
+
+# 2. Target the Executor Lobe with optional persistent memory and run tracking
+resp = client.chat.completions.create(
+    model="lobe-a",                                # or "lobe-a-director" for visible A/B guidance
+    extra_headers={
+        "X-DL-Memory-ID": "project-alpha",
+        "X-DL-Run-ID": "run_89f02a",
+        "X-DL-Floor-ID": "swarm-core",
+    },
+    messages=[{"role": "user", "content": "Run the test suite and verify the migration."}],
+)
+
+# The proxy appends receipts and audits via an async outbox
+print(resp.headers["X-Dual-Lobe-Claims"])          # e.g. 'verified'
+# Inspect state at GET /v1/dual-lobe/state/run_89f02a
+```
+
+**Inspection endpoint:**
+
+`GET /v1/dual-lobe/state/{run_id}` — `oversight_status`: `reviewed` | `degraded` | `stale`
+
+```json
+{
+  "run_id": "run_89f02a",
+  "memory_id": "project-alpha",
+  "oversight_status": "reviewed",
+  "receipts": {
+    "memory_receipt": "X-Dual-Lobe-Memory: synchronized",
+    "claims_receipt": "X-Dual-Lobe-Claims: verified",
+    "monitoring_receipt": "X-Dual-Lobe-Monitoring: active"
+  },
+  "findings": [
+    { "claim": "pytest passed", "status": "VERIFIED", "evidence_hash": "sha256:7a41e9b..." }
+  ]
+}
+```
+> `oversight_status: reviewed` means the Strategist's output contract passed validation. It does **not** mean the Executor's answer is true. `context_memory` and `claim_review` are reported separately. A null revision means no stored review.
+
+---
+
+### Block 10 — Engineering Realism
+
+**H2:** What Dual-Lobe guarantees — and what it does not
+
+**Intro:**
+No hyperbolic claims of "100% hallucination curing." Dual-Lobe is an advisory engineering architecture and reverse proxy with explicit boundaries.
+
+**Four positive cards:**
+
+**Advisory architecture.** Dual-Lobe acts as an asymmetric governor and observer proxy. It monitors claims, provides director prompts, and logs append-only evidence ledgers. It surfaces discrepancy before phantom errors cascade.
+
+**Asynchronous background verification.** In Normal Mode the primary model streams tokens directly to the caller with zero added latency on the critical path. The Strategist evaluates through an asynchronous outbox queue.
+
+**Schema validation and invariants.** Enforces structured JSON contracts, planning locks, and action-envelope constraints before high-risk tool execution side effects.
+
+**Append-only ledger auditability.** Claims, evaluations, and tool returns are captured in relational PostgreSQL tables. Post-run forensics can audit exactly where drift occurred.
+
+**No card (say this plainly too):**
+> Dual-Lobe cannot guarantee truth, infer intent from writing style, or prevent every fabricated statement. It does not implement Forge floors or CrewAI execution rules. It is a development implementation, not a verified production security boundary. A response already delivered cannot be retracted or corrected by a later review. Observation capture is best-effort after delivery and is not lossless audit logging: a process crash or failed background transaction can lose it. Deploy one gateway and one Strategist worker for the documented process-local budgets; for public, multi-process production use, separately validate rate limits, tenant roles, ingress limits, data retention, secrets, backup and recovery, and TLS.
+
+---
+
+### Block 11 — FAQ
+
+**H2:** Frequently asked questions
+
+**Q: What is the difference between Model A and Model B in the proxy?**
+Model A is the Executor Lobe. It calls functions, interacts with users or scripts, and holds code-execution privileges. Model B is the Strategist Lobe. It has no tool-mutation privileges, acts as a background auditor, and — in Director Mode (`lobe-a-director`) — takes conversational control to ask follow-up questions and guide Model A.
+
+**Q: How does multi-agent recipient routing prevent agents from talking over each other?**
+When you pass `X-DL-Floor-ID`, the proxy analyzes incoming multi-agent turns. If a speaker is addressing another agent or entity, Lobe B suppresses Model A from generating a spurious reply — while still committing the conversation into background memory, so context is never lost.
+
+**Q: What happens if the review worker fails or runs slowly?**
+The state endpoint reflects it explicitly: `oversight_status: degraded` or `stale`. Normal Mode responses are never held hostage to background evaluation lag. Note the trade-off honestly: review coverage can degrade silently from the user's point of view even though latency is unaffected — one measured session degraded on three of six reviews.
+
+**Q: Does this require proprietary model weights?**
+No. Dual-Lobe runs as an OpenAI-compatible reverse proxy in front of standard foundation models. It provides the dual-process architecture and verification runtime around any supported provider.
+
+**Q: Is this a prompt or an architecture?**
+An architecture. The four locks are enforced at the dispatch and state-machine layer, tool ownership is exhaustive and exclusive, inter-lobe messages are schema-validated, and the ledger is append-only. A wrong-owner tool call returns `ToolAccessDenied` and is logged.
+
+**Q: Does Dual-Lobe prove the model is telling the truth?**
+No, and it never claims to. The Strategist's job is to check material claims against the supplied record and label what is unsupported, contradictory, or unexplained. Missing evidence is not proof of fabrication. Confidence or tone alone is never a trigger for an accusation.
+
+**Q: What does it cost?**
+Reviews add a bounded second inference per eligible call (`DUAL_LOBE_B_MAX_OUTPUT_TOKENS` default 1400), plus optional state lookups and extra prompt tokens for memory and findings. Normal Mode never waits for the Strategist, but shared upstream capacity can still slow the Executor. Director Mode intentionally adds serial A/B calls, time, and cost.
+
+**Q: What is it not?**
+It is not a solution for malicious or systematically biased underlying models, collusion between two models with correlated training failures, compromised tools or forged evidence, policy errors encoded in the verifier, social or legal authorization questions, prompt injection without separate defenses, or the security of credentials and runtime infrastructure.
+
+---
+
+### Block 12 — Footer CTA
+
+**H2:** Open source. Experimental. Honest about both.
+
+**Body:**
+Evidence before success. Clone the repository, bring up Docker Compose, and repoint your OpenAI base URL to `localhost:8801`.
+
+**Buttons:** `View on GitHub` · `Copy Docker command` · `Read the spec`
+
+**Footer columns:**
+- **Architecture:** Executor vs Strategist · Four Hard Invariants · Three Independent Paths · Director & Recipient Routing
+- **Endpoints:** `POST /v1/chat/completions` · `GET /v1/dual-lobe/state/{run_id}` · `POST /v1/dual-lobe/events`
+- **Runtime:** Port `:8801` · Database: PostgreSQL 16
+- **Repositories:** github.com/anasalsawy/dual-lobe · github.com/anasalsawy/dual-lobe-proxy
+
+**Legal line:**
+> Dual-Lobe — Asymmetric dual-agent cognitive architecture and drop-in reverse proxy enforcing process isolation, evidence verification, and persistent memory. Documentation is published under CC BY-NC-SA 4.0. Software is open source; see the repositories for the current license files. Experimental research; no claim of superiority is made beyond measured conditions.
+
+---
+
+## 5. [PAGE] Architecture page
+
+**Title:** Architecture — how Dual-Lobe splits authority
+
+**Intro paragraph:**
+Dual-Lobe divides one task identity across two functionally specialized model processes that cannot complete important work independently. Cooperation is enforced by deterministic architecture — tool ownership, permission locks, typed communication, verification, and an append-only ledger — not merely requested in prompts.
+
+**Section — Two lobes, one identity.**
+The user interacts with one system and receives one final result. Behind that single identity sit two persistently separate processes. The Executor Lobe manipulates the environment: browser actions, file and code changes, API writes, deployments, messages, bookings, and other side effects. The Strategist Lobe senses, researches, critiques, checks policy and risk, authorizes actions, verifies outcomes, and curates memory. They share a workspace and durable memory, but no side-effecting or judgment tool is callable by both lobes.
+
+**Section — Why one process cannot do both.**
+Many agent systems ask a model to plan, act, and judge its own work. That creates a structural problem: the same process that makes an error may also certify that error as success. Existing evaluator–optimizer and multi-agent patterns improve separation of concerns, but cooperation is often optional, or both agents retain overlapping power and can certify each other's mistakes.
+
+**Section — The core research question.**
+Does mandatory functional specialization — enforced through tool asymmetry, permission locks, independent verification, structured communication, and durable state — produce more reliable autonomous agents than simpler baselines?
+
+**Section — Non-negotiable architectural invariants.**
+1. One task identity, two model processes.
+2. Exclusive tool ownership: no operational tool is callable by both lobes.
+3. No unilateral completion: the Executor cannot certify success; the Strategist cannot directly perform side effects.
+4. Evidence before success: a side effect is not complete until its evidence is independently verified.
+5. Typed communication: inter-lobe messages use validated schemas rather than unrestricted chat.
+6. Durable shared state: workspace, memory, ledger, and checkpoints survive process restart.
+7. Append-only audit trail: material permits, denials, actions, observations, verifications, and recovery events are attributable.
+8. Recovery before escalation: the system tries bounded internal alternatives before asking the user for information it could obtain itself.
+9. Human sovereignty: user authorization and external policy boundaries supersede the architecture.
+10. Complexity must earn its place: an optional module is removed if it does not improve evaluation outcomes.
+
+**Section — Components.**
+
+| Component | Responsibility |
+|---|---|
+| Task Orchestrator | Owns run state, lifecycle, checkpoints and scheduling |
+| Executor | Proposes and performs side-effecting actions |
+| Strategist | Researches, critiques, authorizes, verifies and curates |
+| Tool Router | Enforces exclusive tool ownership and action permits |
+| Shared Workspace | Run-scoped observations, files, artifacts and task state |
+| Shared Memory | Cross-run durable facts, lessons and reusable procedures |
+| Permission Ledger | Append-only causal/audit record |
+| Watchdog | Detects stalls, loops, silence and lost heartbeats |
+| Final Report Generator | Reconstructs outcome from verified ledger entries |
+
+**Section — Capability partition.**
+Executor-owned (change the environment): `browser_action`, `form_fill`, `click`, `submit`, `file_write`, `file_edit`, `code_modify`, `shell_execute`, `api_write`, `send_message`, `create_calendar_event`, `deploy_function`, `run_browser_automation`, `create_artifact`, `book`, `pay`, `delete`.
+Strategist-owned (sense, judge, authorize, verify): `web_research`, `memory_search`, `task_decomposition`, `risk_classifier`, `policy_checker`, `source_verifier`, `test_runner`, `artifact_validator`, `plan_critic`, `tool_registry_auditor`, `approval_gate`, `stall_detector`, `memory_curator`.
+Both lobes may read and write structured state through the Shared Workspace and Shared Memory interfaces — but those interfaces must not provide a hidden path around the Tool Router. Every tool record has exactly one owner; a wrong-owner call returns a typed `ToolAccessDenied` event and is written to the ledger.
+
+**Section — Dependency locks.**
+
+| Lock | Transition controlled | Release condition |
+|---|---|---|
+| Planning | draft plan → active plan | Strategist signs |
+| Action | proposed side effect → executable action | Strategist permit with scoped TTL |
+| Verification | raw action result → verified success | Strategist verifies evidence |
+| Escalation | internal blocker → user question | Strategist confirms bounded internal exhaustion |
+
+**Section — Inter-lobe protocol (schema-validated before dispatch).**
+```json
+{
+  "task_id": "string",
+  "run_id": "string",
+  "seq": 42,
+  "from_lobe": "executor | strategist",
+  "to_lobe": "strategist | executor",
+  "message_type": "plan_draft | plan_review | action_intent | permit | verify_request | verify_result | escalation_request | escalation_verdict | stall_report",
+  "payload": {}
+}
+```
+Schema failure is a protocol error. The runtime must not silently coerce malformed messages.
+
+**Section — Action intent, permit, verification result, escalation verdict.**
+```json
+{
+  "proposed_action": "fill booking form passenger details",
+  "tool_requested": "browser_action",
+  "expected_result": "form completed, not submitted",
+  "risk_level_guess": "low",
+  "needs_external_change": true,
+  "executor_confidence": 0.74,
+  "evidence_pointers": ["workspace://observations/screenshot-3.png"],
+  "question_for_strategist": "Do we have verified passenger names?"
+}
+```
+```json
+{
+  "decision": "permit | revise | block | research_needed",
+  "reason": "string",
+  "required_evidence": ["memory://passenger.name.verified"],
+  "allowed_tools": ["browser_action"],
+  "blocked_tools": ["submit", "pay"],
+  "next_instruction": "string",
+  "ttl_seconds": 120
+}
+```
+```json
+{ "outcome": "success | retry | repair | rollback", "evidence": ["workspace://observations/result.json"], "notes": "string" }
+```
+```json
+{ "verdict": "solve_internally | use_alternative_tool | create_tool | ask_user", "internal_workaround": "string", "user_question_if_needed": "string" }
+```
+
+**Section — Core control loop.**
+```
+USER TASK
+  ↓
+Executor interprets
+  ↓
+Strategist checks interpretation
+  ↓
+Executor drafts plan
+  ↓
+Strategist critiques/signs
+  ↓
+[Planning lock released]
+
+repeat:
+  Executor proposes action
+    ↓
+  Strategist researches / permits / revises / blocks
+    ↓
+  [Action lock released only on permit]
+    ↓
+  Executor executes through Tool Router
+    ↓
+  Strategist verifies independent evidence
+    ↓
+  [Verification lock released only on success]
+    ↓
+  Ledger + Workspace + checkpoint update
+
+until completion criteria are verified
+  ↓
+Final report reconstructed from ledger
+```
+This is intentionally not a generic "think → act" loop. The central design is alternating **proposal → independent gate → action → independent verification**.
+
+**Section — Tool creation and fallback.**
+A missing capability is a recoverable planning problem, not immediate user escalation. Before asking the user, evaluate bounded alternatives: an existing tool with an alternate method; a script or code-generated helper; an ephemeral function or sandbox; a browser-based workflow; a reversible manual workaround. Escalate only for genuinely unavailable secrets, approvals, identity claims, legal acceptance, or irreducibly human input. New tools must be registered with an exclusive owner and an explicit side-effect classification before use.
+
+**Section — Watchdog and anti-stall behavior.**
+Signals: no workspace update for `T_stall`; no inter-lobe message for `T_silence`; repeated identical plan hash; repeated identical failed tool call; expired permit; missed heartbeat on long-running activity; cyclic permit/revise messages without new evidence.
+Recovery: freeze side effects; snapshot current state; write `stall_report`; ask the opposite lobe for the smallest recoverable next step; narrow the action or decision surface; if both remain stuck, restore the latest **verified** checkpoint; escalate only after bounded recovery attempts. Recovery must be idempotent — restarting from a checkpoint must not repeat a previously verified side effect.
+
+**Section — Minimum data model.**
+```sql
+runs(id, task_id, status, started_at, ended_at, final_report_id);
+
+workspace_items(id, run_id, kind, uri, meta jsonb, created_at);
+
+memory_items(id, scope, key, value jsonb, provenance jsonb, confidence numeric, updated_at);
+
+ledger(id, run_id, seq, from_lobe, to_lobe, message_type, payload jsonb, created_at);
+
+tool_registry(name primary key, owner check(owner in ('executor','strategist')), schema jsonb, side_effects boolean, risk_class text);
+
+checkpoints(id, run_id, seq, snapshot jsonb, created_at);
+```
+The ledger is append-only. Checkpoints are taken after verified state transitions.
+
+**Section — Final report contract.**
+```json
+{
+  "task_requested": "string",
+  "task_understood": "string",
+  "plan_chosen": "string",
+  "strategist_objections": [],
+  "actions_completed": [
+    { "tool": "string", "result": "string", "verified_by": "strategist", "evidence": [] }
+  ],
+  "tools_used": [],
+  "tools_created": [],
+  "blockers": [],
+  "user_approvals_required": [],
+  "next_recommended_move": "string"
+}
+```
+Every claim about completed side effects must be traceable to ledger evidence. The report generator may compress verified records but may not invent facts absent from the ledger.
+
+**Section — Proxy implementation reality check (what is wired today vs. what is specified).**
+The proxy is the working implementation of the observation layer, not the full locked-runtime specification.
+- Implemented: OpenAI-compatible proxying of text Chat Completions; background Strategist review through a durable outbox; shared memory; Director Mode; recipient routing; monitoring reminders; claim findings; state inspection; append-only Postgres tables; per-process budgets.
+- Not implemented in the proxy: Forge floors, CrewAI execution rules. Legacy `integrity-observed` / `integrity-intervened` / `enforcement` stage names are advisory only — they do not hold, block, or force verification. `POST /v1/verify` returns 410.
+- Retired: old Strategist retry, fail-closed, spend-unit, enriched-bootstrap, and Firecrawl settings. Redis and LiteLLM are no longer dependencies.
+- Requires migrations 0002 (director sessions) and 0003 (shared memory). Run initialization when upgrading.
+- Disabled: the Responses API, image/audio processing, and public inference via `lobe-b`.
+
+---
+
+## 6. [PAGE] Anti-Deception page
+
+**Title:** Anti-Deception — evidence before success
+
+**Hero line:**
+> The rule is one sentence long. Enforcing it is an architecture.
+
+**Section — The rule.**
+"Narrow evidence may support only a narrow claim." Everything else on this page is machinery for applying that rule without turning it into theater.
+
+**Section — Why self-checking fails.**
+LLMs prioritize plausible storytelling. When an agent checks its own work, it reads its own prior tokens through the same attention weights that generated them, which tends to validate its own phantom assumptions. The agent is not lying; it is completing a pattern. The failure is structural, so the fix must be structural.
+
+**Section — The assessment engine.**
+The Strategist receives the original goal, the bounded context, the Executor's output, the recent reported events, and relevant prior memory and findings. It makes one bounded model call — no tool use, no retrievals — and returns a strict JSON contract: the goal restated, two questions, one next step, two context notes, and separately, up to three concerns. The output is checked for schema, length, allowed labels, and exact quoted substrings. **A malformed or ungrounded review becomes `degraded`, never "clean" or "verified."**
+
+**Section — The three labels, precisely defined.**
+- **UNSUPPORTED** — a material claim lacks matching evidence in the supplied record.
+- **CONTRADICTION** — the Strategist identifies incompatible supplied statements and quotes both.
+- **SUSPICIOUS_SHIFT** — a change lacks an explanation in the supplied record.
+All three are **model assessments, not verdicts**. Missing evidence is not proof of fabrication. Confidence or tone alone is not a trigger for an accusation.
+
+**Section — The funnel (keep this honest).**
+Hallucination → material claim → claim finding → claim concern. Only some material claims are reviewable; only some of those produce findings; only some findings count as concerns. The remaining residue is what the architecture is measured on — and why the project publishes a false-success metric rather than a suppression percentage.
+
+**Section — What the Strategist's prompt is for.**
+For a blocker, the Strategist asks: what goal was replaced by a tactic, which prerequisite is missing, what alternative explains the evidence, and what small authorized check would distinguish the alternatives. It does not seek permission bypasses. For integrity, it inspects material completion and action claims, inconsistencies, missing receipts, and unsupported shifts in certainty.
+
+**Section — Worked example: the phantom green checkmark.**
+Scenario: the Executor claims all tests passed. The record contains `exit 1`, a checksum mismatch, and `FAILED (failures=3, errors=0)`.
+Result: `CONTRADICTION`, severity high. Two supplied statements are incompatible: the assertion of clean completion and the runner's exit code. Both are quoted. The finding is attached to the Executor's next eligible request as `observer_claims`.
+
+**Section — Worked example: narrower evidence, narrower claim.**
+Scenario: the Executor claims the migration "completed with validation."
+Record shows: connection established, three of five tables migrated, process exited 0 after a partial run, no schema diff captured.
+Result: `UNSUPPORTED` for the validation portion of the claim. The narrow evidence (three tables, exit 0) supports only the narrow claim (three tables migrated, process exited 0). It does not support "completed" or "validated."
+
+**Section — Worked example: the unexplained shift.**
+Scenario: early turns express high uncertainty about an API's rate limits; a later turn states the limits as established fact with no tool call or source in between.
+Result: `SUSPICIOUS_SHIFT`. The record does not explain the change. The label does not accuse; it flags that the shift has no trace.
+
+**Section — Why review status is not truth status.**
+`oversight_status: reviewed` means the Strategist's output passed its contract. It does not mean the Executor's answer is true. This distinction is printed in the API response documentation, in the state payload, and on this page, because conflating them would be exactly the kind of plausible-but-wrong claim the architecture exists to catch.
+
+**Section — Measured honesty.**
+In a published six-turn paired assessment (same model, same provider, differing only in transport), Normal Mode added no perceptible latency (median time-to-first-token 587 ms with the proxy vs 626 ms direct; total median 1097 ms vs 1505 ms), responses were terser with structure and accuracy preserved, and cross-turn continuity against the persisted memory goal was noticeably smoother than the direct baseline, which temporarily lost the thread. The same session also recorded the architecture's weakest link plainly: the Strategist's review output failed strict JSON validation on **three of six reviews** (`degraded`), and one state read was unavailable — both invisible to the user because the system fails open, but both reducing the observer's usefulness. That is what "measured, not marketed" looks like in practice.
+
+---
+
+## 7. [EDU] Learn page — the careful explainer
+
+**Title:** Learn — how to think about agent reliability
+
+**Section — The two failure modes people confuse.**
+
+*First: the model does not know something.* It answers anyway, fluently. This is the familiar hallucination problem, and it is a knowledge and calibration problem.
+
+*Second: the model knows the state of the world but misreports its own actions.* It ran a command that failed, then summarized success. It never fetched the file, then described its contents. This is not a knowledge problem — it is a **reporting-integrity** problem, and it is the one Dual-Lobe targets. Crucially, it is not solved by a bigger model. A model that is confidently wrong about its own tool calls is confidently wrong at any parameter count.
+
+**Section — Why "the agent checks itself" is not a fix.**
+Self-critique reads the same transcript that produced the error, through the same weights. If the error was produced by a plausible-sounding token sequence, the critique reviews a plausible-sounding token sequence. You get agreement, not verification. The fix requires something external to the generating process: a separate process, a stored record, and a rule about what that record can and cannot support.
+
+**Section — The three things verification actually needs.**
+1. **A record.** Evidence must be captured somewhere the generator cannot rewrite — a returned tool buffer, an exit code, a checksum, a stored observation.
+2. **An independent reader.** Some process that is not the generator must compare claim to record.
+3. **A stated rule.** Not "is this plausible?" but "does this evidence support this specific claim?" — the narrow-evidence rule.
+
+**Section — The neuroscience analogy, used correctly.**
+Dual-Lobe borrows functional motifs from neuroscience: functional specialization between the two hemispheres, interhemispheric communication, attention gating, prediction error, replay, action selection, global broadcasting, bounded working memory, and neuromodulatory control. The mapping is deliberately functional and approximate. Neuroscience does not support a simple "left brain plans, right brain executes" story, so the project uses **Strategist** and **Executor** as engineering roles rather than literal hemispheric identities. It is not a biological model of the human brain and makes no claim of reproducing consciousness or literal hemispheric function.
+
+**Section — Optional modules and the ablations that police them.**
+The core system does not require the neuroscience-inspired modules. Each must earn its place against an ablation:
+- **Compressed cross-lobe handoff** (interhemispheric-communication analogy): each lobe emits a compact packet — goal, constraints, key facts, open questions, surprises, confidence — instead of raw scratchpad transfer. *Hypothesis:* compression reduces context growth and forces explicit uncertainty representation. *Risk:* important latent information may be lost.
+- **Attention gate** (thalamic-control analogy): candidate context items bid for inclusion using relevance, novelty, urgency, and confidence; only top-ranked items enter active context.
+- **Salience switch** (salience / task-switching analogy): a controller shifts between active-task mode and background consolidation based on novelty, urgency, and idle time.
+- **Prediction-error loop** (predictive-coding analogy): the Strategist records predicted outcomes before execution and compares actual outcomes after; large deviations create a high-priority error signal.
+- **Episodic replay** (hippocampal-replay analogy): low-confidence or high-surprise traces are periodically replayed to distill candidate reusable rules with provenance — never promoted to durable memory without evidence and later validation.
+- **Skill cache** (cerebellar-learning analogy): verified successful procedures compile into reusable skills, each storing an expected-result distribution; repeated prediction mismatch demotes the skill back to supervised execution.
+- **Action-selection gate** (basal-ganglia analogy): competing actions receive GO / NOGO / HOLD decisions based on risk, cost, policy, recent failure history, and expected value. This is an engineering analogy, not a neural simulation.
+- **Global broadcast** (global-workspace analogy): independent modules submit high-priority information to a shared active-context surface; a bounded subset is broadcast to both lobes. Borrows a functional motif without claims about consciousness.
+- **Bounded working memory** (working-memory-capacity research): a small explicit set of active task slots — goal, critical constraint, current blocker, last surprise — with relevance-based replacement. The number of slots is a tunable engineering parameter, not a biological constant.
+- **Adaptive control state** (neuromodulatory systems): transparent control scalars such as `caution`, `exploration`, `patience`, `memory_write_rate`, and `verification_depth`, updated by events under deterministic bounds. Names like "dopamine" or "serotonin" belong in diagrams and analogy notes — never as claims that scalar updates model actual neuro-modulatory biology.
+
+**Section — Why baselines are the whole point.**
+A reliability architecture that is not compared to anything is a story, not a result. The evaluation plan uses at minimum: a single tool-using agent (B0); a single agent with self-critique (B1); an evaluator–optimizer pair with shared tools and context (B2); a planner/executor pair with shared tools (B3); a two-agent shared-tool system with an independent verifier (B4); the Dual-Lobe core (D0); and ablations D1–D4. **If D0 performs as well as the full experimental set, prefer D0.** Simplicity wins ties by default.
+
+**Section — The one metric to watch.**
+**False-success rate** — the fraction of runs where the system reports completion that did not actually occur. Everything else (task success, unauthorized side effects, recovery after injected failure, duplicate side effects after restart, escalation rate, latency, tokens and cost, communication overhead) is context for reading that number. Secondary metrics include verified task success rate, partial-completion rate, side effects accepted without sufficient verification, repeated-identical-failure rate, and unnecessary user escalation rate.
+
+**Section — What error decorrelation means, and why it is the honest test.**
+The strongest argument for independent verification is that two separate processes make *different* mistakes. If both lobes fail in the same direction as often as one model, the independent-verification rationale is weakened. So the evaluation classifies errors as executor-only, strategist-only, shared/correlated, or recovered-after-feedback, and compares same-model vs. different-model-family configurations. Ideally, use different model families or providers where feasible rather than two identical calls to the same checkpoint.
+
+**Section — Failure injection (how you test recovery honestly).**
+Inject reproducible faults: kill the process after an action but before verification; kill after verification but before report; time out a permit; return malformed tool data; return stale browser state; fail a tool twice identically; corrupt a non-authoritative workspace item; simulate network outage; present contradictory sources. **Expected property:** the system returns to the last verified state without silently duplicating external actions.
+
+**Section — The compressed-channel experiment.**
+Compare raw shared-context communication against typed, bandwidth-limited handoffs. Measure task success, context/token growth, open-question retention, constraint loss, contradiction rate, correlated errors, and latency. **Reject the module if compression saves tokens but materially increases missed constraints.**
+
+**Section — Statistical reporting rules.**
+Report number of tasks/runs; model names and versions; temperature and tool configuration; confidence intervals where appropriate; raw failure counts, not only percentages; cost and latency; and negative results and regressions. Avoid conclusions broader than the tested environments. Do not interpret passing deterministic tests as measured hallucination reduction.
+
+---
+
+## 8. [PAGE] Research page
+
+**Title:** Research — what we claim, and what would falsify it
+
+**Section — Status, stated first.**
+This is an experimental design and research specification, not a peer-reviewed neuroscience theory, and not evidence that the architecture outperforms simpler agents. No claim of superiority should be inferred until controlled evaluation is run against explicit baselines. The current version of the research specification is 1.1.0, last updated 2026-08-24. The proxy is version 0.4.
+
+**Section — The hypothesis, in one sentence.**
+Can enforced functional specialization and constrained cross-module communication reduce false success, unsafe side effects, correlated errors, and unrecoverable stalls in long-running AI agents?
+
+**Section — The research hypotheses.**
+
+| ID | Hypothesis |
+|---|---|
+| H1 | Independent verification: hard tool asymmetry reduces false-success declarations compared with shared-tool two-agent and self-critique baselines. |
+| H2 | Side-effect control: permission locks reduce unauthorized or weakly supported external actions. |
+| H3 | Error decorrelation: constrained, structured inter-lobe communication reduces correlated reasoning failures relative to shared-context agents. |
+| H4 | Recoverability: checkpoint + ledger recovery reduces duplicated side effects and abandonment after process/tool failure. |
+| H5 | Context efficiency: bandwidth-limited handoffs preserve task-relevant state with lower context growth, though they may hurt tasks that require high-bandwidth joint reasoning. |
+| H6 | Adaptive control: prediction-error, salience, working-memory, replay, and action-gating modules improve long-horizon reliability **only if** they produce measurable gains over the simpler core architecture. |
+
+**Section — What is genuinely novel here.**
+This project does not claim that generator/evaluator separation itself is new. Related work includes evaluator–optimizer workflows, cooperative specialized agents (for example, ConAgents' specialization across tool selection, execution, and calibration), and planner/executor/evaluator architectures, as well as Tool-RoCo's findings on cooperation and self-organization, which motivate directly testing whether optional cooperation is underused by LLM agents. The research contribution being explored is the **combination of hard architectural constraints**: mutually exclusive tool ownership; independent permission and verification gates; a bandwidth-limited typed inter-lobe channel; no unilateral completion; checkpoint recovery from the last verified state; a ledger from which success must be reconstructable; and optional cognition-inspired modules treated as engineering mechanisms, not biological claims.
+
+**Section — The relationship to Dialogue OS.**
+Dialogue OS is a broader constitutional and operational framework for persistent multi-agent organizations. Dual-Lobe is an experimental research track focused on intra-agent, task-unit reliability. A future implementation could use a Dual-Lobe unit as a Worker or Lead inside a Dialogue OS organization, but neither specification depends on the other.
+
+**Section — Cost honesty: what the architecture may cost.**
+Higher latency and token usage from dual inference; verifier bottlenecks; coordination deadlocks; false blocks from conservative gating; information loss from compressed handoffs; correlated failures when both lobes use closely related models or training data; over-engineering relative to simpler evaluator–optimizer systems. These are features to measure, not hide.
+
+**Section — Safety and threat model: what it attempts to reduce.**
+Self-certification of hallucinated success; unauthorized external side effects; silent tool misuse; duplicate actions after restart; unbounded retry loops; asking the user for avoidable decisions; memory contamination from unverified outcomes; action/verification collision caused by shared powers.
+
+**Section — And what it does not solve.**
+Malicious or systematically biased underlying models; collusion between two models with correlated training failures; compromised tools or forged evidence; policy errors encoded in the verifier; social or legal authorization questions; prompt injection without separate defenses; the security of credentials or runtime infrastructure.
+
+**Section — Conformance tests (a conforming implementation must pass at minimum).**
+1. Executor calls a Strategist-owned tool → `ToolAccessDenied`, logged.
+2. Strategist calls an Executor-owned tool → `ToolAccessDenied`, logged.
+3. Action without an active permit → blocked before dispatch.
+4. Expired permit → blocked.
+5. Completion without verification evidence → impossible state transition.
+6. User escalation without an exhaustion verdict → blocked.
+7. Process death mid-run → resumes from the latest verified checkpoint.
+8. Resume does not duplicate verified side effects.
+9. Final-report claim lacking ledger evidence → validation failure.
+10. Tool registry contains no shared operational-tool owner.
+11. Mutation of a prior ledger entry → rejected.
+12. Optional module disabled → the core architecture still runs.
+
+**Section — Evaluation requirements.**
+Complexity is justified only by measurable improvement. Before calling the architecture successful, compare it against the baselines in `EXPERIMENTS.md`, report negative results, and publish: task success; false-success rate; unsafe/unauthorized side-effect rate; verification precision and recall where ground truth exists; recovery success after injected faults; duplicate side effects after restart; user-escalation rate; latency; tokens and cost; communication overhead; and ablation results for optional modules.
+
+**Section — Reference implementation stack (framework-agnostic).**
+TypeScript or Python runtime; an explicit state machine or LangGraph-style graph; PostgreSQL for ledger, memory, and workspace metadata; object storage for screenshots and artifacts; JSON Schema, Pydantic, or Zod for protocol validation; durable activities via Temporal, Inngest, Trigger.dev, or equivalent; OpenTelemetry traces keyed by `run_id`; two independently configurable model providers — different families where feasible.
+
+**Section — Milestones and definition of done.**
+M1 — deterministic substrate: tool registry, exclusive router, append-only ledger, state machine, schemas.
+M2 — two lobes online with planning and action locks.
+M3 — independent verification, checkpoints, watchdog, idempotent restart.
+M4 — real tools: browser, files, APIs, code, research/test tools.
+M5 — evaluation harness: baselines, failure injection, ground-truth tasks, metrics dashboard.
+M6 — cognition-inspired ablations: add optional modules one at a time; keep only those with measurable benefit.
+A v1 research prototype is complete when the core conformance suite passes; at least three baseline architectures are implemented; controlled failure injection is reproducible; results include success and false-success rates; cost and latency trade-offs are reported; optional modules have ablation results; and no claim of superiority is made beyond measured conditions.
+
+**Design principle to close on:**
+> Architecture should constrain authority and preserve evidence; models should retain freedom to reason within those boundaries.
+
+---
+
+## 9. [PAGE] Docs quickstart page (condensed from the repository README)
+
+**Title:** Quickstart
+
+**Prerequisites:** Docker Compose. This stack uses development database passwords and binds host ports to loopback. Do not publish it directly to the Internet.
+
+**Steps.**
+1. Copy `.env.example` to `.env`.
+2. Replace `REPLACE_WITH_A_RANDOM_SECRET` in `DUAL_LOBE_BOOTSTRAP_KEY` with a random secret of at least 24 characters (`openssl rand -hex 32` can generate one). Keep the scope/tenant suffix. No predictable default API key is created.
+3. Set `DUAL_LOBE_A_MODEL`, `DUAL_LOBE_A_BASE_URL`, and `DUAL_LOBE_A_API_KEY` for your OpenAI-compatible provider. The model ID must exist there.
+4. Optionally set `DUAL_LOBE_B_MODEL`, `DUAL_LOBE_B_BASE_URL`, and `DUAL_LOBE_B_API_KEY`. Omit them to inherit A. An explicitly empty Strategist key does **not** inherit A's key. A separate quota/provider reduces resource contention.
+5. Run:
+```sh
+docker compose up --build -d
+docker compose logs initialize gateway b-worker
+curl http://localhost:8801/healthz
+curl http://localhost:8801/readyz
+```
+
+Only the `initialize` service runs migrations/bootstrap, including v0.4 migrations 0002 (director sessions) and 0003 (shared memory). It must succeed before the gateway and worker start. Re-running bootstrap does not duplicate existing keys or reactivate revoked keys. Existing development keys from older versions are not automatically revoked: rotate them before sharing the service.
+
+**Connect your application.**
+Point a Chat Completions client at `http://localhost:8801/v1`, use your **proxy** API key (not the upstream provider key), and select model `lobe-a`. Choose `lobe-a-director` for the visible director loop. Both routes load shared memory by default.
+
+Set a stable `X-DL-Run-ID` for one conversation or task. Without it, each request is a new run, so the Strategist cannot help subsequent calls. You can reuse the returned internal `X-Dual-Lobe-Run-Id` as the next request's `X-DL-Run-ID`.
+
+```sh
+curl -N http://localhost:8801/v1/chat/completions \
+  -H 'Authorization: Bearer YOUR_PROXY_SECRET' \
+  -H 'Content-Type: application/json' \
+  -H 'X-DL-Run-ID: example-task-1' \
+  -H 'X-DL-Floor-ID: implementation' \
+  -H 'X-DL-Attempt: 1' \
+  -d '{"model":"lobe-a","stream":true,"messages":[{"role":"user","content":"Explain the smallest next step for this task."}]}'
+```
+
+Send normal conversation history, including tool calls and their actual results. The Strategist sees only what the proxy receives; it cannot discover unreported execution.
+
+**Read the Strategist's latest state.**
+```sh
+curl http://localhost:8801/v1/dual-lobe/state/example-task-1 \
+  -H 'Authorization: Bearer YOUR_PROXY_SECRET'
+```
+`payload.oversight_status` is `reviewed`, `degraded`, or `stale`; a null revision means no stored review. "Reviewed" means the output contract passed, not that the Executor's answer is true. `payload.context_memory` and `payload.claim_review` are separate. `payload.context_memory_status` reports memory freshness independently.
+
+**Context receipts in Normal Mode.** `X-Dual-Lobe-Memory` is `vN`, `none`, `stale`, `scope_mismatch`, `disabled`, or `unavailable`; `X-Dual-Lobe-Claims` describes the claim-finding route; `X-Dual-Lobe-Monitoring` is `on` or `off`. They do not independently prove upstream receipts or that the model followed the notes. `X-Dual-Lobe-Observer` retains the overall lookup status. A matching `worker_call` event records `observer_delivery` after response delivery. `X-Dual-Lobe-Memory-Space` names the shared space or `off`; `X-Dual-Lobe-Shared-Entries` counts the selected journal entries. Director Mode reloads memory per internal Executor turn and reports `per-turn` for observer channels.
+
+**Post external results.** Optional external results can be posted to `/v1/dual-lobe/events` with `kind`, `run_id`, `payload`, and `idempotency_key`. They are stored as `client_event` / `client_reported`, even if the caller labels them "verified." They enrich the next scheduled review; event ingestion does not itself call the Strategist.
+
+**Development and tests.**
+```sh
+uv sync --locked --extra dev
+uv run --locked pytest tests/unit -q        # offline fixtures only
+uv run --locked python -m dual_lobe.demo    # prints exactly how the three paths are assembled
+uv run --locked pytest -q                   # requires a permitted Docker daemon; disposable Postgres
+```
+Live conversation against the running Compose stack:
+```sh
+docker compose exec gateway python -m dual_lobe.client --run our-first-test
+docker compose exec gateway python -m dual_lobe.client --director --memory-id main --run director-test-1
+```
+`/state` shows the Strategist's current memory and findings; `/director` and `/normal` switch modes; `/new` starts a fresh run while keeping the selected shared memory space. Native execution requires PostgreSQL, explicit `DATABASE_URL` and `RLS_DATABASE_URL`, `alembic upgrade head`, `python -m dual_lobe.core.bootstrap`, then `uvicorn dual_lobe.api.app:app --port 8801` and `python -m dual_lobe.b.worker` in separate processes.
+
+**Main controls reference.** (Defaults shown.)
+
+| Setting | Default | Actual meaning |
+|---|---|---|
+| `DUAL_LOBE_B_ENABLED` | true | Enable background observation and Strategist context |
+| `DUAL_LOBE_OBSERVATION_REMINDER` | true | Fixed monitoring instruction on observed Executor calls |
+| `DUAL_LOBE_MONITORING_ROLE` | system | `system` or `developer`; use a role your provider supports |
+| `DUAL_LOBE_CONTEXT_MEMORY_ENABLED` | true | Maintain and auto-load broadening memory |
+| `DUAL_LOBE_CLAIM_CHECKS_ENABLED` | true | Review material claims and deliver findings in the request |
+| `DUAL_LOBE_CONTEXT_MEMORY_TTL_SECONDS` | 86400 | Memory's independent observation-age limit |
+| `DUAL_LOBE_MAX_MEMORY_CHARS` | 1600 | Maximum loaded broadening-memory message size |
+| `DUAL_LOBE_ROLLOUT_STAGE` | context | `context` loads both routes; `observation` adds only the monitoring instruction |
+| `DUAL_LOBE_PULSE_EVERY` | 1 | Eligible calls per run between enqueues |
+| `DUAL_LOBE_B_COOLDOWN_SECONDS` | 0 | Optional skipping of closely spaced reviews |
+| `DUAL_LOBE_B_RPM_LIMIT` | 20 | Per-tenant, per-worker-process Strategist call budget |
+| `DUAL_LOBE_WORKER_MAX_CONCURRENCY` | 2 | Maximum concurrent jobs per worker process |
+| `DUAL_LOBE_B_TIMEOUT` | 20 s | Whole Strategist model operation deadline; one attempt |
+| `DUAL_LOBE_B_MAX_OUTPUT_TOKENS` | 1400 | Requested Strategist output-token cap |
+| `DUAL_LOBE_MAX_SHADOW_INPUT_CHARS` | 18000 | Complete Strategist user-prompt cap, plus fixed system prompt |
+| `DUAL_LOBE_MAX_INJECTION_CHARS` | 1200 | Maximum direct claim-finding message size |
+| `DUAL_LOBE_B_STATE_TTL_SECONDS` | 180 s | Claim-finding freshness and queued-observation age limit |
+| `DUAL_LOBE_B_STATE_READ_TIMEOUT` | 0.025 s | Optional state-read deadline |
+| `DUAL_LOBE_A_RETRIES` | 1 | Total buffered Executor attempts; streams are never replayed |
+
+**Compatibility and limitations.**
+Supported request fields are explicitly declared in `schemas.py`: messages, streaming, tools, tool choice, parallel tool calls, standard sampling/token limits, response format, seed, and reasoning effort. Unknown fields return 422 instead of silently disappearing; provider support for any forwarded option still varies. The Responses API, image/audio processing, and public inference via `lobe-b` are disabled. `POST /v1/verify` returns 410; the old file checker is not connected to the runtime. Legacy claim/evidence tables remain readable for existing data. Successful v2 state is converted on read without changing its observation time; new writes use v3 with separate `context_memory` and `claim_review` fields.
+
+Normal Mode's lack of a Strategist model wait does not mean literally zero overhead: authentication, database run lookup, optional 25 ms state lookup, network/proxy work, and additional prompt tokens still cost time. Shared memory adds database reads/writes and selected history tokens. Director Mode intentionally adds serial A/B calls, time, and cost. Shared upstream capacity can slow the Executor. A response already delivered cannot be retracted or corrected by a later review.
+
+Observation capture is best-effort after delivery, not lossless audit logging. A process crash, disconnect, or failed background transaction may lose it. Durable outbox jobs are idempotent once committed. Stale jobs and close-together reviews may be skipped; the Strategist does not review every claim, nor necessarily every call. Configuring a different Strategist provider sends the bounded observed context to that provider. Known-secret redaction is not comprehensive data-loss prevention.
+
+---
+
+## 10. [META] Site-wide FAQ and short answers
+
+*(For a compact help center or a support widget. Each answer is one or two sentences, defensible from the repositories.)*
+
+**What is Dual-Lobe in one sentence?**
+An open-source reverse proxy that splits one AI task across two model processes with asymmetric powers — an Executor that acts and a Strategist that senses, critiques, authorizes, and verifies evidence before anything counts as success.
+
+**Is it a plugin, a prompt, or a framework?**
+It is in readme-and-specification form both: a working OpenAI-compatible reverse proxy (v0.4) and a technical architecture specification for a conforming locked runtime. The proxy implements the observation and memory layer; the specification describes the full lock-enforced runtime with an exclusive tool router and checkpoint recovery.
+
+**Do I have to change my code?**
+Point your OpenAI SDK `base_url` at `http://localhost:8801/v1`, use your proxy key, and choose `lobe-a`. Your app continues to execute the Executor's tools. Optional headers (`X-DL-Run-ID`, `X-DL-Memory-ID`, `X-DL-Floor-ID`) unlock run tracking, persistent memory, and multi-agent routing.
+
+**What is Director Mode?**
+Set `model: lobe-a-director`. Lobe B takes the conversational place, asks A follow-up questions, and directs another A turn — producing a visible, self-correcting A/B dialogue. It intentionally adds serial calls, time, and cost.
+
+**How do I know a review happened?**
+Check the emitted headers (`X-Dual-Lobe-Memory`, `X-Dual-Lobe-Claims`, `X-Dual-Lobe-Monitoring`, `X-DL-Outbox-Status`) and query `GET /v1/dual-lobe/state/{run_id}`, where `oversight_status` is `reviewed`, `degraded`, or `stale`.
+
+**What does "degraded" mean?**
+The Strategist's review output failed its contract — for example, strict JSON schema validation, length limits, allowed labels, or exact quoted substrings. A degraded review is not "clean" and is never reported as "verified."
+
+**Is my data sent to a second provider?**
+Only if you configure a different Strategist provider. If you do, the bounded observed context is sent to that provider — so choose accordingly.
+
+**Can the Strategist block a side effect?**
+In the proxy, the review is advisory and asynchronous — it does not hold the response. In the specification's conforming runtime, the Action Lock blocks unauthorized side effects at the dispatch layer. The site should always state which of the two you are describing.
+
+**What is the smallest useful deployment?**
+One gateway and one Strategist worker with the documented process-local budgets, backed by PostgreSQL, bound to loopback for development.
+
+**What should I not use it for?**
+As a truth guarantee, a legal or social authorization mechanism, a defense against malicious or systematically biased base models, a substitute for credential and infrastructure security, or a prompt-injection defense without separate mitigations.
+
+---
+
+## 11. [PROMO] Launch announcement (long-form blog / LinkedIn / Reddit r/LocalLLaMA post)
+
+**Title:** I built an AI agent architecture where the model has to show its work
+
+**Body:**
+Every agent developer knows the feeling. The agent says the tests passed. The tests did not pass. You spend an hour and a half finding out, then another hour understanding why the summary was so confident.
+
+The usual fix is to ask the model to check itself. That does not work, and the reason is structural: when an agent self-checks, it reads its own tokens through the same attention weights that produced them. It reviews a plausible story with a plausible story. Agreement, not verification.
+
+Dual-Lobe takes a different route. It splits one task across two model processes with deliberately unequal powers.
+
+The **Executor Lobe** acts. It streams responses and runs tools with zero critical-path wait. Your app keeps executing its tools exactly as before.
+
+The **Strategist Lobe** senses, critiques, authorizes, and verifies. It has no tool-mutation privileges. In Normal Mode it reviews through a durable outbox, after delivery, off the critical path. In Director Mode it takes the conversation, asks follow-up questions, and directs another Executor turn — a visible A/B exchange.
+
+Around both sit four hard invariants: a **Planning Lock** (no plan is active until the Strategist signs it), an **Action Lock** (side effects are blocked until permitted), a **Verification Lock** (an action is not complete until evidence is verified), and an **Escalation Lock** (recover internally before bothering the user).
+
+And one rule runs through all of it: **narrow evidence may support only a narrow claim.**
+
+When the Executor says the suite passed and the record shows `exit 1` and a checksum mismatch, the Strategist labels it `CONTRADICTION` and quotes both sides. When the Executor claims a migration "completed with validation" and the record shows three of five tables and no schema diff, it labels the validation portion `UNSUPPORTED`. When certainty jumps with nothing in the record to explain it, it labels a `SUSPICIOUS_SHIFT`. These are model assessments, always advisory — missing evidence is not proof of lying.
+
+It is a drop-in reverse proxy. `docker compose up -d`, point your SDK at `localhost:8801`, pick `lobe-a`. Or `lobe-a-director` for the visible loop. Shared memory carries verified context across apps with `X-DL-Memory-ID`. Multi-agent rooms stop talking over each other with `X-DL-Floor-ID`. Every review is inspectable at `/v1/dual-lobe/state/{run_id}`.
+
+Two things I want to be blunt about, because the whole project is about not overclaiming.
+
+First, "reviewed" does not mean "true." It means the Strategist's output contract passed validation.
+
+Second, in a published six-turn measured session, latency was unaffected (median time-to-first-token 587 ms with the proxy vs 626 ms direct) and replies were terser with accuracy preserved — but the Strategist's own JSON review failed validation on three of six turns and one state read failed. Fail-open hid it from the user. That is the weakest link, and it is documented rather than buried, because an anti-deception system that hides its own failure rate would be a joke.
+
+If you are building long-running agents and you are tired of phantom green checkmarks, the repos are open. The research specification publishes its baselines and falsification criteria; the proxy is the working observation layer. Try it, break it, and tell me where the Strategist is wrong.
+
+**Suggested closing line:**
+> Evidence before success — and if there is no receipt, it is not a result.
+
+---
+
+## 12. [PROMO] Social thread (X / Twitter, ten posts)
+
+1. Your agent said the tests passed. The tests did not pass. The problem is not honesty — it is architecture. 🧵
+2. Self-critique does not fix this. The model reads its own tokens through the same weights that made the error. You get agreement, not verification.
+3. Dual-Lobe split the job: Executor Lobe acts and streams with zero critical-path wait. Strategist Lobe senses, critiques, authorizes, verifies — and has no ability to mutate tools.
+4. Four hard invariants: Planning Lock. Action Lock. Verification Lock. Escalation Lock. Cooperation enforced at the runtime, not requested in a prompt.
+5. One rule: narrow evidence may support only a narrow claim. Claim says "migration validated." Record shows 3 of 5 tables and no schema diff. → `UNSUPPORTED`.
+6. Three labels: `UNSUPPORTED`, `CONTRADICTION`, `SUSPICIOUS_SHIFT`. All model assessments, all advisory. Missing evidence is never proof of lying.
+7. Drop-in. `docker compose up -d`, point your OpenAI SDK at `localhost:8801/v1`, pick `lobe-a`. The director loop is `lobe-a-director`.
+8. "Reviewed" ≠ "true." Reviewed means the review's output contract passed. That distinction is printed in the API docs because conflating them would be the exact error the architecture catches.
+9. Measured, not marketed: 6-turn paired test, median TTFT 587 ms with proxy vs 626 ms direct, terser replies, smoother continuity. Also: Strategist JSON failed 3/6, one state read failed. Documented.
+10. Open source. Research spec + working proxy. Evidence before success. If there is no receipt, it is not a result. 🔗 links below.
+
+---
+
+## 13. [PROMO] Short-form copy bank
+
+**GitHub repo description (short):**
+> Asymmetric dual-agent cognitive architecture and drop-in OpenAI reverse proxy enforcing process isolation, evidence verification, and persistent memory. Evidence before success.
+
+**GitHub repo description (ultra-short):**
+> Two lobes. One task identity. Evidence before success.
+
+**Hacker News title options:**
+- Show HN: Dual-Lobe — an OpenAI proxy where a second model verifies the first one's claims
+- Show HN: An agent architecture that requires evidence before reporting success
+- Show HN: Dual-Lobe — anti-deception as an architecture, not a prompt
+
+**Product Hunt tagline (60 chars):**
+> Two model processes, one task, evidence before success.
+
+**Conference / meetup abstract (150 words):**
+> Most agent reliability work asks one model to plan, act, and judge. That structure lets the same process that produces an error certify it as success. Dual-Lobe is an experimental architecture that splits one task identity across two model processes with asymmetric powers: an Executor that acts and a Strategist that senses, critiques, authorizes, and verifies against evidence. Four hard invariants — planning, action, verification, and escalation locks — make cooperation structural. This talk covers the design, the working OpenAI-compatible reverse proxy built around it, and, most importantly, the honesty budget: what the architecture promises, what it explicitly does not, how errors are decorrelated (or not), the false-success metric it is measured on, and the published session where the observer's own JSON validation degraded on half the reviews. Attendees leave with a concrete pattern for verification-before-success and a template for evaluating reliability claims without hype.
+
+**Demo script (90 seconds, for a screen recording):**
+1. `docker compose up -d` → show both containers started.
+2. `curl /healthz` and `curl /readyz` → show liveness and readiness.
+3. Send a `lobe-a` request with `X-DL-Run-ID` where the "tool output" in the conversation shows `exit 1`. → Executor stream returns immediately.
+4. Show emitted headers: claims route, memory version, monitoring flag, outbox status.
+5. `GET /v1/dual-lobe/state/{run_id}` → show `oversight_status`, `findings`, `evidence_hash`.
+6. Switch to `lobe-a-director` → show the labeled A/B exchange and follow-up question.
+7. Close on the limitation slide: `reviewed ≠ true`, degraded reviews are possible, observation capture is best-effort.
+
+**Objection-handling lines (for talks and sales-adjacent pages):**
+- *"Isn't this just a second opinion?"* No. A second opinion has no enforcement. Here, tool ownership is exclusive, locks gate transitions, and success must be reconstructable from an append-only ledger.
+- *"Won't the second model just agree with the first?"* Sometimes. That is exactly H3 and the error-correlation analysis — and it is why the evaluation compares same-model vs. different-model-family configurations.
+- *"Won't this slow me down?"* Normal Mode adds no model wait on the critical path. It does add authentication, a run lookup, optional state reads, and extra prompt tokens — and the docs say so.
+- *"Can it stop a bad action?"* In the specification's conforming runtime, yes, at the dispatch layer. In the current proxy, the review is advisory and asynchronous. We always name which one we mean.
+
+---
+
+## 14. [PROMO] Press / boilerplate kit
+
+**Boilerplate (50 words):**
+> Dual-Lobe is an open-source, OpenAI-compatible reverse proxy and experimental cognitive architecture that splits a single AI task across two model processes: an Executor that acts and a Strategist that senses, critiques, authorizes, and verifies evidence. Its governing rule is that narrow evidence may support only a narrow claim.
+
+**Boilerplate (100 words):**
+> Dual-Lobe is an experimental, open-source dual-process architecture for AI agents, shipped as a drop-in OpenAI-compatible reverse proxy. Two persistent model processes share one task identity. The Executor Lobe manipulates the environment — browser, files, code, API writes — and streams responses with zero critical-path wait. The Strategist Lobe senses, critiques, checks policy and risk, authorizes actions, verifies outcomes, and curates memory, with no tool-mutation privileges. Four hard invariants (planning, action, verification, escalation locks) enforce cross-checking structurally rather than through prompts. A background observer classifies material claims against supplied evidence as `UNSUPPORTED`, `CONTRADICTION`, or `SUSPICIOUS_SHIFT`, keeping an append-only PostgreSQL audit ledger.
+
+**Founded/author:** Anas Alsawy. Research track documented at github.com/anasalsawy/dual-lobe; working proxy at github.com/anasalsawy/dual-lobe-proxy.
+
+**Assets checklist:** logo (hemisphere split mark), architecture diagram (lobes + evidence gate), invariant icons (`fact_check`, `lock`, `verified`, `crisis_alert`), pipeline diagram, claim-label badges, state-payload screenshot, terminal quickstart capture.
+
+**Approved one-liners for press use:** See the ten taglines in Section 3. All are traceable to repository language.
+
+---
+
+## 15. [EDU] Educational explainer: five teaching modules
+
+**Module 1 — "Why your agent lies about finishing."**
+*Learning goal:* distinguish knowledge hallucination from reporting-integrity failure; explain why self-critique is structurally insufficient; give one example where the record contradicts the claim.
+*Exercise:* hand learners a short transcript with a contradicting exit code and ask them to point at the sentence that should have failed.
+
+**Module 2 — "A rule you can compute: narrow evidence, narrow claim."**
+*Learning goal:* apply the narrow-evidence rule to a paragraph of agent output; separate the supported portion from the unsupported portion.
+*Exercise:* "Three of five tables migrated, exit 0, no schema diff" against "migration completed with validation" — write the supported claim in one sentence.
+
+**Module 3 — "Locks, not requests."**
+*Learning goal:* explain the four locks and why a prompt-based promise is weaker than a dispatch-layer block.
+*Exercise:* given a scenario (agent wants to submit a booking form), name which lock blocks it and what evidence releases it.
+
+**Module 4 — "Reviews are not verdicts."**
+*Learning goal:* explain the difference between `reviewed` and `true`; describe what `degraded` and `stale` mean; explain why fail-open is a design choice with a cost.
+*Exercise:* read a state payload with `oversight_status: degraded` and write the correct user-facing sentence.
+
+**Module 5 — "How to prove a reliability claim."**
+*Learning goal:* list the baselines, the false-success metric, error decorrelation, failure injection, and statistical reporting rules; explain what "no claim beyond measured conditions" means.
+*Exercise:* write a one-paragraph results summary for a hypothetical run that improved false-success rate but doubled latency and cost.
+
+---
+
+## 16. [META] SEO and metadata strings
+
+**Home page title tag:** Dual-Lobe — Two Lobes, One Task, Evidence Before Success | Drop-In OpenAI Reverse Proxy
+**Meta description (155 chars):** Dual-Lobe splits one AI task across an Executor lobe and a Strategist lobe with asymmetric powers and four hard invariants. Open-source, OpenAI-compatible proxy.
+**Canonical keywords:** dual-lobe, AI agent verification, anti-deception AI, evidence before success, OpenAI reverse proxy, agent reliability architecture, false-success rate, AI claim verification, multi-agent recipient routing, persistent AI memory.
+**Open Graph title:** Dual-Lobe: the agent that has to show its work.
+**Open Graph description:** Executor streams. Strategist verifies. `UNSUPPORTED`, `CONTRADICTION`, `SUSPICIOUS_SHIFT`. Drop-in OpenAI-compatible. Open source.
+**Structured data (concept):** SoftwareApplication / open-source developer tool; author Anas Alsawy; codeRepository github.com/anasalsawy/dual-lobe-proxy; programmingLanguage Python; license see repository.
+
+---
+
+## 17. [META] Accessibility and correctness checklist before publishing
+
+- Every eye-catching claim has an adjacent limitation line. No orphaned superlatives.
+- No text says "hallucination-free," "100%," "guarantees truth," "brain-like," or "self-aware."
+- Every use of "blocked," "locked," or "enforced" names **which** runtime: the proxy (advisory, async) or the conforming specification (dispatch-layer lock).
+- Every status token shown on the site appears with its actual meaning: `reviewed` = contract passed, not truth; `degraded` = validation failed; `stale` = freshness limit exceeded.
+- Code samples are copy-paste runnable, mark the proxy key (not upstream), and do not include a default secret.
+- The three labels keep the sentence "missing evidence is not proof of fabrication."
+- The measured-session numbers (587 ms vs 626 ms median TTFT; 3/6 degraded) are presented with the sample-size caveat.
+- Alt text on every diagram describes the flow in words: "Client to proxy to Executor stream, with a durable outbox to the Strategist and a PostgreSQL evidence store."
+- Contrast, focus states, and keyboard operation verified on the interactive claim-assessment widget and the inspector tabs.
+- No emoji-only labels; every icon has a text label.
+
+---
+
+## 18. [HOMEPAGE REPLACEMENT] Final drop-in, one continuous block
+
+> **Instructions:** If you prefer one block instead of the region-by-region version in Section 4, paste the following as the entire homepage and delete the old placeholder text. All headings, body, code, and tables are final copy.
+
+**Dual-Lobe v0.4 — Proxy Architecture**
+
+**Two lobes. One task identity. Evidence before success.**
+
+Two persistent model processes share a single job. The Executor Lobe acts and streams with zero critical-path wait. The Strategist Lobe senses, critiques, authorizes, and verifies. Asymmetric powers, mandatory cross-checks, and process isolation — enforced by architecture, not by prompts.
+
+`docker compose up -d` → listening on `http://localhost:8801`
+
+*Drop-in OpenAI-compatible · no tool rewrites · reviews off the critical path · auditable by `run_id`.*
+
+**The problem: phantom confidence.**
+You deploy to staging and discover the suite never ran, or failed silently with exit code 1 while the model reported green checkmarks. Lost engineering cycles, phantom regressions, ruined production nights. Chasing one hallucinated run costs an engineer 1.5 to 3.5 wasted hours.
+
+*Claim:* "All migrations executed smoothly and the DB schema was validated."
+*Record:* `connection refused on port 5432`, `exit code 2`, `FAILED (failures=3, errors=0)`.
+
+**The anti-deception principle.** Narrow evidence may support only a narrow claim. LLMs prioritize plausible storytelling; when an agent self-checks, it reads its own prior tokens through the same attention weights and validates its own phantom assumptions. Enforced labels: `UNSUPPORTED` (a material claim lacks matching evidence), `CONTRADICTION` (incompatible supplied statements, both quoted), `SUSPICIOUS_SHIFT` (a change the record does not explain). All three are model assessments, not verdicts.
+
+**The four hard invariants.** `Planning Lock` — no plan is active until the Strategist signs scope, risk boundary, and step feasibility. `Action Lock` — external actions, API mutations, and filesystem writes are blocked until a scoped permit exists. `Verification Lock` — an action is not complete or successful until the Strategist verifies returned logs against the claimed objective. `Escalation Lock` — divergence freezes autonomous runs and returns to the user only after bounded internal recovery, with a forensic ledger.
+
+**The pipeline.** Client (OpenAI SDK) → Dual-Lobe reverse proxy gateway `:8801` → Lobe A: Executor (tool runtime and token stream, 0 ms critical-path lag) → Durable Outbox (async claim-review task) → Lobe B: Strategist Observer (senses, audits, cross-checks evidence) → PostgreSQL 16 evidence store (`observer_claims`, append-only ledger).
+
+**Normal Mode — `lobe-a`.** The Executor responds normally; the Strategist reviews in the background through async outbox tasks. Zero-wait execution for production latency priority.
+**Director Mode — `lobe-a-director`.** The Strategist takes the conversational place, asks follow-up questions, and directs another Executor turn — a visible, self-correcting A/B exchange. Adds serial calls, time, and cost by design.
+**Recipient routing — `X-DL-Floor-ID`.** In shared rooms or swarms, the Strategist detects whether a turn is addressed to the Executor and suppresses unaddressed chatter while keeping context in memory.
+
+**Three independent paths.** *Broadening and memory* (versioned context memory in PostgreSQL, reloaded before eligible Executor calls; receipt `X-Dual-Lobe-Memory`). *Anti-deception findings* (evidence-linked concerns stored separately as `observer_claims` and attached to the Executor's next request; receipt `X-Dual-Lobe-Claims`). *Awareness of monitoring* (a fixed developer/system instruction declaring the observer, requiring accurate reporting of tool outcomes and verified proof; receipt `X-Dual-Lobe-Monitoring`).
+
+**Shared cross-app memory.** Set `X-DL-Memory-ID: project-name` (default `main`). Verified task context reloads across separate repos, scripts, and containers — without transferring tools, permissions, or execution state.
+
+**Quickstart.**
+```
+$ git clone https://github.com/anasalsawy/dual-lobe-proxy.git
+$ cd dual-lobe-proxy
+$ cp .env.example .env      # set DUAL_LOBE_BOOTSTRAP_KEY (>= 24 random chars)
+$ docker compose up --build -d
+[+] Running 2/2
+ Container dual-lobe-postgres  Started
+ Container dual-lobe-proxy     Started  (listening on http://localhost:8801)
+```
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8801/v1", api_key="YOUR_PROXY_SECRET")
+resp = client.chat.completions.create(
+    model="lobe-a",                       # or "lobe-a-director"
+    extra_headers={
+        "X-DL-Memory-ID": "project-alpha",
+        "X-DL-Run-ID": "run_89f02a",
+        "X-DL-Floor-ID": "swarm-core",
+    },
+    messages=[{"role": "user", "content": "Run test suite & verify migration"}],
+)
+print(resp.headers["X-Dual-Lobe-Claims"])   # claims reviewed to observer_claims
+# State: GET /v1/dual-lobe/state/run_89f02a
+```
+
+**Inspection endpoint.** `GET /v1/dual-lobe/state/{run_id}` returns `oversight_status` (`reviewed` | `degraded` | `stale`), receipts, and findings with evidence hashes. "Reviewed" means the output contract passed — not that the answer is true.
+
+**Routing controls.** `X-DL-Run-ID`, `X-DL-Memory-ID`, `X-DL-Floor-ID`, `X-DL-Attempt`, `X-DL-Worker-ID`, `X-Dual-Lobe-Mode: bypass`, `X-DL-Agent-Role`.
+
+**What Dual-Lobe guarantees — and what it does not.** It is an advisory architecture, an asynchronous background verification system, a schema and invariant enforcer, and an append-only auditable ledger. It cannot guarantee truth, infer intent from writing style, or prevent every fabricated statement. It is a development implementation, not a verified production security boundary. A delivered response cannot be retracted by a later review. Observation capture is best-effort, not lossless. Deploy one gateway and one Strategist worker for the documented process-local budgets; for public, multi-process production use, separately validate rate limits, tenant roles, ingress, retention, secrets, backup/recovery, and TLS.
+
+**FAQ.** Model A is the Executor (calls functions, runs code). Model B is the Strategist (no tool-mutation privileges; background auditor; conversational director in Director Mode). `X-DL-Floor-ID` prevents multi-agent crosstalk while preserving memory. A slow or failed review shows as `degraded` or `stale`; Normal Mode responses are never held hostage to it. No proprietary weights required — it fronts standard foundation models through an OpenAI-compatible interface.
+
+**Open source v0.4 proxy. Evidence before success.** Clone the official repository, bring up Docker Compose, and repoint your OpenAI base URL to `localhost:8801`.
+
+**Repositories:** github.com/anasalsawy/dual-lobe · github.com/anasalsawy/dual-lobe-proxy
+
+**Footer:** Architecture (Executor vs Strategist · Four Hard Invariants · Three Independent Paths · Director & Recipient Routing) · Endpoints (`POST /v1/chat/completions` · `GET /v1/dual-lobe/state/{run_id}` · `POST /v1/dual-lobe/events`) · Runtime (Port `:8801` · PostgreSQL 16).
+
+> Documentation published under CC BY-NC-SA 4.0. Software open source; see repositories for current license files. Experimental research; no claim of superiority beyond measured conditions. Evidence before success.
+
+---CHANGELOG---
+Fully reworked the raw artifact from the repository reading pass into a complete, publishable site content pack, and repaired the accuracy problems in the supplied placeholder homepage.
+
+CHANGES AND FIXES:
+1. Added a deliverables framing header naming the file as website copy + promotional + educational material, with repository provenance and honest status lines.
+2. Added Section 0 with labeling conventions ([PAGE], [SECTION], [HOMEPAGE REPLACEMENT], [EDU], [PROMO], [META]) so each block is directly usable.
+3. Added Section 1 (naming and positioning): canonical project name, component names and proxy aliases, hero one-liner, 30-word and 90-word pitches, formal positioning statement, and a "what we refuse to say" guardrail list.
+4. Added Section 2 (site map) covering Home, Architecture, Anti-Deception, Learn, Research, Docs, About.
+5. Added Section 3 (brand and writing rules): voice rules, "every benefit gets a limit," "every claim gets provenance," preferred/forbidden verb lists, and ten defensible taglines.
+6. Built Section 4 as the required drop-in homepage replacement, fixing the placeholder's inaccuracies: removed the fabricated "Strategic sign-off Active" versus "Pending" contradiction, replaced invented metrics and the miscalibrated anti-deception meter states with the repository-accurate `UNSUPPORTED` / `CONTRADICTION` / `SUSPICIOUS_SHIFT` labels, corrected the claim-classification example so the sandbox output actually contains a contradiction, added the honest funnel (hallucination → material claim → claim finding → claim concern), corrected the quickstart so the API key is the proxy secret rather than the upstream provider key, added the missing `cp .env.example .env` and `DUAL_LOBE_BOOTSTRAP_KEY` step, and replaced the generic FAQ with repository-grounded answers.
+7. Added Section 5 (Architecture page) grounded in SPEC.md: the ten architectural invariants, the component table, the exhaustive capability partition with executor-owned and strategist-owned tool lists, the four dependency locks table, the schema-validated inter-lobe protocol and all four JSON message contracts, the core control loop, tool-creation fallback ladder, watchdog signals and idempotent recovery procedure, the minimum SQL data model, the final report contract, and an implementation-reality section separating what the v0.4 proxy actually implements from what the specification requires.
+8. Added Section 6 (Anti-Deception page): the one-sentence rule, why self-checking fails, the assessment engine's strict JSON contract and validation consequences (malformed reviews become `degraded`, never "clean" or "verified"), precise definitions of the three labels, the honesty funnel, the Strategist prompt's purpose, three worked examples (phantom green checkmark, narrower evidence/narrower claim, unexplained shift), the reviewed-versus-true distinction, and the measured honesty paragraph using the published paired assessment.
+9. Added Section 7 (Learn page): reporting-integrity versus knowledge failure, why self-critique fails, the three things verification needs, the corrected neuroscience analogy (functional and approximate; no left-brain/right-brain story), all ten optional cognition-inspired modules with their hypotheses and risks, the baseline table rationale, the false-success metric as the metric to watch, error decorrelation, failure injection, compressed-channel rejection criteria, and statistical reporting rules.
+10. Added Section 8 (Research page): status statement, the single research question, hypotheses H1–H6 as a table, the explicit novelty statement including prior work, the Dialogue OS relationship, cost honesty, safety-and-threat-model scope, the non-solved list, the twelve conformance tests, evaluation publication requirements, reference stack, milestones M1–M6, definition of done, and the closing design principle.
+11. Added Section 9 (Docs quickstart): corrected `.env` bootstrap procedure, provider configuration including the empty-Strategist-key inheritance caveat, Compose commands, health/readiness caveats, client connection instructions, run-ID guidance, working curl example, state reading, all context receipts with their real enumerations, the external events endpoint, development/test commands including native execution requirements, the full main-controls table with defaults, and the compatibility/limitations text.
+12. Added Section 10 (site-wide short FAQ) with twelve compact defensible answers, including the critical proxy-versus-specification distinction for "can the Strategist block an action."
+13. Added Section 11 (long-form launch announcement) covering the self-critique problem, both lobes, the four locks, the narrow-evidence rule, three example labels, deployment, and an explicit two-part honesty disclosure.
+14. Added Section 12 (ten-post social thread) and Section 13 (short-form copy bank: repo descriptions, HN titles, Product Hunt tagline, conference abstract, 90-second demo script, objection-handling lines).
+15. Added Section 14 (press/boilerplate kit): 50-word and 100-word boilerplate, author/repo facts, asset checklist.
+16. Added Section 15 (five teaching modules) each with learning goal and exercise.
+17. Added Section 16 (SEO/metadata strings): title tag, meta description, keywords, Open Graph, structured data.
+18. Added Section 17 (pre-publish accessibility and correctness checklist) enforcing the honesty guardrails, the reviewed-versus-true distinction, no-default-secret rule, and diagram alt-text requirements.
+19. Added Section 18 as a single continuous drop-in homepage block for users who prefer one paste instead of region-by-region blocks.
+20. Corrected the original placeholder's footer "Dual-Lobe v0.4 proxy" descriptor so the homepage identity matches the repository README wording exactly.
+21. Removed the placeholder's unsupported implication that the proxy itself enforces the four locks; the pack now consistently distinguishes the advisory asynchronous proxy behavior from the specification's dispatch-layer enforcement.
+Completed
+Started 10:50:35 AM
