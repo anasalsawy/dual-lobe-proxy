@@ -122,6 +122,11 @@ class Settings(BaseSettings):
     # Gated mode: flip-back on YELLOW/RED (default off — meter shown in headers only)
     gated_flip_back: bool = Field(default=False, validation_alias="DUAL_LOBE_GATED_FLIP_BACK")
 
+    # Gated mode: the same downstream B call also returns handoff material for
+    # A's next call (unverified claims, tool-call review, next step, missing
+    # facts). No extra B call, no extra latency hop.
+    gated_b_handoff: bool = Field(default=True, validation_alias="DUAL_LOBE_GATED_B_HANDOFF")
+
     # Dual-lobe mode: isolated. Answers as usual, then A and B keep working in a
     # private background exchange whose summary is stored and re-injected on the
     # next request. On by default; every bound is caller-configurable.

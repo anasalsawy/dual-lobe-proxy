@@ -29,8 +29,10 @@ from ..provider.adapters import NormalizedRequest, response_dict
 from ..provider.registry import get_registry
 from ..roles import get_role_persona
 from .prompts import (
-    GATED_B_SYSTEM_DOWNSTREAM,
     DOWNSTREAM_CONTRACT,
+    DOWNSTREAM_CONTRACT_HANDOFF,
+    GATED_B_SYSTEM_DOWNSTREAM,
+    HANDOFF_SYSTEM_ADDENDUM,
 )
 
 LOG = logging.getLogger("dual_lobe.gated")
@@ -168,15 +170,66 @@ def _insert_system_injections(
     return result
 
 
+def _extract_handoff(raw: dict[str, Any]) -> dict[str, Any]:
+    """Normalize B's handoff fields. Everything stays advisory: it never
+    changes deception_level and never reaches the user."""
+    if not isinstance(raw, dict):
+        return {"unverified": [], "tool_review": {"verdict": "none", "issue": ""},
+                "next_step": "", "missing": []}
+
+    def _lines(value: Any, limit: int) -> list[str]:
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip()[:300] for item in value[:limit] if str(item).strip()]
+
+    review = raw.get("tool_review") if isinstance(raw.get("tool_review"), dict) else {}
+    verdict = str(review.get("verdict", "none")).strip().lower()
+    if verdict not in ("safe", "fix", "block", "none"):
+        verdict = "none"
+    return {
+        "unverified": _lines(raw.get("unverified"), 3),
+        "tool_review": {"verdict": verdict, "issue": str(review.get("issue", "")).strip()[:300]},
+        "next_step": str(raw.get("next_step", "") or "").strip()[:300],
+        "missing": _lines(raw.get("missing"), 2),
+    }
+
+
+def _render_handoff(meter: dict[str, Any]) -> str:
+    """Render B's handoff (plus its free-form assist) as A's next-call material."""
+    parts: list[str] = []
+    assist = str(meter.get("assist", "") or "").strip()
+    if assist:
+        parts.append(assist)
+    unverified = meter.get("unverified") or []
+    if unverified:
+        parts.append("Unverified claims from A's last response (check or hedge "
+                     "before asserting these again):\n"
+                     + "\n".join(f"- {item}" for item in unverified[:3]))
+    review = meter.get("tool_review") or {}
+    if isinstance(review, dict) and review.get("verdict") in ("fix", "block"):
+        parts.append(f"Tool call review: {review['verdict'].upper()} — "
+                     f"{str(review.get('issue', '')).strip()}")
+    next_step = str(meter.get("next_step", "") or "").strip()
+    if next_step:
+        parts.append(f"Next step for this task: {next_step}")
+    missing = meter.get("missing") or []
+    if missing:
+        parts.append("Missing before the answer is solid:\n"
+                     + "\n".join(f"- {item}" for item in missing[:2]))
+    return "\n\n".join(parts)[:2000]
+
+
 def _build_assist_injections(meter: dict[str, Any]) -> list[dict[str, Any]]:
-    """Turn B's assist material into a tool call/result pair for A.
+    """Turn B's assist + handoff material into a tool call/result pair for A.
 
     B's material arrives as a tool result rather than a system note, so A reads
     it as evidence in its own tool flow. The id is a fixed, non-colliding name:
     the pair is self-consistent and A sees a completed call with a result.
     Returns [] when B produced nothing.
     """
-    material = str(meter.get("assist", "") or "").strip()
+    material = _render_handoff(meter)
     if not material:
         return []
     call_id = "observer_assist"
@@ -283,11 +336,21 @@ async def gated_response(
     a_content = a_message.get("content", "")
 
     # ── 3. DOWNSTREAM: B rates A's response ──────────────────────
+    handoff_on = bool(getattr(s, "gated_b_handoff", True))
+    b_system = GATED_B_SYSTEM_DOWNSTREAM + (("\n\n" + HANDOFF_SYSTEM_ADDENDUM) if handoff_on else "")
+    b_contract = DOWNSTREAM_CONTRACT_HANDOFF if handoff_on else DOWNSTREAM_CONTRACT
+
     downstream_prompt = (
         f"CONVERSATION MESSAGES:\n{_messages_to_text(messages)}\n\n"
         f"TOOL EVIDENCE IN CONVERSATION:\n{_extract_tool_evidence(messages)}\n\n"
-        f"A's OUTPUT TO VERIFY:\n{a_content[:4000]}\n\n"
+        f"A's OUTPUT TO VERIFY:\n{str(a_content or '')[:4000]}\n\n"
     )
+    a_tool_calls = a_message.get("tool_calls") or []
+    if a_tool_calls:
+        downstream_prompt += (
+            "A's TOOL CALLS THIS TURN (review arguments and side effects too):\n"
+            f"{json.dumps(a_tool_calls, ensure_ascii=False)[:2000]}\n\n"
+        )
 
     # Check if agent name is detectable from the system prompt
     # Only warn for multi-agent modes (dl-dialogue, dl-dialogue1/2/3)
@@ -297,20 +360,25 @@ async def gated_response(
         agent_name_known = _detect_agent_name(messages) is not None
 
     b_downstream: dict = {}
+    handoff: dict[str, Any] = {}
     try:
         b_downstream = await asyncio.wait_for(
-            _call_b_json(GATED_B_SYSTEM_DOWNSTREAM, downstream_prompt, DOWNSTREAM_CONTRACT),
+            _call_b_json(b_system, downstream_prompt, b_contract),
             timeout=s.b_timeout,
         )
         deception_level = b_downstream.get("deception_level", "GREEN").upper()
         meter_rationale = b_downstream.get("meter_rationale", "No deception detected.")
         concerns = b_downstream.get("concerns", [])
-        LOG.info("gated downstream B rated run=%s level=%s", run_id, deception_level)
+        if handoff_on:
+            handoff = _extract_handoff(b_downstream)
+        LOG.info("gated downstream B rated run=%s level=%s handoff=%s",
+                 run_id, deception_level, handoff or "off")
     except Exception as exc:
         LOG.warning("gated downstream B failed run=%s: %s — failing open (GREEN)", run_id, exc)
         deception_level = "GREEN"
         meter_rationale = "verification unavailable"
         concerns = []
+        handoff = {}
 
     # ── 4. Forward A's response with meter in headers ───────────
     headers = {
@@ -318,6 +386,13 @@ async def gated_response(
         "X-Dual-Lobe-Meter": deception_level,
         "X-Dual-Lobe-Meter-Rationale": meter_rationale[:300],
     }
+    if handoff:
+        review = handoff["tool_review"]
+        headers["X-Dual-Lobe-Tool-Review"] = review["verdict"]
+        headers["X-Dual-Lobe-Handoff"] = (
+            f"u={len(handoff['unverified'])};t={review['verdict']};"
+            f"s={1 if handoff['next_step'] else 0};m={len(handoff['missing'])}"
+        )
 
     # ── 5. Optional flip-back (opt-in via DUAL_LOBE_GATED_FLIP_BACK)
     flip_back = getattr(s, "gated_flip_back", False)
@@ -377,16 +452,24 @@ async def gated_response(
                     f"A's REVISED OUTPUT:\n{a_content2[:4000]}\n\n"
                 )
                 b_recheck = await asyncio.wait_for(
-                    _call_b_json(GATED_B_SYSTEM_DOWNSTREAM, recheck_prompt, DOWNSTREAM_CONTRACT),
+                    _call_b_json(b_system, recheck_prompt, b_contract),
                     timeout=s.b_timeout,
                 )
                 deception_level = b_recheck.get("deception_level", "GREEN").upper()
                 meter_rationale = b_recheck.get("meter_rationale", "")
                 concerns = b_recheck.get("concerns", [])
+                if handoff_on:
+                    handoff = _extract_handoff(b_recheck)
                 LOG.info("gated recheck run=%s level=%s", run_id, deception_level)
                 headers["X-Dual-Lobe-Meter"] = deception_level
                 headers["X-Dual-Lobe-Meter-Rationale"] = meter_rationale[:300]
                 headers["X-Dual-Lobe-Flip-Back"] = "applied"
+                if handoff:
+                    headers["X-Dual-Lobe-Tool-Review"] = handoff["tool_review"]["verdict"]
+                    headers["X-Dual-Lobe-Handoff"] = (
+                        f"u={len(handoff['unverified'])};t={handoff['tool_review']['verdict']};"
+                        f"s={1 if handoff['next_step'] else 0};m={len(handoff['missing'])}"
+                    )
             except Exception as exc:
                 LOG.warning("gated recheck failed run=%s: %s", run_id, exc)
         except Exception as exc:
@@ -399,6 +482,7 @@ async def gated_response(
         "concerns": concerns,
         "assist": str(b_downstream.get("assist", "") or "").strip()
                   if isinstance(b_downstream, dict) else "",
+        **(handoff or {}),
         "timestamp": time.time(),
     })
 
