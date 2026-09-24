@@ -31,6 +31,7 @@ def env_targets() -> dict[str, ProviderTarget]:
     )
     base_fields = {f.name: getattr(base, f.name) for f in fields(base)}
     base_fields.pop("alias", None)
+    dialogue = ProviderTarget(alias="sawii/dialogue", **base_fields)
     flat = ProviderTarget(alias="sawii/dl-dialogue", **base_fields)
     chief = ProviderTarget(alias="sawii/dl-dialogue1", **base_fields)
     moderator = ProviderTarget(alias="sawii/dl-dialogue2", **base_fields)
@@ -58,6 +59,7 @@ def env_targets() -> dict[str, ProviderTarget]:
     return {
         "sawii/dual-lobe-old": base,
         "sawii/dual-lobe": dual_lobe,
+        "sawii/dialogue": dialogue,
         "sawii/dl-dialogue": flat,
         "sawii/dl-dialogue1": chief,
         "sawii/dl-dialogue2": moderator,
@@ -113,6 +115,7 @@ class Registry:
         user_facing_models = {
             "sawii/dual-lobe",
             "sawii/dual-lobe-old",
+            "sawii/dialogue",
             "sawii/dl-dialogue",
             "sawii/dl-dialogue1",
             "sawii/dl-dialogue2",

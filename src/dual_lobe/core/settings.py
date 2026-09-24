@@ -85,6 +85,14 @@ class Settings(BaseSettings):
     a_timeout: float = Field(default=180.0, gt=0, validation_alias="DUAL_LOBE_A_TIMEOUT")
     b_timeout: float = Field(default=20.0, gt=0, le=60, validation_alias="DUAL_LOBE_B_TIMEOUT")
 
+    # Upstream pacing: detect the connected provider, read its rate-limit
+    # headers on every response, and throttle both lobes so the provider budget
+    # is never exceeded (no avoidable429s).
+    upstream_rate_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_UPSTREAM_RATE_ENABLED")
+    upstream_rate_max_wait: float = Field(default=60.0, ge=0, le=600,
+                                          validation_alias="DUAL_LOBE_UPSTREAM_RATE_MAX_WAIT")
+    upstream_rate_overrides: str = Field(default="", validation_alias="DUAL_LOBE_UPSTREAM_RATE_OVERRIDES")
+
     # Opt-in by model alias/header; these budgets are per director invocation,
     # including resumed tool segments. Normal lobe-a remains asynchronous.
     director_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_DIRECTOR_ENABLED")

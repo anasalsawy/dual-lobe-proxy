@@ -29,7 +29,7 @@ from ..state import repositories as repo
 from ..state.memory import load_memory, record_memory, validate_space
 from ..director.protocol import Completion
 from . import auth, correlation, limits
-from .schemas import ChatCompletionRequest
+from .schemas import ChatCompletionRequest, ThreeWayIntervention
 
 LOG = logging.getLogger("dual_lobe.api.chat")
 router = APIRouter()
@@ -253,6 +253,40 @@ async def _stream_body(adapter, req, public_model: str, audit: dict, save_memory
     yield "data: [DONE]\n\n"
 
 
+@router.post("/v1/dual-lobe/runs/{run_ref}/intervene")
+async def dual_lobe_threeway_intervene(
+    run_ref: str,
+    body: ThreeWayIntervention,
+    principal: auth.Principal = Depends(auth.require_scope(auth.SCOPE_INFERENCE_INVOKE)),
+):
+    """Inject a real-user message into an active three-way A/B exchange.
+
+    ``run_ref`` may be the external X-DL-Run-ID or the internal run UUID.
+    Delivery is persistent in the event ledger and is observed at the next model
+    turn boundary, so it works even when the live SSE stream is served elsewhere.
+    """
+    from ..dl.threeway import append_intervention
+
+    async with tenant_session(principal.tenant_id) as session:
+        run = await repo._get_run_or_none(session, principal.tenant_id, run_ref)
+    if run is None:
+        raise HTTPException(status_code=404, detail="dual-lobe run not found")
+    try:
+        event = await append_intervention(
+            principal.tenant_id, str(run.id),
+            content=body.content, recipient=body.to,
+            idempotency_key=body.idempotency_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return JSONResponse({
+        "status": "accepted",
+        "run_id": run.external_run_id or str(run.id),
+        "internal_run_id": str(run.id),
+        "intervention": event,
+    })
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(
     body: ChatCompletionRequest, request: Request,
@@ -329,10 +363,271 @@ async def chat_completions(
         run_id = str(run.id)
         await session.commit()
 
-    # Dual-lobe mode: isolated. Answers as usual, rates with B, then keeps
-    # working in a private background exchange. Separate module and store.
+    # Dual-lobe mode: pre-final A/B collaboration. For streaming requests,
+    # bridge the handler's event sink into the HTTP response so the client can
+    # watch A/B turns as they complete rather than waiting for finalization.
     if alias == "sawii/dual-lobe":
         from ..dl import handler as dl_handler
+
+        # Experimental interleaved mode: A streams to the user immediately while
+        # B shadows semantic snapshots in parallel. No approval gate is placed in
+        # A's normal path; only material B interventions cause resynchronization.
+        if payload.get("stream", False) and payload.get("dual_lobe_interleaved", False):
+            try:
+                from ..dl.interleaved import interleaved_event_stream
+            except ImportError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="interleaved mode is not available in this build",
+                ) from None
+            inline_flags = payload.get("dual_lobe_interleaved_inline_flags")
+            if inline_flags is None:
+                inline_flags = True
+            live_events = payload.get("dual_lobe_live_events")
+            if live_events is None:
+                live_events = True
+
+            async def _dl_interleaved_stream():
+                completion_id = f"chatcmpl-dl-shadow-{run_id}"
+                created = int(time.time())
+                role_sent = False
+                terminal_seen = False
+
+                def _event_chunk(event):
+                    return {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": alias,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+                        "dual_lobe_event": event,
+                    }
+
+                async for item in interleaved_event_stream(
+                    payload, run_id, principal.tenant_id, alias, task=str(run.goal or "")
+                ):
+                    if item["kind"] == "chunk":
+                        chunk = item["data"]
+                        chunk["id"] = chunk.get("id") or completion_id
+                        chunk["model"] = alias
+                        # The provider may omit role in its first delta; make sure
+                        # generic clients still receive a valid assistant opener.
+                        choices = chunk.get("choices") or []
+                        if choices and not role_sent:
+                            delta = choices[0].get("delta") or {}
+                            if not delta.get("role"):
+                                opener = {
+                                    "id": completion_id, "object": "chat.completion.chunk",
+                                    "created": created, "model": alias,
+                                    "choices": [{"index": 0, "delta": {"role": "assistant"},
+                                                 "finish_reason": None}],
+                                }
+                                yield "data: " + json.dumps(opener, ensure_ascii=False) + "\n\n"
+                            role_sent = True
+                        for choice in choices:
+                            if choice.get("finish_reason") is not None:
+                                terminal_seen = True
+                        yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
+                        continue
+
+                    if item["kind"] == "event":
+                        event = item["event"]
+                        if live_events:
+                            yield "data: " + json.dumps(_event_chunk(event), ensure_ascii=False) + "\n\n"
+                        if inline_flags and event.get("type") == "shadow_intervention":
+                            action = str(event.get("action", "FLAG")).replace("_", " ")
+                            content = str(event.get("message", "") or "").strip()
+                            if content:
+                                text = f"\n\n🅱️ B — {action}\n{content}\n\n🅰️ A\n"
+                                visible = {
+                                    "id": completion_id, "object": "chat.completion.chunk",
+                                    "created": created, "model": alias,
+                                    "choices": [{"index": 0, "delta": {"content": text},
+                                                 "finish_reason": None}],
+                                }
+                                yield "data: " + json.dumps(visible, ensure_ascii=False) + "\n\n"
+                        if event.get("type") == "shadow_tool_request":
+                            # B has the same host tool definitions as A. Surface its
+                            # request through the canonical OpenAI tool-call channel so
+                            # the existing host executes it normally. On the next turn
+                            # both lobes receive the exact tool result from conversation
+                            # history/shared reality.
+                            tool_calls = event.get("tool_calls") or []
+                            if inline_flags and event.get("message"):
+                                notice = {
+                                    "id": completion_id, "object": "chat.completion.chunk",
+                                    "created": created, "model": alias,
+                                    "choices": [{"index": 0, "delta": {
+                                        "content": f"\n\n🅱️ B — TOOL REQUEST\n{str(event.get('message'))}\n"
+                                    }, "finish_reason": None}],
+                                }
+                                yield "data: " + json.dumps(notice, ensure_ascii=False) + "\n\n"
+                            if tool_calls:
+                                tool_delta = {
+                                    "id": completion_id, "object": "chat.completion.chunk",
+                                    "created": created, "model": alias,
+                                    "choices": [{"index": 0, "delta": {
+                                        "tool_calls": [dict({"index": i}, **call) for i, call in enumerate(tool_calls)]
+                                    }, "finish_reason": None}],
+                                }
+                                yield "data: " + json.dumps(tool_delta, ensure_ascii=False) + "\n\n"
+                                terminal = {
+                                    "id": completion_id, "object": "chat.completion.chunk",
+                                    "created": created, "model": alias,
+                                    "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                                }
+                                yield "data: " + json.dumps(terminal, ensure_ascii=False) + "\n\n"
+                                terminal_seen = True
+                        continue
+
+                    if item["kind"] == "meta":
+                        if live_events:
+                            yield "data: " + json.dumps(
+                                _event_chunk({"type": "shadow_meta", **item["data"]}),
+                                ensure_ascii=False
+                            ) + "\n\n"
+
+                # The upstream A stream may already have emitted a terminal choice.
+                # We still terminate the multiplexed SSE exactly once.
+                if not terminal_seen:
+                    final = {
+                        "id": completion_id, "object": "chat.completion.chunk",
+                        "created": created, "model": alias,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    }
+                    yield "data: " + json.dumps(final, ensure_ascii=False) + "\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                _dl_interleaved_stream(), media_type="text/event-stream",
+                headers={
+                    "X-Dual-Lobe-Mode": "interleaved-shadow",
+                    "X-Dual-Lobe-Meter": "LIVE",
+                    "X-Dual-Lobe-Wait-Policy": "no-wait-unless-intervention",
+                    "X-Dual-Lobe-Tool-Mode": str(payload.get("dual_lobe_tool_mode") or "shared"),
+                    "X-DL-Run-ID": external_run,
+                    "X-DL-Internal-Run-ID": run_id,
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+        if payload.get("stream", False):
+            inline_exchange = payload.get("dual_lobe_inline_exchange")
+            if inline_exchange is None:
+                inline_exchange = True
+            live_events = payload.get("dual_lobe_live_events")
+            if live_events is None:
+                live_events = True
+
+            async def _dl_live_stream():
+                completion_id = f"chatcmpl-dl-{run_id}"
+                created = int(time.time())
+                inline_started = False
+
+                def _chunk(*, delta=None, finish_reason=None, event=None, usage=None, index=0):
+                    item = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": alias,
+                        "choices": [{
+                            "index": index,
+                            "delta": delta or {},
+                            "finish_reason": finish_reason,
+                        }],
+                    }
+                    if event is not None:
+                        item["dual_lobe_event"] = event
+                    if usage is not None:
+                        item["usage"] = usage
+                    return item
+
+                try:
+                    # Standard OpenAI-style stream opener. Generic clients can
+                    # establish the assistant role before any collaboration text.
+                    yield "data: " + json.dumps(
+                        _chunk(delta={"role": "assistant"}), ensure_ascii=False
+                    ) + "\n\n"
+
+                    async for item in dl_handler.dual_lobe_event_stream(
+                        payload, run_id, principal.tenant_id, alias,
+                        task=str(run.goal or ""),
+                    ):
+                        if item["kind"] == "event":
+                            event = item["event"]
+
+                            # Structured event: safe for custom clients and does
+                            # not alter the canonical assistant text. Unknown
+                            # extension fields are ignorable by generic clients.
+                            if live_events:
+                                yield "data: " + json.dumps(
+                                    _chunk(event=event), ensure_ascii=False
+                                ) + "\n\n"
+
+                            # Compatibility view: stream a human-readable A/B
+                            # transcript as normal content. The next request strips
+                            # this display-only prefix back out of history.
+                            if inline_exchange and event.get("type") == "exchange_message":
+                                actor = str(event.get("actor", "?")).upper()
+                                label = "🅰️ A" if actor == "A" else "🅱️ B" if actor == "B" else "👤 YOU" if actor == "USER" else actor
+                                content = str(event.get("content", "") or "").strip()
+                                if content:
+                                    prefix = ""
+                                    if not inline_started:
+                                        prefix = "Dual-Lobe collaboration\n\n"
+                                        inline_started = True
+                                    text = prefix + label + "\n" + content + "\n\n"
+                                    yield "data: " + json.dumps(
+                                        _chunk(delta={"content": text}), ensure_ascii=False
+                                    ) + "\n\n"
+                            continue
+
+                        data = item["data"]
+                        # ``dual_lobe_event_stream`` forces the buffered handler
+                        # to keep message.content clean. If we streamed an inline
+                        # transcript, add the final marker here exactly once.
+                        choices = data.get("choices") or []
+                        for choice in choices:
+                            message = dict(choice.get("message") or {})
+                            finish = choice.get("finish_reason")
+                            if finish is None:
+                                finish = "tool_calls" if message.get("tool_calls") else "stop"
+                            if inline_started and isinstance(message.get("content"), str):
+                                message["content"] = (
+                                    "──────── FINAL ANSWER ────────\n" + message["content"]
+                                )
+                            out = _chunk(
+                                delta=message,
+                                finish_reason=finish,
+                                index=int(choice.get("index", 0) or 0),
+                                event={
+                                    "type": "exchange_result",
+                                    "dual_lobe": data.get("dual_lobe"),
+                                } if live_events and data.get("dual_lobe") else None,
+                                usage=data.get("usage"),
+                            )
+                            yield "data: " + json.dumps(out, ensure_ascii=False) + "\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+                except asyncio.CancelledError:
+                    # Cancelling the response cancels the queue bridge, which in
+                    # turn cancels in-flight dual-lobe inference.
+                    raise
+
+            return StreamingResponse(
+                _dl_live_stream(), media_type="text/event-stream",
+                headers={
+                    "X-Dual-Lobe-Mode": "pre-final-live",
+                    "X-Dual-Lobe-Meter": "PENDING",
+                    "X-Dual-Lobe-Three-Way": "on" if payload.get("dual_lobe_three_way") else "off",
+                    "X-DL-Run-ID": external_run,
+                    "X-DL-Internal-Run-ID": run_id,
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
         try:
             data, dl_headers, dl_background = await dl_handler.dual_lobe_response(
                 payload, run_id, principal.tenant_id, alias, task=str(run.goal or ""),
@@ -340,10 +635,23 @@ async def chat_completions(
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         background = BackgroundTask(dl_background) if dl_background else None
+        dl_headers = dict(dl_headers)
+        dl_headers["X-DL-Run-ID"] = external_run
+        dl_headers["X-DL-Internal-Run-ID"] = run_id
+        return JSONResponse(data, status_code=200, headers=dl_headers, background=background)
+
+    # Dialogue co-author mode: B wraps A on both upstream and downstream.
+    # This is intentionally separate from the verifier/gated model so both can
+    # be tested side-by-side.
+    if alias == "sawii/dialogue":
+        from ..coauthor.handler import coauthor_response
+        data, co_headers = await coauthor_response(
+            payload, run_id, principal.tenant_id, alias
+        )
         if payload.get("stream", False):
             import json as _json
 
-            async def _dl_stream():
+            async def _coauthor_stream():
                 chunk = dict(data)
                 chunk["object"] = "chat.completion.chunk"
                 for c in chunk.get("choices", []):
@@ -354,11 +662,10 @@ async def chat_completions(
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(
-                _dl_stream(), media_type="text/event-stream",
-                headers={**dl_headers, "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-                background=background,
+                _coauthor_stream(), media_type="text/event-stream",
+                headers={**co_headers, "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
-        return JSONResponse(data, status_code=200, headers=dl_headers, background=background)
+        return JSONResponse(data, status_code=200, headers=co_headers)
 
     # Gated mode: B sits inline.  Completely separate code path.
     if alias in ("sawii/dl-gated", "sawii/dl-dialogue", "sawii/dual-lobe-old"):

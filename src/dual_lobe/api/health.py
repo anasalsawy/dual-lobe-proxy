@@ -43,6 +43,20 @@ async def models():
     }
 
 
+@router.get("/v1/upstream-rates")
+async def upstream_rates(
+    principal: auth.Principal = Depends(auth.require_scope(auth.SCOPE_STATE_READ)),
+):
+    """Live view of the detected upstream provider budgets for both lobes.
+
+    The numbers come from the provider's own ``X-RateLimit-*`` headers plus the
+    local pacing state, so this is the same view the pacer acts on.
+    """
+    from ..provider import ratelimit
+
+    return {"object": "upstream_rate_limits", "data": ratelimit.snapshot()}
+
+
 @router.post("/v1/verify")
 async def verify(
     body: VerifyRequest,

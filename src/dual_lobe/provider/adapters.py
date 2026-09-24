@@ -7,6 +7,8 @@ from typing import Any, AsyncIterator
 
 import httpx
 
+from . import ratelimit
+
 CHAT_COMPLETIONS = "chat_completions"
 RESPONSES = "responses"
 BLOCKED_UNIFIED_KWARGS = {"api_base", "api_key", "base_url", "custom_llm_provider"}
@@ -92,18 +94,27 @@ class ChatCompletionsAdapter:
         return {"Authorization": f"Bearer {self.target.api_key}"}
 
     async def buffered(self, req: NormalizedRequest):
+        gate = ratelimit.gate_for(self.target)
+        await gate.acquire(ratelimit.estimate_request_tokens(req))
         response = await get_http_client().post(
             self._endpoint(), headers=self._headers(),
             json={**self._base_kwargs(req), "stream": False}, timeout=req.timeout,
         )
+        gate.observe(response.headers, response.status_code)
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        if isinstance(data, dict):
+            gate.record_usage(data.get("usage"))
+        return data
 
     async def stream(self, req: NormalizedRequest) -> AsyncIterator[dict[str, Any]]:
+        gate = ratelimit.gate_for(self.target)
+        await gate.acquire(ratelimit.estimate_request_tokens(req))
         async with get_http_client().stream(
             "POST", self._endpoint(), headers=self._headers(),
             json={**self._base_kwargs(req), "stream": True}, timeout=req.timeout,
         ) as response:
+            gate.observe(response.headers, response.status_code)
             response.raise_for_status()
             data_lines: list[str] = []
             event_size = 0
@@ -122,6 +133,8 @@ class ChatCompletionsAdapter:
                     chunk = json.loads(data)
                     if not isinstance(chunk, dict) or "error" in chunk:
                         raise ValueError("invalid upstream SSE chunk")
+                    if chunk.get("usage"):
+                        gate.record_usage(chunk["usage"])
                     # Forward every choice/tool fragment without reconstruction.
                     yield chunk
             if data_lines:
