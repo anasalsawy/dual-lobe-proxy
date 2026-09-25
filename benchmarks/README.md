@@ -1,44 +1,28 @@
-# Deterministic benchmark toolkit
+# Controlled 3V benchmark
 
-The provider-independent primitives live in `src/dual_lobe/evaluation/`.
-They validate acceptance scope, evidence provenance, release decisions, and
-normalized benchmark records without requiring credentials or a model.
+Compare GATED, NON-SPLIT, and SPLIT on matched tasks with the same models, memory, tools, fixtures, retry policy, and scoring rubric.
 
-This is **not** yet a complete cross-design runner or a measured ranking. No
-claim about model quality, latency, cost, or a top-five design is supported by
-these primitives alone.
+Report medians and p90s.
 
-## Current guarantees
+## Route metrics
 
-- Criteria and evidence are explicitly scoped; narrow evidence cannot satisfy a broader criterion.
-- `host_receipt` is distinguishable from model, client, provider, and internal evidence.
-- Stale, conflicting, negative, and unknown evidence are not promoted to `FULL`.
-- Disabled release gates remain advisory.
-- Benchmark records validate non-negative metrics and aggregate deterministic summaries.
+Report two distinct metrics:
 
-## Example
+- **semantic_route_accuracy** — valid splitter JSON decisions only. A fallback is not semantic success.
+- **effective_route_accuracy** — whether the branch actually executed matches the expected route, including safe fallbacks.
 
-```python
-from dual_lobe.evaluation import AcceptanceCriterion, EvidenceRecord, evaluate_coverage
+## Memory evidence
 
-criterion = AcceptanceCriterion(
-    id="deploy",
-    statement="The deployment succeeded in production",
-    environment_scope="production",
-)
-evidence = EvidenceRecord(
-    evidence_id="receipt-1",
-    source="host_receipt",
-    scope={"environment": "production"},
-    supports=["deploy"],
-)
-assert evaluate_coverage(criterion, [evidence]).status == "FULL"
-```
+B Verifier now receives the exact shared-memory slice A received on the same turn.
 
-## Not yet implemented here
+## Model-call instrumentation
 
-The repository still needs a common adapter protocol, task corpus, raw-event
-runner, control route, real-provider execution, uncertainty intervals, and a
-measured comparison of twenty or more designs. External designs must be
-labelled source-only, unavailable, compatible reimplementation, deterministic,
-or real-provider; do not conflate those evidence levels.
+Use `RunResult.logical_model_calls`. Do not count CrewAI event-bus start/end events as separate inference calls.
+
+Ordinary architecture-level counts:
+- GATED = 2
+- NON-SPLIT = 2 plus delegate/consult calls actually used
+- SPLIT→NORMAL = splitter + NON-SPLIT calls
+- actual SPLIT = 5 plus delegate/consult calls actually used
+
+Provider retries/failovers should be reported separately from logical calls.

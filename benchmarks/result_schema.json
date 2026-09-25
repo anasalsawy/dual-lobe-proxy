@@ -1,0 +1,38 @@
+{
+  "case_id": "",
+  "repeat": 1,
+  "variant": "gated|non-split|split",
+  "provider": "",
+  "models": {
+    "a": "",
+    "b_verify": "",
+    "b_worker": "",
+    "splitter": ""
+  },
+  "timings_ms": {
+    "total": null,
+    "route": null,
+    "a": null,
+    "b_verify": null,
+    "parallel_halves": null,
+    "merge": null,
+    "split_verify": null
+  },
+  "counts": {
+    "model_calls": 0,
+    "tool_calls": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "logical_model_calls": 0,
+    "provider_attempts": null
+  },
+  "splitter_route": null,
+  "verdict": null,
+  "task_score": null,
+  "checklist_items_satisfied": [],
+  "critical_errors": [],
+  "answer": "",
+  "route_source": null,
+  "semantic_route_ok": null,
+  "effective_route_ok": null
+}
