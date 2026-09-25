@@ -127,6 +127,16 @@ class Settings(BaseSettings):
     # facts). No extra B call, no extra latency hop.
     gated_b_handoff: bool = Field(default=True, validation_alias="DUAL_LOBE_GATED_B_HANDOFF")
 
+    # Proxy-owned server-side tools for A (gated path only): inline execution,
+    # one same-turn continuation, never visible to the client.
+    proxy_tools_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_PROXY_TOOLS")
+    proxy_memory_search_cap: int = Field(default=2, ge=0, le=8,
+                                         validation_alias="DUAL_LOBE_PROXY_MEMORY_SEARCH_CAP")
+    proxy_delegate_cap: int = Field(default=1, ge=0, le=4,
+                                    validation_alias="DUAL_LOBE_PROXY_DELEGATE_CAP")
+    proxy_consult_cap: int = Field(default=1, ge=0, le=4,
+                                   validation_alias="DUAL_LOBE_PROXY_CONSULT_CAP")
+
     # Dual-lobe mode: isolated. Answers as usual, then A and B keep working in a
     # private background exchange whose summary is stored and re-injected on the
     # next request. On by default; every bound is caller-configurable.

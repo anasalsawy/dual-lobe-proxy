@@ -135,15 +135,15 @@ The splitter, in Architecture B, receives the memory slice along with the task.
 ### V1 — shared-memory wiring (current)
 1. ✅ `api/chat.py`: load + inject + BackgroundTask record + memory headers in **dialogue** branch.
 2. ✅ `api/chat.py`: same for the **gated** branch (`shared_text`/`shared_space` into `gated_response`).
-3. ⬜ `coauthor/handler.py`: `shared_text` param + `inject_shared_memory` into canonical messages.
-4. ⬜ Tests: render cap 3200, `widen`/`memory_query` extraction + render, memory unit + branch wiring tests.
-5. ⬜ `compileall` + `pytest` green.
-6. ⬜ Commit, push (GitHub unblocked), `railway up --detach`, live verify: slice present in a gated turn, records land (inspectable via memory notebook/inspect endpoints).
+3. ✅ `coauthor/handler.py`: `shared_text` param + `inject_shared_memory` into canonical messages.
+4. ✅ Tests: render cap 3200, `widen`/`memory_query` extraction + render, memory unit + branch wiring tests.
+5. ✅ `compileall` + `pytest` green.
+6. ✅ Commit, push (GitHub unblocked), `railway up --detach`, live verify: slice present in a gated turn, records land (inspectable via memory notebook/inspect endpoints).
 
 ### V2 — proxy tools + splitter
-1. `proxy/tools.py`: registry + inline executor (one continuation, strip `proxy_*`, settings/caps) + registered tool settings (`DUAL_LOBE_PROXY_TOOLS` etc.).
-2. `proxy_memory_search`, `proxy_delegate`, `proxy_consult`.
-3. B contract `tool_calls[]` → downstream merge → A↔B dedupe → allowlist → budget bump.
+1. ✅ `proxy/tools.py`: registry + inline executor (one continuation, strip `proxy_*`, settings/caps) + registered tool settings (`DUAL_LOBE_PROXY_TOOLS` etc.).
+2. ✅ `proxy_memory_search`, `proxy_delegate`, `proxy_consult`.
+3. ✅ B contract `tool_calls[]` → downstream merge → A↔B dedupe → allowlist → budget bump (Railway `DUAL_LOBE_B_MAX_OUTPUT_TOKENS` 2400 → 2700).
 4. Splitter subsystem: `DUAL_LOBE_SPLITTER` (default off), `DUAL_LOBE_SPLITTER_MODEL`, heuristic pre-gate + economic criterion, fragment routing, merge (`append`|`integrate` continuation), splitter verification in split mode, injection retirement behind the flag.
 5. Tests + `compileall` + `pytest` + deploy + live verify (client never sees `proxy_*`; delegate/consult turns; split turn end-to-end; headers; latency baseline).
 

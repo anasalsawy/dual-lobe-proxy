@@ -22,11 +22,21 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from typing import Any
 
 from ..core.settings import get_settings
 from ..provider.adapters import NormalizedRequest, response_dict
 from ..provider.registry import get_registry
+from ..proxy.tools import (
+    CONSULT,
+    DELEGATE,
+    MEMORY_SEARCH,
+    execute_proxy_call,
+    is_proxy_tool,
+    proxy_tool_schemas,
+    strip_proxy_calls,
+)
 from ..roles import get_role_persona
 from ..state.memory import inject_shared_memory, search_memory
 from .prompts import (
@@ -153,6 +163,79 @@ async def _call_b_json(system_prompt: str, user_prompt: str, contract: str) -> d
     raise last_error
 
 
+async def _resolve_proxy_tools(
+    *,
+    a_data: dict[str, Any],
+    enriched_messages: list[dict[str, Any]],
+    payload: dict[str, Any],
+    tenant_id: int,
+    space: str | None,
+    run_id: str,
+    a_adapter,
+    s,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    """Execute A's proxy tool calls inline, then take ONE continuation.
+
+    Returns the (possibly replaced) response data plus per-tool usage counts.
+    When A made no proxy calls nothing changes. The proxy exchange — A's
+    proxy tool_calls and the tool results — stays server-side; the client
+    only ever sees the continuation's response. The continuation is offered
+    the client's tools only: proxy re-entry is not possible, so no loop or
+    hop cap machinery is needed.
+    """
+    message = (a_data.get("choices") or [{}])[0].get("message", {})
+    proxy_calls = [tc for tc in (message.get("tool_calls") or [])
+                   if is_proxy_tool((tc.get("function") or {}).get("name"))]
+    if not proxy_calls:
+        return a_data, {}
+    caps = {
+        MEMORY_SEARCH: s.proxy_memory_search_cap,
+        DELEGATE: s.proxy_delegate_cap,
+        CONSULT: s.proxy_consult_cap,
+    }
+    used: dict[str, int] = {}
+    results: list[str] = []
+    for tc in proxy_calls:
+        results.append(await execute_proxy_call(
+            tc, tenant_id=tenant_id, space=space, messages=enriched_messages,
+            used=used, caps=caps))
+    exchange: list[dict[str, Any]] = [
+        {"role": "assistant", "content": None, "tool_calls": proxy_calls},
+    ] + [
+        {"role": "tool",
+         "tool_call_id": str(tc.get("id") or f"proxy-{i}"),
+         "content": results[i]}
+        for i, tc in enumerate(proxy_calls)
+    ]
+    cont_req = NormalizedRequest(
+        messages=enriched_messages + exchange,
+        temperature=payload.get("temperature"),
+        max_tokens=payload.get("max_tokens"),
+        top_p=payload.get("top_p"),
+        tools=payload.get("tools"),
+        tool_choice=payload.get("tool_choice"),
+        stream=False,
+        timeout=s.a_timeout,
+    )
+    try:
+        response = await asyncio.wait_for(a_adapter.buffered(cont_req),
+                                          timeout=s.a_timeout)
+        cont = response_dict(response)
+        if cont.get("choices"):
+            return cont, used
+        raise ValueError("continuation returned no choices")
+    except Exception as exc:
+        LOG.warning("proxy continuation failed run=%s: %s — returning A's first "
+                    "message with proxy calls stripped", run_id, exc)
+        cleaned = strip_proxy_calls(message)
+        if not (cleaned.get("content") or cleaned.get("tool_calls")):
+            cleaned = {**cleaned, "content": ""}
+        choice = {**(a_data.get("choices") or [{}])[0], "message": cleaned}
+        choice.setdefault("index", 0)
+        choice.setdefault("finish_reason", "stop")
+        return {**a_data, "choices": [choice]}, used
+
+
 def _insert_system_injections(
     messages: list[dict[str, Any]],
     injections: list[str],
@@ -277,6 +360,110 @@ async def _memory_search_into(run_id: str, tenant_id: int, space: str | None,
         handoff["memory_hits"] = hits
 
 
+def _client_tool_names(client_tools: Any) -> set[str]:
+    """Names of tools the CLIENT will execute this turn (proxy tools excluded).
+
+    B may only ask for tools whose execution environment actually exists
+    client-side; anything else can never run and would strand a tool call.
+    """
+    names: set[str] = set()
+    for tool in client_tools or []:
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            continue
+        fn = tool.get("function") or {}
+        name = str(fn.get("name") or "").strip()
+        if name and not is_proxy_tool(name):
+            names.add(name)
+    return names
+
+
+def _extract_b_tool_calls(b_downstream: Any, allowed: set[str],
+                          limit: int = 2) -> list[dict[str, Any]]:
+    """B's downstream tool requests: allowlisted, valid JSON args, at most `limit`.
+
+    Contract violations (wrong tool, bad arguments, too many) are dropped
+    silently — B's rating still lands; only the requested action is skipped.
+    """
+    if not isinstance(b_downstream, dict):
+        return []
+    raw = b_downstream.get("tool_calls")
+    if not isinstance(raw, list):
+        return []
+    calls: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if name not in allowed:
+            continue
+        args = item.get("arguments")
+        if isinstance(args, dict):
+            arguments = json.dumps(args, ensure_ascii=False)
+        else:
+            arguments = str(args or "{}")
+        try:
+            json.loads(arguments)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        calls.append({
+            "id": f"b-{uuid.uuid4().hex[:12]}",
+            "type": "function",
+            "function": {"name": name, "arguments": arguments},
+        })
+        if len(calls) >= limit:
+            break
+    return calls
+
+
+def _call_key(call: dict[str, Any]) -> tuple[str, str]:
+    """(name, normalized-arguments) identity for tool-call dedupe."""
+    fn = call.get("function") or {}
+    raw = str(fn.get("arguments") or "{}")
+    try:
+        parsed = json.loads(raw)
+        canon = (json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+                 if isinstance(parsed, dict) else raw)
+    except json.JSONDecodeError:
+        canon = raw
+    return (str(fn.get("name") or ""), canon)
+
+
+def _merge_b_tool_calls(
+    a_data: dict[str, Any], b_calls: list[dict[str, Any]],
+) -> tuple[dict[str, Any], int]:
+    """Append B's downstream tool requests to A's final assistant message.
+
+    A's own calls win an exact (name, normalized arguments) duplicate: the
+    client executes it once and the shared transcript feeds both lobes next
+    turn. Returns (data, count of calls actually added).
+    """
+    if not b_calls:
+        return a_data, 0
+    choices = list(a_data.get("choices") or [])
+    if not choices:
+        return a_data, 0
+    choice = dict(choices[0])
+    message = dict(choice.get("message") or {})
+    merged = list(message.get("tool_calls") or [])
+    before = len(merged)
+    seen = {_call_key(c) for c in merged}
+    for call in b_calls:
+        key = _call_key(call)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(call)
+    added = len(merged) - before
+    if not added:
+        return a_data, 0
+    message["tool_calls"] = merged
+    if choice.get("finish_reason") in (None, "stop"):
+        choice["finish_reason"] = "tool_calls"
+    choice["message"] = message
+    choices[0] = choice
+    return {**a_data, "choices": choices}, added
+
+
 def _handoff_headers(headers: dict[str, str], handoff: dict[str, Any]) -> None:
     """Publish handoff status as response headers (never in the user body)."""
     if not handoff:
@@ -365,12 +552,16 @@ async def gated_response(
 
     # ── 2. A generates response ──────────────────────────────────
     a_adapter = get_registry().adapter("lobe-a")
+    proxy_on = bool(getattr(s, "proxy_tools_enabled", True))
+    client_tools = payload.get("tools")
+    a_tools = (([*(client_tools or [])] + proxy_tool_schemas())
+               if proxy_on else client_tools)
     a_req = NormalizedRequest(
         messages=enriched_messages,
         temperature=payload.get("temperature"),
         max_tokens=payload.get("max_tokens"),
         top_p=payload.get("top_p"),
-        tools=payload.get("tools"),
+        tools=a_tools,
         tool_choice=payload.get("tool_choice"),
         stream=False,
         timeout=s.a_timeout,
@@ -388,6 +579,14 @@ async def gated_response(
             {"error": {"type": "upstream_error", "message": "Upstream request failed."}},
             {"X-Dual-Lobe-Gated": "error"},
         )
+
+    # ── 2b. Proxy tools: inline execution + ONE same-turn continuation ──
+    proxy_used: dict[str, int] = {}
+    if proxy_on:
+        a_data, proxy_used = await _resolve_proxy_tools(
+            a_data=a_data, enriched_messages=enriched_messages, payload=payload,
+            tenant_id=tenant_id, space=shared_space, run_id=run_id,
+            a_adapter=a_adapter, s=s)
 
     a_message = (a_data.get("choices") or [{}])[0].get("message", {})
     a_content = a_message.get("content", "")
@@ -418,6 +617,7 @@ async def gated_response(
 
     b_downstream: dict = {}
     handoff: dict[str, Any] = {}
+    b_tool_calls: list[dict[str, Any]] = []
     try:
         b_downstream = await asyncio.wait_for(
             _call_b_json(b_system, downstream_prompt, b_contract),
@@ -437,6 +637,12 @@ async def gated_response(
         concerns = []
         handoff = {}
 
+    # B may request client tool calls downstream — allowlisted against what
+    # this payload actually offers (never proxy tools; the client executes).
+    if isinstance(b_downstream, dict) and b_downstream.get("tool_calls"):
+        b_tool_calls = _extract_b_tool_calls(
+            b_downstream, _client_tool_names(payload.get("tools")))
+
     # B chose a targeted history search: fetch everything matching it now so
     # the content rides this turn's meter into A's next call.
     if handoff:
@@ -449,6 +655,9 @@ async def gated_response(
         "X-Dual-Lobe-Meter-Rationale": meter_rationale[:300],
     }
     _handoff_headers(headers, handoff)
+    if proxy_used:
+        headers["X-Dual-Lobe-Proxy-Tools"] = ",".join(
+            f"{name}x{count}" for name, count in sorted(proxy_used.items()))
 
     # ── 5. Optional flip-back (opt-in via DUAL_LOBE_GATED_FLIP_BACK)
     flip_back = getattr(s, "gated_flip_back", False)
@@ -517,6 +726,9 @@ async def gated_response(
                 if handoff_on:
                     handoff = _extract_handoff(b_recheck)
                     await _memory_search_into(run_id, tenant_id, shared_space, handoff)
+                # Recheck supersedes the first verdict's tool requests.
+                b_tool_calls = _extract_b_tool_calls(
+                    b_recheck, _client_tool_names(payload.get("tools")))
                 LOG.info("gated recheck run=%s level=%s", run_id, deception_level)
                 headers["X-Dual-Lobe-Meter"] = deception_level
                 headers["X-Dual-Lobe-Meter-Rationale"] = meter_rationale[:300]
@@ -526,6 +738,12 @@ async def gated_response(
                 LOG.warning("gated recheck failed run=%s: %s", run_id, exc)
         except Exception as exc:
             LOG.warning("gated flip-back failed run=%s: %s — forwarding original", run_id, exc)
+
+    # B's downstream tool requests ride A's final assistant message; the
+    # client executes them with the same tools it offered us.
+    a_data, b_calls_added = _merge_b_tool_calls(a_data, b_tool_calls)
+    if b_calls_added:
+        headers["X-Dual-Lobe-B-Tool-Calls"] = str(b_calls_added)
 
     # Store meter for next upstream
     _set_meter(run_id, {
