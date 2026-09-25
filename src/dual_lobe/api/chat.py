@@ -134,6 +134,30 @@ async def _call_a_with_retry(fn, retries: int):
             await asyncio.sleep(min(.25 * (attempt + 1), 1))
 
 
+async def _record_memory_now(tenant_id: int, space: str | None, run_id: str,
+                             messages: list[dict], responses: list[dict]) -> None:
+    if not space or not responses:
+        return
+    try:
+        await record_memory(tenant_id, space, run_id, str(uuid.uuid4()), messages, responses)
+    except Exception:
+        LOG.warning("shared memory record failed run=%s", run_id)
+
+
+def _record_background(tenant_id: int, space: str | None, run_id: str,
+                       messages: list[dict], data: dict):
+    if not space:
+        return None
+    # Snapshot the response messages NOW: the SSE converter rewrites choices
+    # (message -> delta) in place while streaming, and the background task runs
+    # only after the stream has finished.
+    responses = [c.get("message") for c in (data.get("choices") or [])
+                 if c.get("message")]
+    if not responses:
+        return None
+    return BackgroundTask(_record_memory_now, tenant_id, space, run_id, messages, responses)
+
+
 async def _read_context(tenant_id: int, run_id: str, floor: str, attempt: int) -> ObserverContext:
     s = get_settings()
     try:
@@ -653,10 +677,21 @@ async def chat_completions(
     # be tested side-by-side.
     if alias == "sawii/dialogue":
         from ..coauthor.handler import coauthor_response
+        shared_text, shared_entries = None, 0
+        if memory_space:
+            try:
+                shared = await load_memory(principal.tenant_id, memory_space, messages)
+                shared_text, shared_entries = shared.text, len(shared.entry_ids)
+            except Exception:
+                LOG.warning("shared memory load failed run=%s (fail-open)", run_id)
         data, co_headers = await coauthor_response(
-            payload, run_id, principal.tenant_id, alias
+            payload, run_id, principal.tenant_id, alias, shared_text=shared_text
         )
         co_headers = _headers(co_headers)
+        co_headers["X-Dual-Lobe-Memory-Space"] = memory_space or "off"
+        co_headers["X-Dual-Lobe-Shared-Entries"] = str(shared_entries)
+        co_background = _record_background(
+            principal.tenant_id, memory_space, run_id, messages, data)
         if payload.get("stream", False):
             import json as _json
 
@@ -673,14 +708,30 @@ async def chat_completions(
             return StreamingResponse(
                 _coauthor_stream(), media_type="text/event-stream",
                 headers={**co_headers, "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                background=co_background,
             )
-        return JSONResponse(data, status_code=200, headers=co_headers)
+        return JSONResponse(data, status_code=200, headers=co_headers,
+                            background=co_background)
 
     # Gated mode: B sits inline.  Completely separate code path.
     if alias in ("sawii/dl-gated", "sawii/dl-dialogue", "sawii/dual-lobe-old"):
         from ..gated.handler import gated_response
-        data, gate_headers = await gated_response(payload, run_id, principal.tenant_id, alias)
+        shared_text, shared_entries = None, 0
+        if memory_space:
+            try:
+                shared = await load_memory(principal.tenant_id, memory_space, messages)
+                shared_text, shared_entries = shared.text, len(shared.entry_ids)
+            except Exception:
+                LOG.warning("shared memory load failed run=%s (fail-open)", run_id)
+        data, gate_headers = await gated_response(
+            payload, run_id, principal.tenant_id, alias,
+            shared_text=shared_text, shared_space=memory_space,
+        )
         gate_headers = _headers(gate_headers)
+        gate_headers["X-Dual-Lobe-Memory-Space"] = memory_space or "off"
+        gate_headers["X-Dual-Lobe-Shared-Entries"] = str(shared_entries)
+        gate_background = _record_background(
+            principal.tenant_id, memory_space, run_id, messages, data)
         # If Hermes requested streaming, convert the buffered response to SSE
         if payload.get("stream", False):
             import json as _json
@@ -696,8 +747,10 @@ async def chat_completions(
             return StreamingResponse(
                 _gated_stream(), media_type="text/event-stream",
                 headers={**gate_headers, "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                background=gate_background,
             )
-        return JSONResponse(data, status_code=200, headers=gate_headers)
+        return JSONResponse(data, status_code=200, headers=gate_headers,
+                            background=gate_background)
 
     # Pre-emptive routing check: if routing is enabled for this alias, ask the
     # router LLM (lobe-b) whether this agent should respond BEFORE calling the

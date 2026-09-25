@@ -26,6 +26,7 @@ from typing import Any
 from ..core.settings import get_settings
 from ..provider.adapters import NormalizedRequest, response_dict
 from ..provider.registry import get_registry
+from ..state.memory import inject_shared_memory
 from .prompts import COAUTHOR_B_UPSTREAM, COAUTHOR_B_DOWNSTREAM
 
 LOG = logging.getLogger("dual_lobe.coauthor")
@@ -346,11 +347,17 @@ async def coauthor_response(
     run_id: str,
     tenant_id: int,
     public_model: str = "sawii/dialogue",
+    *,
+    shared_text: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Generate one wrapped co-authored response."""
     del tenant_id  # retained for API symmetry / future persistent state
     s = get_settings()
-    canonical = payload["messages"]
+    # Shared persistent memory, pre-loaded by the API layer: user-role named
+    # message at the same boundary every other path uses. The canonical list is
+    # never mutated; inject_shared_memory returns a new list (or the original
+    # when shared_text is empty).
+    canonical = inject_shared_memory(payload["messages"], shared_text)
     latest_idx = _latest_user_index(canonical)
     latest_user = _content_text(canonical[latest_idx].get("content")) if latest_idx is not None else ""
     prior = _handoff_store.get(run_id) or {}

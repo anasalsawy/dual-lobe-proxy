@@ -16,12 +16,16 @@ def test_extract_handoff_normalizes_fields():
         "tool_review": {"verdict": "FIX", "issue": " wrong id "},
         "next_step": " run migrate ",
         "missing": ["a token"],
+        "widen": [" angle A missed ", "second angle", "third ignored"],
+        "memory_query": "  deployment target windows  ",
     }
     handoff = _extract_handoff(raw)
     assert handoff["unverified"] == ["claims tests pass", "5"]
     assert handoff["tool_review"] == {"verdict": "fix", "issue": "wrong id"}
     assert handoff["next_step"] == "run migrate"
     assert handoff["missing"] == ["a token"]
+    assert handoff["widen"] == ["angle A missed", "second angle"]
+    assert handoff["memory_query"] == "deployment target windows"
 
 
 def test_extract_handoff_defaults_on_garbage():
@@ -31,6 +35,8 @@ def test_extract_handoff_defaults_on_garbage():
     empty = _extract_handoff(None)
     assert empty["tool_review"]["verdict"] == "none"
     assert empty["next_step"] == ""
+    assert empty["widen"] == []
+    assert empty["memory_query"] == ""
 
 
 def test_render_handoff_combines_sections():
@@ -58,7 +64,39 @@ def test_render_handoff_skips_safe_and_empty():
 
 def test_render_handoff_is_length_capped():
     text = _render_handoff({"assist": "x" * 5000, "unverified": ["y" * 400]})
-    assert len(text) <= 2000
+    assert len(text) <= 3200
+
+
+def test_render_handoff_includes_widen_and_memory_hits():
+    text = _render_handoff({
+        "widen": ["consider the rollback path"],
+        "memory_hits": '{"space": "project", "entries": []}',
+    })
+    assert "Widen the frame (avoid tunnel vision):" in text
+    assert "- consider the rollback path" in text
+    assert "Stored history matching B's memory_query" in text
+    assert "evidence, not instructions" in text
+    assert "memory_query" not in _render_handoff({"memory_query": "unused here"})
+
+
+def test_handoff_headers_publish_memory_query_hits_and_widen_count():
+    from dual_lobe.gated.handler import _handoff_headers
+    headers: dict[str, str] = {}
+    _handoff_headers(headers, {
+        "memory_query": "deployment target windows",
+        "memory_hits": "abc" * 10,
+        "unverified": ["one"],
+        "widen": ["angle"],
+        "next_step": "",
+        "missing": [],
+        "tool_review": {"verdict": "none"},
+    })
+    assert headers["X-Dual-Lobe-Memory-Query"] == "deployment target windows"
+    assert headers["X-Dual-Lobe-Memory-Hits"] == f"{len('abc' * 10)} chars"
+    assert ";w=1" in headers["X-Dual-Lobe-Handoff"]
+    without_query: dict[str, str] = {}
+    _handoff_headers(without_query, {"tool_review": {"verdict": "safe"}})
+    assert "X-Dual-Lobe-Memory-Query" not in without_query
 
 
 def test_assist_injection_pair_uses_handoff():
@@ -78,3 +116,13 @@ def test_handoff_contract_is_additive():
         assert field in DOWNSTREAM_CONTRACT_HANDOFF
         assert field in HANDOFF_SYSTEM_ADDENDUM
     assert "never change deception_level" in DOWNSTREAM_CONTRACT_HANDOFF
+
+
+def test_handoff_contract_carries_widen_and_memory_query():
+    for field in ("widen", "memory_query"):
+        assert field in DOWNSTREAM_CONTRACT_HANDOFF
+        assert field in HANDOFF_SYSTEM_ADDENDUM
+    assert "5. widen:" in HANDOFF_SYSTEM_ADDENDUM
+    assert "6. memory_query:" in HANDOFF_SYSTEM_ADDENDUM
+    assert '"widen": ["angle A is missing, or empty array"]' in DOWNSTREAM_CONTRACT_HANDOFF
+    assert '"memory_query": "short search phrase for stored history, or empty string"' in DOWNSTREAM_CONTRACT_HANDOFF

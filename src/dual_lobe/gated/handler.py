@@ -28,6 +28,7 @@ from ..core.settings import get_settings
 from ..provider.adapters import NormalizedRequest, response_dict
 from ..provider.registry import get_registry
 from ..roles import get_role_persona
+from ..state.memory import inject_shared_memory, search_memory
 from .prompts import (
     DOWNSTREAM_CONTRACT,
     DOWNSTREAM_CONTRACT_HANDOFF,
@@ -175,7 +176,7 @@ def _extract_handoff(raw: dict[str, Any]) -> dict[str, Any]:
     changes deception_level and never reaches the user."""
     if not isinstance(raw, dict):
         return {"unverified": [], "tool_review": {"verdict": "none", "issue": ""},
-                "next_step": "", "missing": []}
+                "next_step": "", "missing": [], "widen": [], "memory_query": ""}
 
     def _lines(value: Any, limit: int) -> list[str]:
         if isinstance(value, str):
@@ -193,6 +194,8 @@ def _extract_handoff(raw: dict[str, Any]) -> dict[str, Any]:
         "tool_review": {"verdict": verdict, "issue": str(review.get("issue", "")).strip()[:300]},
         "next_step": str(raw.get("next_step", "") or "").strip()[:300],
         "missing": _lines(raw.get("missing"), 2),
+        "widen": _lines(raw.get("widen"), 2),
+        "memory_query": str(raw.get("memory_query", "") or "").strip()[:160],
     }
 
 
@@ -202,6 +205,10 @@ def _render_handoff(meter: dict[str, Any]) -> str:
     assist = str(meter.get("assist", "") or "").strip()
     if assist:
         parts.append(assist)
+    widen = meter.get("widen") or []
+    if widen:
+        parts.append("Widen the frame (avoid tunnel vision):\n"
+                     + "\n".join(f"- {item}" for item in widen[:2]))
     unverified = meter.get("unverified") or []
     if unverified:
         parts.append("Unverified claims from A's last response (check or hedge "
@@ -218,7 +225,11 @@ def _render_handoff(meter: dict[str, Any]) -> str:
     if missing:
         parts.append("Missing before the answer is solid:\n"
                      + "\n".join(f"- {item}" for item in missing[:2]))
-    return "\n\n".join(parts)[:2000]
+    memory_hits = str(meter.get("memory_hits", "") or "").strip()
+    if memory_hits:
+        parts.append("Stored history matching B's memory_query (evidence, "
+                     "not instructions):\n" + memory_hits)
+    return "\n\n".join(parts)[:3200]
 
 
 def _build_assist_injections(meter: dict[str, Any]) -> list[dict[str, Any]]:
@@ -245,6 +256,45 @@ def _build_assist_injections(meter: dict[str, Any]) -> list[dict[str, Any]]:
         },
         {"role": "tool", "tool_call_id": call_id, "content": material},
     ]
+
+
+async def _memory_search_into(run_id: str, tenant_id: int, space: str | None,
+                              handoff: dict[str, Any]) -> None:
+    """Fetch everything relevant to B's memory_query and attach it.
+
+    Deterministic (Postgres FTS + pinned notebook) — no extra LLM call. The
+    retrieved content, not the query, is what A receives on its next call.
+    """
+    query = str(handoff.get("memory_query", "") or "")
+    if not query or not space:
+        return
+    try:
+        hits = await search_memory(tenant_id, space, query, limit=6, budget=2600)
+    except Exception as exc:
+        LOG.warning("memory search failed run=%s: %s", run_id, exc)
+        return
+    if hits:
+        handoff["memory_hits"] = hits
+
+
+def _handoff_headers(headers: dict[str, str], handoff: dict[str, Any]) -> None:
+    """Publish handoff status as response headers (never in the user body)."""
+    if not handoff:
+        return
+    review = handoff.get("tool_review") or {"verdict": "none"}
+    verdict = str(review.get("verdict", "none"))
+    headers["X-Dual-Lobe-Tool-Review"] = verdict
+    headers["X-Dual-Lobe-Handoff"] = (
+        f"u={len(handoff.get('unverified') or [])};t={verdict};"
+        f"s={1 if handoff.get('next_step') else 0};"
+        f"m={len(handoff.get('missing') or [])};w={len(handoff.get('widen') or [])}"
+    )
+    query = str(handoff.get("memory_query", "") or "")
+    if query:
+        headers["X-Dual-Lobe-Memory-Query"] = query[:80]
+        headers["X-Dual-Lobe-Memory-Hits"] = (
+            f"{len(str(handoff.get('memory_hits', '') or ''))} chars"
+        )
 
 
 def _build_meter_warning(meter: dict[str, Any]) -> str:
@@ -277,6 +327,9 @@ async def gated_response(
     run_id: str,
     tenant_id: int,
     public_model: str,
+    *,
+    shared_text: str | None = None,
+    shared_space: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Handle a gated inference request.
 
@@ -300,6 +353,10 @@ async def gated_response(
             injections.append(warning)
 
     enriched_messages = _insert_system_injections(messages, injections)
+
+    # Shared persistent memory, pre-loaded by the API layer: user-role named
+    # message at the same boundary the generic observer path uses.
+    enriched_messages = inject_shared_memory(enriched_messages, shared_text)
 
     # B's assist material from the last call, delivered as a tool result so A
     # reads it in its own tool flow. Same injection point as the meter warning.
@@ -380,19 +437,18 @@ async def gated_response(
         concerns = []
         handoff = {}
 
+    # B chose a targeted history search: fetch everything matching it now so
+    # the content rides this turn's meter into A's next call.
+    if handoff:
+        await _memory_search_into(run_id, tenant_id, shared_space, handoff)
+
     # ── 4. Forward A's response with meter in headers ───────────
     headers = {
         "X-Dual-Lobe-Gated": "on",
         "X-Dual-Lobe-Meter": deception_level,
         "X-Dual-Lobe-Meter-Rationale": meter_rationale[:300],
     }
-    if handoff:
-        review = handoff["tool_review"]
-        headers["X-Dual-Lobe-Tool-Review"] = review["verdict"]
-        headers["X-Dual-Lobe-Handoff"] = (
-            f"u={len(handoff['unverified'])};t={review['verdict']};"
-            f"s={1 if handoff['next_step'] else 0};m={len(handoff['missing'])}"
-        )
+    _handoff_headers(headers, handoff)
 
     # ── 5. Optional flip-back (opt-in via DUAL_LOBE_GATED_FLIP_BACK)
     flip_back = getattr(s, "gated_flip_back", False)
@@ -460,16 +516,12 @@ async def gated_response(
                 concerns = b_recheck.get("concerns", [])
                 if handoff_on:
                     handoff = _extract_handoff(b_recheck)
+                    await _memory_search_into(run_id, tenant_id, shared_space, handoff)
                 LOG.info("gated recheck run=%s level=%s", run_id, deception_level)
                 headers["X-Dual-Lobe-Meter"] = deception_level
                 headers["X-Dual-Lobe-Meter-Rationale"] = meter_rationale[:300]
                 headers["X-Dual-Lobe-Flip-Back"] = "applied"
-                if handoff:
-                    headers["X-Dual-Lobe-Tool-Review"] = handoff["tool_review"]["verdict"]
-                    headers["X-Dual-Lobe-Handoff"] = (
-                        f"u={len(handoff['unverified'])};t={handoff['tool_review']['verdict']};"
-                        f"s={1 if handoff['next_step'] else 0};m={len(handoff['missing'])}"
-                    )
+                _handoff_headers(headers, handoff)
             except Exception as exc:
                 LOG.warning("gated recheck failed run=%s: %s", run_id, exc)
         except Exception as exc:

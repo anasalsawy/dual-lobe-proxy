@@ -49,7 +49,7 @@ def test_three_paths_are_distinct_and_user_input_is_unchanged():
     assert result[1] == {"role": "system", "content": prompts.OBSERVATION_REMINDER}
     deception, memory, claims = result[2:5]
     assert deception["name"] == "observer_deception"
-    assert deception["content"].startswith("Observer deception meter")
+    assert deception["content"].startswith("Observer meter")
     assert memory["name"] == "observer_memory" and claims["name"] == "observer_claims"
     assert memory["role"] == claims["role"] == deception["role"] == "user"
     assert "Windows" in memory["content"] and "All tests passed." not in memory["content"]
