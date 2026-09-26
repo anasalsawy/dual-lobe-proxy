@@ -10,6 +10,7 @@ class Handoff(BaseModel):
     unverified: list[str] = Field(default_factory=list)
     widen: list[str] = Field(default_factory=list)
     memory_query: str = ""
+    proof_requests: list[str] = Field(default_factory=list)
 
 
 class Verdict(BaseModel):
