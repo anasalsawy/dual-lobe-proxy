@@ -14,13 +14,13 @@ class Handoff(BaseModel):
 
 class Verdict(BaseModel):
     deception_level: Literal["GREEN", "YELLOW", "RED"]
-    rationale: str
+    rationale: str = Field(min_length=1)
     handoff: Handoff = Field(default_factory=Handoff)
 
 
 class SplitFragment(BaseModel):
     owner: Literal["A", "B"]
-    task: str
+    task: str = Field(min_length=1)
 
 
 class SplitPlan(BaseModel):
@@ -28,7 +28,7 @@ class SplitPlan(BaseModel):
     fragments: list[SplitFragment] = Field(default_factory=list)
     merge: Literal["append", "integrate"] = "integrate"
     start: str = ""
-    reason: str
+    reason: str = Field(min_length=1)
 
 
 class SplitQuality(BaseModel):
@@ -41,7 +41,7 @@ class SplitQuality(BaseModel):
     unnecessary_split: bool = False
     missed_valid_split: bool = False
     better_single_model: bool = False
-    feedback: str
+    feedback: str = Field(min_length=1)
 
 
 class TurnReview(BaseModel):
@@ -50,6 +50,6 @@ class TurnReview(BaseModel):
 
 
 class FinalizedTurn(BaseModel):
-    final_answer: str
+    final_answer: str = Field(min_length=1)
     answer_verdict: Verdict
     split_verdict: SplitQuality
