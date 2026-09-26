@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Iterable
+from typing import Awaitable, Callable, Iterable
 
 
 class FloorMode(str, Enum):
@@ -17,6 +17,7 @@ class AgentIdentity:
     agent_id: str
     display_name: str
     aliases: tuple[str, ...] = ()
+    role: str = ""
 
     def all_names(self) -> tuple[str, ...]:
         values = [self.display_name, *self.aliases]
@@ -138,8 +139,7 @@ class GroupCoordinator:
 
         return tuple(found)
 
-    def route(self, message: GroupMessage) -> dict[str, AgentDelivery]:
-        targets = self.resolve_targets(message)
+    def route_to_targets(self, message: GroupMessage, targets: tuple[str, ...]) -> dict[str, AgentDelivery]:
         target_set = set(targets)
         is_broadcast = len(target_set) == len(self.identities) and bool(target_set)
 
@@ -174,6 +174,9 @@ class GroupCoordinator:
             )
         return deliveries
 
+    def route(self, message: GroupMessage) -> dict[str, AgentDelivery]:
+        return self.route_to_targets(message, self.resolve_targets(message))
+
     def consume_awareness_context(self, agent_id: str) -> str:
         if agent_id not in self.states:
             raise KeyError(agent_id)
@@ -203,27 +206,108 @@ class GroupCoordinator:
 class GroupDualLobeRuntime:
     """Live-call integration layer for a group of Dual-Lobe agents.
 
-    Only agents granted the floor are invoked. Observers receive deterministic
-    awareness state only, so group awareness adds no observer model calls.
+    Single-agent sessions bypass group routing entirely. Multi-agent sessions
+    use deterministic routing first and call the semantic resolver only when
+    deterministic metadata/name matching finds no target.
     """
 
-    def __init__(self, identities: Iterable[AgentIdentity], *, engine_factory: Callable[[AgentIdentity], object] | None = None):
+    def __init__(
+        self,
+        identities: Iterable[AgentIdentity],
+        *,
+        engine_factory: Callable[[AgentIdentity], object] | None = None,
+        semantic_resolver: Callable[[GroupMessage, tuple[AgentIdentity, ...]], Awaitable[tuple[str, ...]]] | None = None,
+    ):
         identities = list(identities)
         self.coordinator = GroupCoordinator(identities)
+        self.semantic_resolver = semantic_resolver
         if engine_factory is None:
             from .engines import SplitEngine
             from .memory import JsonlMemoryStore
             from pathlib import Path
             import os
             base = Path(os.getenv("DUAL_LOBE_GROUP_MEMORY_DIR", ".dual_lobe_group_memory"))
+
             def engine_factory(identity: AgentIdentity):
                 safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", identity.agent_id)
                 return SplitEngine(memory=JsonlMemoryStore(str(base / f"{safe_id}.jsonl")))
+
         self.engines = {identity.agent_id: engine_factory(identity) for identity in identities}
+
+    async def _default_semantic_resolver(
+        self,
+        message: GroupMessage,
+        identities: tuple[AgentIdentity, ...],
+    ) -> tuple[str, ...]:
+        """Resolve genuinely ambiguous addressing with one small LLM call.
+
+        This is never reached for a single-agent session or when deterministic
+        metadata/name/alias/broadcast routing already found a target.
+        """
+        import json
+        from .agents import make_a
+        from .json_utils import extract_json_object
+        from .runner import run_one
+
+        roster = [
+            {
+                "agent_id": identity.agent_id,
+                "display_name": identity.display_name,
+                "aliases": list(identity.aliases),
+                "role": identity.role,
+            }
+            for identity in identities
+        ]
+        prompt = (
+            "You are only an addressing resolver for a multi-agent group chat.\n"
+            "Decide which agent or agents the message is asking to respond.\n"
+            "Do NOT answer the message itself. Do NOT assign work merely because an agent could do it.\n"
+            "Return no targets for an informational statement with no implied respondent.\n"
+            "Use only agent_ids from the roster.\n\n"
+            f"ROSTER:\n{json.dumps(roster, ensure_ascii=False)}\n\n"
+            f"MESSAGE:\n{message.text}\n\n"
+            'Return ONLY JSON: {"target_ids":["agent_id"],"broadcast":false,"reason":"brief"}'
+        )
+        agent = make_a(tools=None)
+        raw = await run_one(
+            agent,
+            prompt,
+            "Strict JSON selecting zero or more addressed agent IDs.",
+            role_key="A",
+        )
+        try:
+            data = extract_json_object(raw) or {}
+        except Exception:
+            return ()
+        if bool(data.get("broadcast")):
+            return tuple(self.coordinator.identities)
+        allowed = set(self.coordinator.identities)
+        out: list[str] = []
+        for agent_id in data.get("target_ids") or []:
+            if agent_id in allowed and agent_id not in out:
+                out.append(agent_id)
+        return tuple(out)
+
+    async def _resolve_targets(self, message: GroupMessage) -> tuple[str, ...]:
+        deterministic = self.coordinator.resolve_targets(message)
+        if deterministic:
+            return deterministic
+        identities = tuple(self.coordinator.identities.values())
+        resolver = self.semantic_resolver or self._default_semantic_resolver
+        try:
+            resolved = await resolver(message, identities)
+        except Exception:
+            return ()
+        allowed = set(self.coordinator.identities)
+        return tuple(dict.fromkeys(x for x in resolved if x in allowed))
 
     def _identity_envelope(self, agent_id: str) -> str:
         identity = self.coordinator.identities[agent_id]
-        others = [f"{x.display_name} (agent_id={x.agent_id})" for x in self.coordinator.identities.values() if x.agent_id != agent_id]
+        others = [
+            f"{x.display_name} (agent_id={x.agent_id})"
+            for x in self.coordinator.identities.values()
+            if x.agent_id != agent_id
+        ]
         other_text = ", ".join(others) if others else "(none)"
         return (
             "RUNTIME IDENTITY — authoritative, not user-authored:\n"
@@ -247,19 +331,53 @@ class GroupDualLobeRuntime:
 
     async def process_message(self, message: GroupMessage) -> GroupTurnResult:
         import asyncio
-        deliveries = self.coordinator.route(message)
-        targets = [agent_id for agent_id, delivery in deliveries.items() if delivery.can_emit]
-        if not targets:
-            return GroupTurnResult(deliveries=deliveries, published={}, suppressed=tuple(self.coordinator.identities))
+
+        # Zero-overhead group fast path: with one attached agent, do not parse
+        # mentions, build identity envelopes, touch awareness queues, or invoke
+        # a semantic addressing model. Send the original text straight to the
+        # existing Dual-Lobe engine.
+        if len(self.coordinator.identities) == 1:
+            agent_id = next(iter(self.coordinator.identities))
+            result = await self.engines[agent_id].run(message.text)
+            generated = getattr(result, "answer", str(result))
+            delivery = AgentDelivery(
+                agent_id=agent_id,
+                mode=FloorMode.RESPOND,
+                can_emit=True,
+                text="",
+                addressed_agents=(agent_id,),
+            )
+            text = (generated or "").strip()
+            return GroupTurnResult(
+                deliveries={agent_id: delivery},
+                published={agent_id: text} if text else {},
+                suppressed=(),
+            )
+
+        targets = await self._resolve_targets(message)
+        deliveries = self.coordinator.route_to_targets(message, targets)
+        active = [agent_id for agent_id, delivery in deliveries.items() if delivery.can_emit]
+        if not active:
+            return GroupTurnResult(
+                deliveries=deliveries,
+                published={},
+                suppressed=tuple(self.coordinator.identities),
+            )
 
         async def invoke(agent_id: str) -> tuple[str, str | None]:
-            engine = self.engines[agent_id]
-            result = await engine.run(self._task_for(agent_id, message))
+            result = await self.engines[agent_id].run(self._task_for(agent_id, message))
             generated = getattr(result, "answer", str(result))
             published = self.coordinator.gate_output(deliveries[agent_id], generated)
             return agent_id, published
 
-        pairs = await asyncio.gather(*(invoke(agent_id) for agent_id in targets))
+        pairs = await asyncio.gather(*(invoke(agent_id) for agent_id in active))
         published = {agent_id: text for agent_id, text in pairs if text}
-        suppressed = tuple(agent_id for agent_id, delivery in deliveries.items() if not delivery.can_emit)
-        return GroupTurnResult(deliveries=deliveries, published=published, suppressed=suppressed)
+        suppressed = tuple(
+            agent_id for agent_id, delivery in deliveries.items()
+            if not delivery.can_emit
+        )
+        return GroupTurnResult(
+            deliveries=deliveries,
+            published=published,
+            suppressed=suppressed,
+        )
