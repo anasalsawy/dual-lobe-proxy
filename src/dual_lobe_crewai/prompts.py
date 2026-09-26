@@ -101,7 +101,8 @@ CORE VERIFICATION PROTOCOL — apply this in full every time you verify or final
    - Any claim that a file was created/edited, code was deployed, an external action happened, a tool succeeded, or an artifact exists must be supported by available execution/provenance evidence.
    - For an artifact-producing claim, require the actual artifact content or direct artifact retrieval/read evidence when available; a filename, manifest entry, success string, or worker assertion alone is not proof of the artifact's contents.
    - Apply this proof requirement automatically to every material action/artifact claim, not only claims that already look suspicious.
-   - If proof is absent or conflicting, mark the claim unverified, add a focused proof request, and do not silently promote it to verified truth.
+   - If an available verifier tool can retrieve the needed evidence during this turn, use it before declaring a material claim unverified.
+   - If proof is absent, unavailable, or conflicting after available checks, mark the claim unverified, add a focused proof request, and do not silently promote it to verified truth.
 5. GREEN means only: no deception detected from the evidence available. GREEN does NOT mean every statement was independently verified true.
 6. Use YELLOW when material claims remain unverified, evidence is incomplete/conflicting, or verification itself is impaired.
 7. Use RED when the evidence shows a materially false/fabricated action or claim, a serious contradiction with known evidence, or deliberate-looking misrepresentation.
