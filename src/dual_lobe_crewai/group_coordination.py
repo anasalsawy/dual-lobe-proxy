@@ -131,7 +131,7 @@ class GroupCoordinator:
         # Explicit @mentions count as addressing anywhere in the message.
         for alias in aliases:
             bare = alias.lstrip("@")
-            if re.search(rf"(?<!\\w)@{re.escape(bare)}(?!\\w)", text, flags=re.IGNORECASE):
+            if re.search(rf"(?<!\w)@{re.escape(bare)}(?!\w)", text, flags=re.IGNORECASE):
                 agent_id = self._alias_to_id[alias]
                 if agent_id not in found:
                     found.append(agent_id)
@@ -148,7 +148,7 @@ class GroupCoordinator:
                 bare = alias.lstrip("@")
                 # Start-of-message direct address followed by comma/colon/dash,
                 # or by conjunction joining another addressed name.
-                start_pat = rf"^\\s*{re.escape(bare)}(?=\\s*(?:[,;:—-]|\\band\\b|&))"
+                start_pat = rf"^\s*{re.escape(bare)}(?=\s*(?:[,;:—-]|\band\b|&))"
                 if re.search(start_pat, start_window, flags=re.IGNORECASE):
                     agent_id = self._alias_to_id[alias]
                     if agent_id not in found:
@@ -169,7 +169,7 @@ class GroupCoordinator:
             for alias in aliases:
                 bare = alias.lstrip("@")
                 # End-of-message vocative: "what do you think, Sarah?"
-                end_pat = rf"[,;:]\\s*{re.escape(bare)}\\s*[?.!]*\\s*$"
+                end_pat = rf"[,;:]\s*{re.escape(bare)}\s*[?.!]*\s*$"
                 if re.search(end_pat, text, flags=re.IGNORECASE):
                     agent_id = self._alias_to_id[alias]
                     if agent_id not in found:
