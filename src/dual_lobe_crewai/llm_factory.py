@@ -14,6 +14,8 @@ def _role_defaults(role: str) -> tuple[str, int, str]:
     b_default = os.getenv("DUAL_LOBE_B_MODEL", a_default)
     if role == "A":
         return a_default, int(os.getenv("DUAL_LOBE_A_MAX_TOKENS", "8000")), "A"
+    if role == "A_CHILD":
+        return os.getenv("DUAL_LOBE_CHILD_MODEL", a_default), int(os.getenv("DUAL_LOBE_CHILD_MAX_TOKENS", "6000")), "A"
     if role == "A_MERGE":
         return os.getenv("DUAL_LOBE_A_MERGE_MODEL", a_default), int(os.getenv("DUAL_LOBE_A_MERGE_MAX_TOKENS", "12000")), "A"
     if role == "B_VERIFY":
@@ -72,7 +74,7 @@ def resolve_role_specs(role: str) -> list[ProviderSpec]:
         ))
 
     if os.getenv("DUAL_LOBE_CROSS_ROLE_FAILOVER", "true").lower() in {"1", "true", "yes", "on"}:
-        for other in ["A", "B_VERIFY", "B_WORKER"]:
+        for other in ["A", "A_CHILD", "B_VERIFY"]:
             if other == role or (role == "A_MERGE" and other == "A"):
                 continue
             alt = primary_spec(other)
