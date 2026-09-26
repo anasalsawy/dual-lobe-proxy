@@ -18,9 +18,12 @@
     "b_half": null,
     "parallel_window": null,
     "overlap": null,
-    "merge": null,
+    "merge": 0,
     "b_review": null,
-    "parallel_gain_proxy": null
+    "parallel_gain_proxy": null,
+    "collect_wait": null,
+    "a_finalize": null,
+    "same_turn_collect": null
   },
   "counts": {
     "logical_model_calls": 0,
