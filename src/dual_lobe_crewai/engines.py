@@ -167,7 +167,7 @@ Return only the user-facing candidate answer."""
     ) -> AdversarialReview:
         b_trace = ProxyToolTrace()
         b = make_b_adversary(tools=make_worker_tools(self.b_memory, trace=b_trace))
-        prompt = f"""You are Lobe B. A has produced a candidate answer. Your job is adversarial review plus anti-deception verification.
+        prompt = f"""You are Lobe B. A has produced a candidate answer. Your job is to attack it adversarially and then verify it. You are NOT the fixer or co-author.
 
 ORIGINAL USER TASK:
 {task}
@@ -204,13 +204,13 @@ Perform this sequence:
 4. When relevant, challenge whether a simpler or already-existing category of solution may make the proposed work unnecessary; do not invent external facts.
 5. Check whether A underused delegation when independent work could have reduced wall-clock time.
 6. Audit every material claim under the anti-deception protocol.
-7. Repair the candidate using available evidence and delegated results. Do not invent missing facts.
-8. Re-check the EXACT repaired final answer.
-9. Emit one canonical user-facing answer plus the verification verdict and concise adversarial findings.
+7. Do NOT repair, rewrite, complete, or improve A's answer. Expose the holes and state what would have to change or be proven.
+8. Apply the verdict to A's EXACT answer as it stands.
+9. Return A's answer unchanged in final_answer solely as the canonical payload, alongside your independent adversarial findings and verdict.
 
 Return ONLY JSON:
 {{
-  "final_answer": "complete repaired answer",
+  "final_answer": "A's candidate answer reproduced unchanged",
   "answer_verdict": {{
     "deception_level": "GREEN|YELLOW|RED",
     "rationale": "brief evidence-grounded reason",
@@ -233,7 +233,7 @@ Do not include a challenge merely to populate a field. Empty lists are correct w
         raw = await self._safe_run_one(
             b,
             prompt,
-            "Strict JSON adversarial review with canonical answer and anti-deception verdict.",
+            "Strict JSON adversarial attack with A's answer unchanged plus anti-deception verdict.",
             fallback_text="B_ADVERSARIAL_REVIEW_FAILED_OR_EMPTY",
             role_key="B_VERIFY",
         )
