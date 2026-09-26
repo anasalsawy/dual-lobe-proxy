@@ -72,41 +72,51 @@ def test_self_split_channel_can_only_be_claimed_once():
     state.executor.shutdown(wait=False, cancel_futures=True)
 
 
-def test_split_timing_proxy_positive_when_parallel_saving_exceeds_merge():
+def test_split_timing_reports_same_turn_overlap():
     state = SelfSplitRunState()
     base = time.perf_counter()
     state.split_used = True
     state.split_started_perf = base + 1.0
     state.b_started_perf = base + 1.0
     state.b_finished_perf = base + 5.0
+    state.collect_started_perf = base + 4.5
+    state.collect_finished_perf = base + 5.0
+    state.collected = True
     telemetry = SplitEngine._timing_telemetry(
         state,
         primary_started=base,
         primary_finished=base + 6.0,
-        merge_ms=500,
     )
-    assert telemetry["a_half_ms"] >= 4900
+    assert telemetry["a_half_ms"] >= 3400
     assert telemetry["b_half_ms"] >= 3900
-    assert telemetry["parallel_gain_proxy_ms"] > 3000
-    assert telemetry["measured_time_effect"] == "positive"
+    assert telemetry["overlap_ms"] > 3000
+    assert telemetry["parallel_gain_proxy_ms"] == telemetry["overlap_ms"]
+    assert telemetry["collect_wait_ms"] >= 400
+    assert telemetry["a_finalize_ms"] >= 900
+    assert telemetry["same_turn_collect"] is True
     state.executor.shutdown(wait=False, cancel_futures=True)
 
 
-def test_split_timing_proxy_negative_when_merge_dominates():
+def test_self_split_state_collects_peer_into_same_run():
+    import concurrent.futures
+
     state = SelfSplitRunState()
-    base = time.perf_counter()
-    state.split_used = True
-    state.split_started_perf = base
-    state.b_started_perf = base
-    state.b_finished_perf = base + 1.0
-    telemetry = SplitEngine._timing_telemetry(
-        state,
-        primary_started=base,
-        primary_finished=base + 1.1,
-        merge_ms=1800,
+    assert state.claim_split(
+        own_fragment="A half",
+        peer_fragment="B half",
+        reason="independent",
+        merge_mode="integrate",
+        peer_first=False,
     )
-    assert telemetry["parallel_gain_proxy_ms"] < 0
-    assert telemetry["measured_time_effect"] == "negative"
+    fut = concurrent.futures.Future()
+    fut.set_result("B completed result")
+    state.future = fut
+    got = state.collect_peer("A completed result")
+    assert got == "B completed result"
+    assert state.collected is True
+    assert state.own_result == "A completed result"
+    assert state.collect_started_perf is not None
+    assert state.collect_finished_perf is not None
     state.executor.shutdown(wait=False, cancel_futures=True)
 
 
