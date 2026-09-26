@@ -316,6 +316,8 @@ Never split merely because a decomposition is imaginable. Optimize actual comple
         b_half: str,
         memory_slice: str,
         reason: str,
+        merge_mode: str,
+        peer_first: bool,
     ) -> str:
         a = make_a(merge=True)
         return await self._safe_run_one(
@@ -331,14 +333,21 @@ SHARED MEMORY SNAPSHOT:
 SPLIT RATIONALE:
 {reason}
 
+MERGE MODE REQUESTED BY A:
+{merge_mode}
+
+ORDER HINT:
+{"B half first, then A half" if peer_first else "A half first, then B half"}
+
 A HALF:
 {a_half}
 
 B HALF:
 {b_half}
 
-Integrate the halves into one coherent final user-facing answer.
-Preserve useful substance. Resolve overlap or contradictions.
+You are A and must ABSORB B's completed half, then produce the entire final user-facing answer yourself.
+Even when merge_mode is "append", YOU still emit the whole answer; use minimal rewriting and preserve both halves.
+When merge_mode is "integrate", synthesize them more deeply and resolve overlap or contradictions.
 Do not mention the internal split or lobes.""",
             "One final merged answer.",
             fallback_text="MERGE_CALL_FAILED_OR_EMPTY",
@@ -547,22 +556,20 @@ Return ONLY JSON:
                 reason=state.reason,
             )
 
+            # A always absorbs B's half and authors the complete final response.
+            # "append" now means a light A-authored assembly, not bypassing A.
             merge_start = time.perf_counter()
-            if state.merge_mode == "append":
-                parts = [b_half, a_primary] if state.peer_first else [a_primary, b_half]
-                answer = "\n\n".join(x.strip() for x in parts if x and x.strip())
-                merge_ms = 0
-            else:
-                answer = await self._merge_self_split(
-                    task=task,
-                    a_half=a_primary,
-                    b_half=b_half,
-                    memory_slice=memory_slice,
-                    reason=state.reason,
-                )
-                merge_ms = int((time.perf_counter() - merge_start) * 1000)
-                logical_calls += 1
-
+            answer = await self._merge_self_split(
+                task=task,
+                a_half=a_primary,
+                b_half=b_half,
+                memory_slice=memory_slice,
+                reason=state.reason,
+                merge_mode=state.merge_mode,
+                peer_first=state.peer_first,
+            )
+            merge_ms = int((time.perf_counter() - merge_start) * 1000)
+            logical_calls += 1  # A absorb/merge call.
             logical_calls += 1  # B parallel half.
             telemetry = self._timing_telemetry(
                 state,
