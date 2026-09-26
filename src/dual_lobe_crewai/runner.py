@@ -11,10 +11,10 @@ from .provider_control import RATE_CONTROLLER
 
 def _infer_role_key(agent) -> str:
     role = str(getattr(agent, "role", "")).lower()
-    if "verification" in role or "verifier" in role:
+    if "adversary" in role or "verification" in role or "verifier" in role or "lobe b" in role:
         return "B_VERIFY"
-    if "parallel worker" in role or "worker peer" in role or "lobe b" in role:
-        return "B_WORKER"
+    if "delegated inference worker" in role or "temporary delegated" in role:
+        return "A_CHILD"
     return "A"
 
 
