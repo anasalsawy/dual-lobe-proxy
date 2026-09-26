@@ -5,10 +5,11 @@ import json
 import time
 from dataclasses import dataclass, field
 
-from .agents import make_a, make_b_verifier
+from .agents import make_a, make_b_finalizer, make_b_verifier
 from .json_utils import parse_model
 from .memory import JsonlMemoryStore
 from .models import (
+    FinalizedTurn,
     SplitFragment,
     SplitPlan,
     SplitQuality,
@@ -21,6 +22,7 @@ from .tools import (
     ProxyRunState,
     ProxyToolTrace,
     SelfSplitRunState,
+    make_parallel_execution_tools,
     make_proxy_tools,
     make_self_split_tools,
 )
@@ -36,6 +38,8 @@ class RunResult:
     logical_model_calls: int = 0
     route_source: str | None = None
     split_feedback: SplitQuality | None = None
+    canonical_state: str | None = None
+    cycle_index: int = 1
 
     def visible_text(self) -> str:
         meter = f"[{self.verdict.deception_level}] {self.verdict.rationale}".strip()
@@ -249,11 +253,12 @@ class NonSplitEngine(GatedEngine):
 
 
 class SplitEngine(GatedEngine):
-    """Self-splitting Dual-Lobe.
+    """Self-splitting Dual-Lobe with B as the reconvergence point.
 
-    There is no dedicated splitter model. A receives the task first and is itself
-    the router. If it finds a valid split, split_channel launches B in a background
-    lane and returns immediately so A can execute its own half concurrently.
+    A owns routing and one work half. split_channel starts B's independent half
+    concurrently. The runtime collects both completed halves. A never performs a
+    merge pass. B finalizes the cycle by merging, repairing, verifying, and
+    grading the split in one call.
     """
 
     name = "split"
@@ -266,6 +271,7 @@ class SplitEngine(GatedEngine):
         split_experience: str,
         trace: ProxyToolTrace,
         run_state: SelfSplitRunState,
+        canonical_state: str = "",
     ) -> str:
         tools = make_self_split_tools(
             self.memory,
@@ -280,6 +286,9 @@ class SplitEngine(GatedEngine):
 ORIGINAL USER TASK:
 {task}
 
+CURRENT CANONICAL STATE FROM A PRIOR LOOP CYCLE:
+{canonical_state if canonical_state else "(none; this is the first cycle)"}
+
 SHARED MEMORY SNAPSHOT:
 {memory_slice if memory_slice else "(none)"}
 
@@ -293,21 +302,20 @@ If a valid time-saving split exists, you MUST call split_channel with:
 - own_fragment: the half you will personally execute;
 - peer_fragment: the equal independent half B will execute;
 - reason: why the halves are independent and why parallelism should help;
-- merge_mode: append when possible, integrate only when necessary.
+- merge_mode: append when the halves can mostly be preserved, integrate when synthesis is needed.
 
 After split_channel accepts, A and B are working concurrently.
-Execute ONLY own_fragment yourself. Finish your own half first.
-Then call collect_split_result and pass your completed half as own_result.
-That tool returns B's concurrently computed half into THIS SAME active A task.
-Absorb both halves and then produce the complete final user-facing answer.
-There is NO separate merge run.
+Execute ONLY own_fragment yourself and return ONLY your completed half-result.
+Do not wait for B. Do not merge. Do not attempt to produce the whole answer.
+The runtime will collect both halves and B will merge, repair deficiencies, verify, and finalize.
 
-If no valid split exists, do the whole task yourself and return the complete final answer.
+If no valid split exists, do the whole task yourself and return the complete answer.
+If a prior canonical state is present, treat it as the unified state from the previous cycle and continue from it rather than creating a disconnected branch.
 Never split merely because a decomposition is imaginable. Optimize actual completion time."""
         return await self._safe_run_one(
             a,
             prompt,
-            "One complete final user-facing answer. If split_channel was used, collect_split_result must be used before finalizing.",
+            "If split: A's complete independent half only. If normal: one complete answer.",
             fallback_text="PRIMARY_SELF_SPLIT_WORKER_CALL_FAILED_OR_EMPTY",
             role_key="A",
         )
@@ -322,16 +330,13 @@ Never split merely because a decomposition is imaginable. Optimize actual comple
         split_t = state.split_started_perf or primary_finished
         b_start = state.b_started_perf or split_t
         b_end = state.b_finished_perf or b_start
-        collect_start = state.collect_started_perf or primary_finished
-        collect_end = state.collect_finished_perf or collect_start
 
         route_decision_ms = max(0, int((split_t - primary_started) * 1000))
-        a_half_ms = max(0, int((collect_start - split_t) * 1000))
+        a_half_ms = max(0, int((primary_finished - split_t) * 1000))
         b_half_ms = max(0, int((b_end - b_start) * 1000))
-        collect_wait_ms = max(0, int((collect_end - collect_start) * 1000))
-        a_finalize_ms = max(0, int((primary_finished - collect_end) * 1000))
-        overlap_ms = max(0, int((min(collect_start, b_end) - max(split_t, b_start)) * 1000))
-        parallel_window_ms = max(0, int((max(collect_start, b_end) - split_t) * 1000))
+        join_wait_ms = max(0, int((b_end - primary_finished) * 1000))
+        overlap_ms = max(0, int((min(primary_finished, b_end) - max(split_t, b_start)) * 1000))
+        parallel_window_ms = max(0, int((max(primary_finished, b_end) - split_t) * 1000))
 
         balance_ratio = 1.0
         if max(a_half_ms, b_half_ms) > 0:
@@ -341,10 +346,6 @@ Never split merely because a decomposition is imaginable. Optimize actual comple
         if parallel_window_ms > 0:
             overlap_ratio = overlap_ms / parallel_window_ms
 
-        # This is measured overlap, not a true matched single-model counterfactual.
-        parallel_gain_proxy_ms = overlap_ms
-        measured = "positive" if overlap_ms > 250 else "neutral"
-
         return {
             "route_decision_ms": route_decision_ms,
             "a_half_ms": a_half_ms,
@@ -353,28 +354,23 @@ Never split merely because a decomposition is imaginable. Optimize actual comple
             "overlap_ms": overlap_ms,
             "overlap_ratio": round(overlap_ratio, 3),
             "balance_ratio": round(balance_ratio, 3),
-            "collect_wait_ms": collect_wait_ms,
-            "a_finalize_ms": a_finalize_ms,
-            "merge_ms": 0,
-            "parallel_gain_proxy_ms": parallel_gain_proxy_ms,
-            "measured_time_effect": measured,
-            "same_turn_collect": bool(state.collected),
+            "join_wait_ms": join_wait_ms,
+            "parallel_gain_proxy_ms": overlap_ms,
+            "measured_time_effect": "positive" if overlap_ms > 250 else "neutral",
         }
 
-    async def _review_self_split(
+    async def _review_normal(
         self,
         *,
         task: str,
         answer: str,
-        plan: SplitPlan,
         telemetry: dict[str, int | float | str],
         trace: str,
         memory_slice: str,
         split_experience: str,
     ) -> TurnReview:
         b = make_b_verifier()
-        used = plan.mode == "split"
-        prompt = f"""Verify the final answer AND grade A's split decision.
+        prompt = f"""Verify A's single-lane final answer and grade the decision not to split.
 
 USER TASK:
 {task}
@@ -388,30 +384,11 @@ EXACT SHARED MEMORY SNAPSHOT AVAILABLE TO A:
 PAST SPLIT EXPERIENCE AVAILABLE TO A:
 {split_experience if split_experience else "(none yet)"}
 
-A'S SPLIT DECISION:
-{plan.model_dump_json()}
-
-RUNTIME TOOL / SPLIT TRACE:
+RUNTIME TOOL TRACE:
 {trace}
 
-MEASURED TIMING TELEMETRY:
+TIMING TELEMETRY:
 {json.dumps(telemetry, ensure_ascii=False, indent=2)}
-
-Rules for the split grade:
-- used MUST equal {str(used).lower()}.
-- If a split was used but same_turn_collect is false, the split execution contract failed: valid=false and score must be low.
-- If split was used, judge whether both halves were substantial, independent, and sensibly balanced.
-- If no split was used, set missed_valid_split=true only if an obvious substantial independent two-way split existed.
-- Runtime telemetry outranks intuition for speed.
-- same_turn_collect must be true on a successful split.
-- overlap_ms is the measured period during which A and B were both working.
-- collect_wait_ms is how long A had to wait after finishing its own half.
-- a_finalize_ms is A's same-turn time after B's result was injected to produce the whole final answer.
-- parallel_gain_proxy_ms equals overlap_ms. It is a concurrency proxy, NOT a true matched single-model counterfactual.
-- unnecessary_split=true when the task should have stayed single-lane.
-- better_single_model=true when evidence indicates the split likely prolonged completion.
-- score rates the routing/decomposition decision itself from 0 to 100.
-- feedback must be a short reusable lesson A can apply to similar tasks.
 
 Return ONLY JSON:
 {{
@@ -427,7 +404,118 @@ Return ONLY JSON:
     }}
   }},
   "split_verdict": {{
-    "used": {str(used).lower()},
+    "used": false,
+    "valid": true,
+    "score": 0,
+    "independence_score": 0.0,
+    "balance_score": 0.0,
+    "time_effect": "unknown",
+    "unnecessary_split": false,
+    "missed_valid_split": false,
+    "better_single_model": false,
+    "feedback": "short reusable lesson"
+  }}
+}}
+
+Set missed_valid_split=true only when there was an obvious substantial independent two-way split A should have used.
+GREEN means no deception detected, not verified truth."""
+        raw = await self._safe_run_one(
+            b,
+            prompt,
+            "Strict compact JSON with answer_verdict and split_verdict.",
+            fallback_text="NORMAL_REVIEW_CALL_FAILED_OR_EMPTY",
+            role_key="B_VERIFY",
+        )
+        fallback = TurnReview(
+            answer_verdict=Verdict(
+                deception_level="YELLOW",
+                rationale="Final review output could not be parsed or was empty.",
+            ),
+            split_verdict=SplitQuality(
+                used=False,
+                valid=False,
+                score=0,
+                independence_score=0.0,
+                balance_score=0.0,
+                time_effect="unknown",
+                feedback="Review failed; do not learn a positive routing lesson from this turn.",
+            ),
+        )
+        return parse_model(raw, TurnReview, fallback)
+
+    async def _finalize_split_with_b(
+        self,
+        *,
+        task: str,
+        a_half: str,
+        b_half: str,
+        plan: SplitPlan,
+        telemetry: dict[str, int | float | str],
+        trace: ProxyToolTrace,
+        memory_slice: str,
+        split_experience: str,
+        canonical_state: str,
+    ) -> FinalizedTurn:
+        finalizer_trace = ProxyToolTrace()
+        b_tools = make_parallel_execution_tools(self.memory, trace=finalizer_trace)
+        b = make_b_finalizer(tools=b_tools)
+        prompt = f"""You are the reconvergence point for a parallel Dual-Lobe cycle.
+
+ORIGINAL USER TASK:
+{task}
+
+CURRENT CANONICAL STATE FROM PRIOR CYCLE:
+{canonical_state if canonical_state else "(none; first cycle)"}
+
+A'S COMPLETED HALF:
+{a_half}
+
+B'S COMPLETED HALF:
+{b_half}
+
+A'S SPLIT PLAN:
+{plan.model_dump_json()}
+
+EXACT SHARED MEMORY SNAPSHOT:
+{memory_slice if memory_slice else "(none)"}
+
+PAST SPLIT EXPERIENCE:
+{split_experience if split_experience else "(none yet)"}
+
+WORKER TOOL / PROVENANCE TRACE:
+{trace.render()}
+
+MEASURED TIMING TELEMETRY:
+{json.dumps(telemetry, ensure_ascii=False, indent=2)}
+
+Perform ALL of these in this same call:
+1. COLLECT both halves. Preserve all useful work from each.
+2. MERGE them into one coherent answer for the ORIGINAL USER TASK.
+3. REPAIR deficiencies: remove duplication, resolve contradictions, restore missing prerequisites/conclusions, and fill obvious task-required gaps.
+4. Do NOT invent unsupported facts while repairing. If evidence is insufficient, state the limitation in the final answer.
+5. VERIFY the completed merged answer for unsupported claims, fabricated tool/action claims, contradictions, task drift, and unjustified certainty.
+6. GRADE the split for semantic validity, independence, balance, timing effect, unnecessary splitting, and reusable lessons.
+7. Emit ONE canonical final answer. In loop mode this exact answer becomes the single state for the next cycle.
+
+Runtime timing is stronger evidence than intuition for speed.
+parallel_gain_proxy_ms is measured overlap only; it is NOT a matched single-model counterfactual.
+
+Return ONLY JSON:
+{{
+  "final_answer": "the complete repaired merged user-facing answer",
+  "answer_verdict": {{
+    "deception_level": "GREEN|YELLOW|RED",
+    "rationale": "brief verification",
+    "handoff": {{
+      "next_step": "",
+      "missing": [],
+      "unverified": [],
+      "widen": [],
+      "memory_query": ""
+    }}
+  }},
+  "split_verdict": {{
+    "used": true,
     "valid": true,
     "score": 0,
     "independence_score": 0.0,
@@ -438,31 +526,47 @@ Return ONLY JSON:
     "better_single_model": false,
     "feedback": "short reusable lesson"
   }}
-}}"""
+}}
+
+GREEN means no deception detected, not verified truth."""
         raw = await self._safe_run_one(
             b,
             prompt,
-            "Strict compact JSON with answer_verdict and split_verdict.",
-            fallback_text="SELF_SPLIT_REVIEW_CALL_FAILED_OR_EMPTY",
+            "Strict JSON containing final_answer, answer_verdict, and split_verdict.",
+            fallback_text="SPLIT_FINALIZER_CALL_FAILED_OR_EMPTY",
             role_key="B_VERIFY",
         )
 
-        fallback = TurnReview(
+        fallback_answer = (
+            a_half.rstrip()
+            + "\n\n"
+            + b_half.lstrip()
+        ).strip()
+        fallback = FinalizedTurn(
+            final_answer=fallback_answer or "SPLIT_FINALIZER_FAILED_AND_HALVES_WERE_EMPTY",
             answer_verdict=Verdict(
                 deception_level="YELLOW",
-                rationale="Final review output could not be parsed or was empty.",
+                rationale="B finalizer output could not be parsed or was empty; halves were preserved deterministically.",
             ),
             split_verdict=SplitQuality(
-                used=used,
+                used=True,
                 valid=False,
                 score=0,
                 independence_score=0.0,
                 balance_score=0.0,
                 time_effect="unknown",
-                feedback="Review failed; do not learn a positive routing lesson from this turn.",
+                feedback="Finalization failed; do not learn a positive split lesson from this cycle.",
             ),
         )
-        return parse_model(raw, TurnReview, fallback)
+        finalized = parse_model(raw, FinalizedTurn, fallback)
+        if finalizer_trace.events:
+            trace.add(
+                "b_finalizer_tools",
+                input_text="merge/repair/verify",
+                output_text=finalizer_trace.render(),
+                provenance="lobe_b_finalizer_tool_trace",
+            )
+        return finalized
 
     async def _persist_split_experience(
         self,
@@ -483,7 +587,13 @@ Return ONLY JSON:
             json.dumps(lesson, ensure_ascii=False),
         )
 
-    async def run(self, task: str) -> RunResult:
+    async def run_cycle(
+        self,
+        task: str,
+        *,
+        canonical_state: str = "",
+        cycle_index: int = 1,
+    ) -> RunResult:
         timings: dict[str, int | float | str] = {}
         total_start = time.perf_counter()
         memory_slice = self.memory.auto_slice(task)
@@ -498,19 +608,13 @@ Return ONLY JSON:
             split_experience=split_experience,
             trace=trace,
             run_state=state,
+            canonical_state=canonical_state,
         )
         primary_finished = time.perf_counter()
         timings["a_route_and_work_ms"] = int((primary_finished - primary_start) * 1000)
 
-        logical_calls = 1
-
         if state.split_used:
-            # The successful path collects B back into the SAME active A CrewAI task.
-            # Awaiting here is cleanup only if A violated the contract; it never creates
-            # another A inference and never injects B after A has already finished.
-            if state.future is not None and not state.future.done():
-                await state.await_peer()
-
+            b_half = await state.await_peer()
             plan = SplitPlan(
                 mode="split",
                 fragments=[
@@ -520,21 +624,35 @@ Return ONLY JSON:
                 merge=state.merge_mode,
                 reason=state.reason,
             )
-
-            answer = a_primary
             telemetry = self._timing_telemetry(
                 state,
                 primary_started=primary_start,
                 primary_finished=primary_finished,
             )
             timings.update(telemetry)
-            route_source = "a_self_split"
-            logical_calls += 1  # nested concurrent B worker
 
+            finalize_start = time.perf_counter()
+            finalized = await self._finalize_split_with_b(
+                task=task,
+                a_half=a_primary,
+                b_half=b_half,
+                plan=plan,
+                telemetry=telemetry,
+                trace=trace,
+                memory_slice=memory_slice,
+                split_experience=split_experience,
+                canonical_state=canonical_state,
+            )
+            timings["b_finalize_verify_ms"] = int((time.perf_counter() - finalize_start) * 1000)
+            answer = finalized.final_answer
+            verdict = finalized.answer_verdict
+            split_feedback = finalized.split_verdict
+            logical_calls = 3
+            route_source = "a_self_split"
         else:
             plan = SplitPlan(
                 mode="normal",
-                reason="A found no valid two-way split worth the coordination/merge overhead.",
+                reason="A found no valid two-way split worth the coordination overhead.",
             )
             answer = a_primary
             telemetry = {
@@ -542,43 +660,63 @@ Return ONLY JSON:
                 "measured_time_effect": "unknown",
                 "parallel_gain_proxy_ms": 0,
             }
+            review_start = time.perf_counter()
+            review = await self._review_normal(
+                task=task,
+                answer=answer,
+                telemetry=telemetry,
+                trace=trace.render(),
+                memory_slice=memory_slice,
+                split_experience=split_experience,
+            )
+            timings["b_review_ms"] = int((time.perf_counter() - review_start) * 1000)
+            verdict = review.answer_verdict
+            split_feedback = review.split_verdict
+            logical_calls = 2
             route_source = "a_self_normal"
 
-        review_start = time.perf_counter()
-        review = await self._review_self_split(
-            task=task,
-            answer=answer,
-            plan=plan,
-            telemetry=telemetry,
-            trace=trace.render(),
-            memory_slice=memory_slice,
-            split_experience=split_experience,
-        )
-        timings["b_review_ms"] = int((time.perf_counter() - review_start) * 1000)
-        logical_calls += 1
-
-        await self._persist_memory_query(review.answer_verdict)
+        await self._persist_memory_query(verdict)
         await self._persist_split_experience(
             task=task,
             plan=plan,
             telemetry=telemetry,
-            grade=review.split_verdict,
+            grade=split_feedback,
         )
 
         timings["total_ms"] = int((time.perf_counter() - total_start) * 1000)
 
         asyncio.create_task(asyncio.to_thread(
             self.memory.record,
-            f"Task: {task}\nAnswer: {answer}\nVerdict: {review.answer_verdict.deception_level}",
+            f"Cycle: {cycle_index}\nTask: {task}\nCanonical state: {answer}\nVerdict: {verdict.deception_level}",
         ))
 
         return RunResult(
             mode=self.name,
             answer=answer,
-            verdict=review.answer_verdict,
+            verdict=verdict,
             route=plan,
             timings_ms=timings,
             logical_model_calls=logical_calls,
             route_source=route_source,
-            split_feedback=review.split_verdict,
+            split_feedback=split_feedback,
+            canonical_state=answer,
+            cycle_index=cycle_index,
         )
+
+    async def run(self, task: str) -> RunResult:
+        return await self.run_cycle(task)
+
+    async def run_loop(self, task: str, *, cycles: int) -> list[RunResult]:
+        if cycles < 1:
+            raise ValueError("cycles must be >= 1")
+        results: list[RunResult] = []
+        canonical_state = ""
+        for cycle_index in range(1, cycles + 1):
+            result = await self.run_cycle(
+                task,
+                canonical_state=canonical_state,
+                cycle_index=cycle_index,
+            )
+            results.append(result)
+            canonical_state = result.canonical_state or result.answer
+        return results
