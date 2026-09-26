@@ -6,8 +6,9 @@ import dual_lobe_crewai.engines as engines_module
 from dual_lobe_crewai.engines import SplitEngine, RunResult
 from dual_lobe_crewai.json_utils import extract_json_object, parse_model
 from dual_lobe_crewai.memory import JsonlMemoryStore
-from dual_lobe_crewai.models import FinalizedTurn, SplitQuality, TurnReview, Verdict
-from dual_lobe_crewai.tools import ProxyRunState, SelfSplitRunState
+from dual_lobe_crewai.models import FinalizedTurn, SplitFragment, SplitPlan, SplitQuality, TurnReview, Verdict
+from dual_lobe_crewai.prompts import VERIFICATION_PROTOCOL
+from dual_lobe_crewai.tools import ProxyRunState, ProxyToolTrace, SelfSplitRunState
 
 
 def test_empty_verdict_fails_closed_to_yellow():
@@ -21,6 +22,38 @@ def test_empty_object_verdict_fails_closed_to_yellow():
     fallback = Verdict(deception_level="YELLOW", rationale="parse failed")
     got = parse_model("{}", Verdict, fallback)
     assert got.deception_level == "YELLOW"
+
+
+def test_blank_green_rationale_fails_closed_to_yellow():
+    fallback = Verdict(deception_level="YELLOW", rationale="parse failed")
+    got = parse_model('{"deception_level":"GREEN","rationale":""}', Verdict, fallback)
+    assert got.deception_level == "YELLOW"
+    assert got.rationale == "parse failed"
+
+
+def test_finalized_turn_blank_answer_fails_closed():
+    fallback = FinalizedTurn(
+        final_answer="fallback preserved answer",
+        answer_verdict=Verdict(deception_level="YELLOW", rationale="parse failed"),
+        split_verdict=SplitQuality(
+            used=True,
+            valid=False,
+            score=0,
+            independence_score=0.0,
+            balance_score=0.0,
+            time_effect="unknown",
+            feedback="parse failed",
+        ),
+    )
+    got = parse_model(
+        '{"final_answer":"","answer_verdict":{"deception_level":"GREEN","rationale":"ok"},'
+        '"split_verdict":{"used":true,"valid":true,"score":90,"independence_score":0.9,'
+        '"balance_score":0.9,"time_effect":"positive","feedback":"ok"}}',
+        FinalizedTurn,
+        fallback,
+    )
+    assert got.final_answer == "fallback preserved answer"
+    assert got.answer_verdict.deception_level == "YELLOW"
 
 
 def test_extract_first_balanced_object_when_two_objects():
@@ -179,3 +212,57 @@ async def test_safe_run_one_converts_blank_to_fallback(monkeypatch):
         fallback_text="FALLBACK_SENTINEL",
     )
     assert out == "FALLBACK_SENTINEL"
+
+
+def test_verification_protocol_preserves_original_verifier_guards():
+    assert "unsupported factual claims" in VERIFICATION_PROTOCOL
+    assert "fabricated or exaggerated tool/action/file/external-event claims" in VERIFICATION_PROTOCOL
+    assert "silent task drift" in VERIFICATION_PROTOCOL
+    assert "unjustified certainty" in VERIFICATION_PROTOCOL
+    assert "do not falsely say memory was unavailable or invisible" in VERIFICATION_PROTOCOL
+    assert "Do not claim a required tool was unused" in VERIFICATION_PROTOCOL
+    assert "not independent corroboration" in VERIFICATION_PROTOCOL
+    assert "GREEN means only" in VERIFICATION_PROTOCOL
+    assert "fail-closed" in VERIFICATION_PROTOCOL
+
+
+@pytest.mark.asyncio
+async def test_split_finalizer_receives_full_verifier_protocol(monkeypatch, tmp_path):
+    captured = {}
+
+    async def fake_safe(self, agent, description, expected_output, *, fallback_text, role_key=None):
+        captured["description"] = description
+        return '{"final_answer":"merged","answer_verdict":{"deception_level":"GREEN","rationale":"no deception detected"},'
+        '"split_verdict":{"used":true,"valid":true,"score":90,"independence_score":0.9,'
+        '"balance_score":0.8,"time_effect":"unknown","feedback":"reasonable split"}}'
+
+    monkeypatch.setattr(SplitEngine, "_safe_run_one", fake_safe)
+    store = JsonlMemoryStore(str(tmp_path / "m.jsonl"))
+    engine = SplitEngine(memory=store)
+    plan = SplitPlan(
+        mode="split",
+        fragments=[
+            SplitFragment(owner="A", task="half a"),
+            SplitFragment(owner="B", task="half b"),
+        ],
+        merge="integrate",
+        reason="independent",
+    )
+    trace = ProxyToolTrace()
+    result = await engine._finalize_split_with_b(
+        task="original task",
+        a_half="A result",
+        b_half="B result",
+        plan=plan,
+        telemetry={"overlap_ms": 1000},
+        trace=trace,
+        memory_slice="known memory evidence",
+        split_experience="prior lesson",
+        canonical_state="",
+    )
+    prompt = captured["description"]
+    assert VERIFICATION_PROTOCOL in prompt
+    assert "A-half, B-half" in prompt
+    assert "not independent corroboration" in prompt
+    assert "answer_verdict MUST describe that exact emitted final_answer" in prompt
+    assert result.final_answer == "merged"
