@@ -28,16 +28,16 @@ async def _amain(mode: str, task: str, show_meta: bool):
         print(json.dumps({
             "mode": result.mode,
             "route": result.route.model_dump() if result.route else None,
+            "route_source": result.route_source,
+            "split_feedback": result.split_feedback.model_dump() if result.split_feedback else None,
             "verdict": result.verdict.model_dump(),
             "timings_ms": result.timings_ms,
             "logical_model_calls": result.logical_model_calls,
-            "route_source": result.route_source,
-        }, indent=2))
+        }, indent=2, ensure_ascii=False))
 
 
 def main():
     load_dotenv()
-    # Windows redirected stdout commonly defaults to cp1252; keep Unicode output safe.
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")

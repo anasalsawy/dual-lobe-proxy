@@ -12,7 +12,6 @@ def _role_defaults(role: str) -> tuple[str, int, str]:
     role = role.upper()
     a_default = os.getenv("DUAL_LOBE_A_MODEL", "openrouter/nvidia/nemotron-3-super-120b-a12b:free")
     b_default = os.getenv("DUAL_LOBE_B_MODEL", a_default)
-    splitter_default = os.getenv("DUAL_LOBE_SPLITTER_MODEL", "openrouter/google/gemini-2.5-flash-lite")
     if role == "A":
         return a_default, int(os.getenv("DUAL_LOBE_A_MAX_TOKENS", "8000")), "A"
     if role == "A_MERGE":
@@ -21,7 +20,7 @@ def _role_defaults(role: str) -> tuple[str, int, str]:
         return os.getenv("DUAL_LOBE_B_VERIFY_MODEL", b_default), int(os.getenv("DUAL_LOBE_B_VERIFY_MAX_TOKENS", "6000")), "B"
     if role == "B_WORKER":
         return os.getenv("DUAL_LOBE_B_WORKER_MODEL", b_default), int(os.getenv("DUAL_LOBE_B_WORKER_MAX_TOKENS", "6000")), "B"
-    return splitter_default, int(os.getenv("DUAL_LOBE_SPLITTER_MAX_TOKENS", "6000")), "SPLITTER"
+    raise ValueError(f"Unknown LLM role: {role}")
 
 
 def primary_spec(role: str) -> ProviderSpec:
@@ -73,7 +72,7 @@ def resolve_role_specs(role: str) -> list[ProviderSpec]:
         ))
 
     if os.getenv("DUAL_LOBE_CROSS_ROLE_FAILOVER", "true").lower() in {"1", "true", "yes", "on"}:
-        for other in ["A", "B_VERIFY", "B_WORKER", "SPLITTER"]:
+        for other in ["A", "B_VERIFY", "B_WORKER"]:
             if other == role or (role == "A_MERGE" and other == "A"):
                 continue
             alt = primary_spec(other)
@@ -84,7 +83,8 @@ def resolve_role_specs(role: str) -> list[ProviderSpec]:
     for s in out:
         k = (s.model, s.base_url, s.api_key)
         if k not in seen:
-            dedup.append(s); seen.add(k)
+            dedup.append(s)
+            seen.add(k)
     return dedup
 
 

@@ -1,37 +1,47 @@
 {
   "protocol": {
-    "goal": "Compare GATED, NON-SPLIT, and SPLIT on the same work, with non-architectural factors held constant.",
+    "goal": "Compare GATED, NON-SPLIT, and SELF-SPLIT on the same work, with non-architectural factors held constant.",
     "variants": ["gated", "non-split", "split"],
     "repeats_per_case": 5,
     "randomize_variant_order_each_repeat": true,
     "warmup_runs_per_provider_model": 1,
     "same_provider_and_model_policy": {
-      "A": "same model across all variants",
-      "B_verifier": "same model across all variants",
-      "B_worker": "same model wherever B-worker is used",
-      "splitter": "split-only model; record separately because this is architectural overhead"
+      "A": "same A model across all variants",
+      "B_verifier": "same B verification model across all variants",
+      "B_worker": "same B worker model wherever a B work lane is used"
     },
     "normalize": [
       "same exact user prompt",
-      "same memory snapshot/seed",
+      "same ordinary memory snapshot/seed",
+      "same starting split-experience memory when testing learned behavior",
       "same tool availability and same deterministic fixture data",
       "same A/B model/provider",
-      "same A/B temperature and generation settings",
+      "same generation settings",
       "same user-facing answer cap",
       "same expected deliverable and scoring rubric",
       "same machine/runtime",
       "same retry policy",
       "same network/tool fixtures where possible",
-      "same memory cleared/reset policy between runs"
+      "same memory reset policy between cold runs"
     ],
     "measure": [
       "wall_clock_ms",
-      "route_ms",
       "a_ms",
       "b_verify_ms",
-      "parallel_halves_ms",
+      "a_route_and_work_ms",
+      "route_decision_ms",
+      "a_half_ms",
+      "b_half_ms",
+      "parallel_window_ms",
+      "overlap_ms",
+      "overlap_ratio",
+      "balance_ratio",
+      "a_wait_for_b_ms",
+      "b_wait_for_a_ms",
       "merge_ms",
-      "split_verify_ms",
+      "b_review_ms",
+      "parallel_gain_proxy_ms",
+      "measured_time_effect",
       "logical_model_calls",
       "provider_attempts",
       "tool_call_count",
@@ -42,10 +52,12 @@
       "task_score",
       "checklist_items_satisfied",
       "critical_errors",
-      "splitter_route",
+      "route",
       "route_source",
-      "semantic_route_ok",
-      "effective_route_ok"
+      "split_score",
+      "split_valid",
+      "split_unnecessary",
+      "missed_valid_split"
     ]
   },
   "cases": [
@@ -54,28 +66,30 @@
       "class": "simple/non-splittable",
       "prompt": "In exactly 3 sentences, explain why HTTP status 404 means the requested resource was not found. Do not add examples.",
       "expected_split_behavior": "NORMAL",
-      "scoring": ["exactly 3 sentences","states resource was not found","does not claim server is unreachable","no examples"]
+      "scoring": ["exactly 3 sentences", "states resource was not found", "does not claim server is unreachable", "no examples"]
     },
     {
       "id": "T2_sequential_reasoning",
       "class": "sequential reasoning",
       "prompt": "A service retries after 1s, then 2s, then 4s, and each failed request itself takes 500ms. If the first three attempts fail and the fourth succeeds after 300ms, compute total elapsed time and show the arithmetic in no more than 6 lines.",
       "expected_split_behavior": "NORMAL",
-      "scoring": ["includes 0.5+1+0.5+2+0.5+4+0.3 seconds","correct total 8.8 seconds","shows arithmetic","6 lines or fewer"]
+      "scoring": ["includes 0.5+1+0.5+2+0.5+4+0.3 seconds", "correct total 8.8 seconds", "shows arithmetic", "6 lines or fewer"]
     },
     {
       "id": "T3_two_way_parallel_analysis",
       "class": "parallelizable",
       "prompt": "Analyze the two independent incident reports below and produce exactly two sections, 'Incident A' and 'Incident B'. For each, identify the primary failure cause and one corrective action. Do not add a summary.\n\nIncident A: The API returned 502 errors after a deploy. App logs were healthy, but the reverse proxy upstream target still pointed to port 8080 while the new service listened on 8081.\n\nIncident B: Background jobs stopped processing. The web app stayed healthy. The worker process was running, but Redis authentication had been enabled and the worker still used the old unauthenticated connection string.",
       "expected_split_behavior": "SPLIT",
-      "scoring": ["exactly two requested sections","Incident A cause identifies proxy/upstream port mismatch 8080 vs 8081","Incident A action corrects proxy target/port","Incident B cause identifies Redis auth/connection-string mismatch","Incident B action updates worker credentials/connection string","no summary"]
+      "preferred_merge_mode": "append",
+      "scoring": ["exactly two requested sections", "Incident A cause identifies proxy/upstream port mismatch 8080 vs 8081", "Incident A action corrects proxy target/port", "Incident B cause identifies Redis auth/connection-string mismatch", "Incident B action updates worker credentials/connection string", "no summary"]
     },
     {
       "id": "T4_parallel_hypotheses",
       "class": "parallel debugging hypotheses",
       "prompt": "A Python service starts locally but crashes only in production with 'ModuleNotFoundError: cryptography'. Produce exactly two labeled hypotheses with one verification step and one fix for each. Hypothesis 1 must focus on packaging/dependency declaration. Hypothesis 2 must focus on environment/image mismatch. Keep the answer under 220 words.",
       "expected_split_behavior": "SPLIT",
-      "scoring": ["exactly two labeled hypotheses","hypothesis 1 is packaging/dependency focused","hypothesis 2 is environment/image focused","each has verification step","each has fix","under 220 words"]
+      "preferred_merge_mode": "append",
+      "scoring": ["exactly two labeled hypotheses", "hypothesis 1 is packaging/dependency focused", "hypothesis 2 is environment/image focused", "each has verification step", "each has fix", "under 220 words"]
     },
     {
       "id": "T5_memory_grounded",
@@ -89,7 +103,7 @@
       ],
       "prompt": "Using only the provided shared memory, answer in one sentence: What is Project Atlas's deployment target?",
       "expected_split_behavior": "NORMAL",
-      "scoring": ["answer says Windows Server 2022","one sentence","does not introduce unsupported targets"]
+      "scoring": ["answer says Windows Server 2022", "one sentence", "does not introduce unsupported targets"]
     },
     {
       "id": "T6_two_component_code_review",
@@ -100,7 +114,8 @@
       },
       "prompt": "Review both provided files. Return exactly two sections, 'Frontend' and 'Backend'. Identify the single most important issue in each file and give one concrete fix per issue. Do not discuss anything outside the supplied code.",
       "expected_split_behavior": "SPLIT",
-      "scoring": ["exactly Frontend and Backend sections","frontend issue is grounded in supplied code","backend issue identifies plaintext password comparison/storage assumption or equivalent concrete auth weakness","one concrete fix per section","no unsupported external claims"]
+      "preferred_merge_mode": "append",
+      "scoring": ["exactly Frontend and Backend sections", "frontend issue is grounded in supplied code", "backend issue identifies plaintext password comparison/storage assumption or equivalent concrete auth weakness", "one concrete fix per section", "no unsupported external claims"]
     }
   ]
 }

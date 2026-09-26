@@ -6,16 +6,14 @@ import os
 from crewai import Crew, Process, Task
 
 from .llm_factory import make_llm, resolve_role_specs
-from .provider_control import RATE_CONTROLLER, ProviderSpec
+from .provider_control import RATE_CONTROLLER
 
 
 def _infer_role_key(agent) -> str:
     role = str(getattr(agent, "role", "")).lower()
-    if "splitter" in role:
-        return "SPLITTER"
     if "verification" in role or "verifier" in role:
         return "B_VERIFY"
-    if "worker peer" in role or "lobe b" in role:
+    if "parallel worker" in role or "worker peer" in role or "lobe b" in role:
         return "B_WORKER"
     return "A"
 
@@ -36,13 +34,6 @@ async def _single_call(agent, description: str, expected_output: str) -> str:
 
 
 async def run_one(agent, description: str, expected_output: str, *, role_key: str | None = None) -> str:
-    """Resilient CrewAI call with adaptive pacing, failover and backoff.
-
-    Primary behavior is unchanged when the provider is healthy. Pacing activates only
-    when limits are configured/learned. Paid/unknown tiers with no learned limit run
-    unthrottled. On a rate-limit/transient failure, configured/cross-role fallbacks are
-    tried before sleeping on the blocked model.
-    """
     role_key = (role_key or _infer_role_key(agent)).upper()
     specs = resolve_role_specs(role_key)
     max_rounds = max(1, int(os.getenv("DUAL_LOBE_RETRY_ROUNDS", "3")))
@@ -66,14 +57,12 @@ async def run_one(agent, description: str, expected_output: str, *, role_key: st
                 last_exc = exc
                 kind = RATE_CONTROLLER.classify_error(exc)
                 RATE_CONTROLLER.learn_from_error(spec, exc)
-                # Auth failures can still fail over to another configured key/provider.
                 if idx + 1 < len(candidates) and kind in {"rate_limit", "transient", "auth"}:
                     continue
                 if kind not in {"rate_limit", "transient"}:
                     break
 
         if round_no < max_rounds and last_exc is not None:
-            # If all live alternatives failed, wait only as long as the blocked provider says is needed.
             await asyncio.sleep(RATE_CONTROLLER.retry_delay(specs[0], round_no))
 
     if last_exc is not None:

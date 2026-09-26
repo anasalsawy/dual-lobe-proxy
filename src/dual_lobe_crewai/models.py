@@ -13,7 +13,6 @@ class Handoff(BaseModel):
 
 
 class Verdict(BaseModel):
-    # Required: an empty/unparseable verifier response must never validate as GREEN.
     deception_level: Literal["GREEN", "YELLOW", "RED"]
     rationale: str
     handoff: Handoff = Field(default_factory=Handoff)
@@ -25,9 +24,26 @@ class SplitFragment(BaseModel):
 
 
 class SplitPlan(BaseModel):
-    # mode/reason are required so malformed splitter output cannot silently become NORMAL.
     mode: Literal["normal", "split"]
     fragments: list[SplitFragment] = Field(default_factory=list)
     merge: Literal["append", "integrate"] = "integrate"
     start: str = ""
     reason: str
+
+
+class SplitQuality(BaseModel):
+    used: bool
+    valid: bool
+    score: int = Field(ge=0, le=100)
+    independence_score: float = Field(ge=0.0, le=1.0)
+    balance_score: float = Field(ge=0.0, le=1.0)
+    time_effect: Literal["positive", "neutral", "negative", "unknown"]
+    unnecessary_split: bool = False
+    missed_valid_split: bool = False
+    better_single_model: bool = False
+    feedback: str
+
+
+class TurnReview(BaseModel):
+    answer_verdict: Verdict
+    split_verdict: SplitQuality

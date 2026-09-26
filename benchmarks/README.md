@@ -1,28 +1,64 @@
 # Controlled 3V benchmark
 
-Compare GATED, NON-SPLIT, and SPLIT on matched tasks with the same models, memory, tools, fixtures, retry policy, and scoring rubric.
+Compare GATED, NON-SPLIT, and SELF-SPLIT on matched work.
 
-Report medians and p90s.
+There is no dedicated splitter model in SELF-SPLIT. A performs routing as part of its own first execution call.
 
-## Route metrics
+## Normalize
 
-Report two distinct metrics:
+Hold constant:
+- exact user prompt
+- ordinary memory snapshot
+- starting split-experience memory state
+- tool fixtures
+- A/B model/provider
+- generation policy
+- runtime/retry policy
+- answer scoring
+- machine/network conditions where possible
 
-- **semantic_route_accuracy** — valid splitter JSON decisions only. A fallback is not semantic success.
-- **effective_route_accuracy** — whether the branch actually executed matches the expected route, including safe fallbacks.
+Reset both ordinary task memory and split-experience memory according to the benchmark protocol when measuring cold-start behavior.
 
-## Memory evidence
+## Measure
 
-B Verifier now receives the exact shared-memory slice A received on the same turn.
+In addition to final-answer quality and total latency, Self-Split must record:
 
-## Model-call instrumentation
+- route: normal or split
+- A route-and-work time
+- route_decision_ms
+- A-half time
+- B-half time
+- parallel window
+- overlap and overlap ratio
+- balance ratio
+- A waiting for B
+- B waiting for A
+- merge time
+- parallel_gain_proxy_ms
+- measured time effect
+- B split score
+- independence score
+- balance score
+- unnecessary split
+- missed valid split
+- better-single-model flag
 
-Use `RunResult.logical_model_calls`. Do not count CrewAI event-bus start/end events as separate inference calls.
+## Logical model calls
 
-Ordinary architecture-level counts:
+Use `RunResult.logical_model_calls`:
+
 - GATED = 2
-- NON-SPLIT = 2 plus delegate/consult calls actually used
-- SPLIT→NORMAL = splitter + NON-SPLIT calls
-- actual SPLIT = 5 plus delegate/consult calls actually used
+- NON-SPLIT = 2 plus optional delegate/consult calls
+- SELF-SPLIT normal = 2
+- SELF-SPLIT append = 3
+- SELF-SPLIT integrate = 4
 
-Provider retries/failovers should be reported separately from logical calls.
+Provider retries/failovers are operational attempts and must be counted separately.
+
+## Important interpretation
+
+`parallel_gain_proxy_ms` is not a true single-model counterfactual. It asks whether the measured parallel work saved more time than the measured merge cost:
+
+`min(a_half_ms, b_half_ms) - merge_ms`
+
+For rigorous speed claims, compare matched Gated/Non-Split/Self-Split runs of the same task.

@@ -2,17 +2,28 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import time
 from dataclasses import dataclass, field
 
-from .agents import make_a, make_b_verifier, make_b_worker, make_splitter
+from .agents import make_a, make_b_verifier
 from .json_utils import parse_model
 from .memory import JsonlMemoryStore
-from .models import Verdict, SplitPlan, SplitFragment
+from .models import (
+    SplitFragment,
+    SplitPlan,
+    SplitQuality,
+    TurnReview,
+    Verdict,
+)
 from .prompts import OBSERVATION_DISCLAIMER
 from .runner import run_one
-from .tools import make_proxy_tools, ProxyToolTrace, ProxyRunState
+from .tools import (
+    ProxyRunState,
+    ProxyToolTrace,
+    SelfSplitRunState,
+    make_proxy_tools,
+    make_self_split_tools,
+)
 
 
 @dataclass
@@ -21,9 +32,10 @@ class RunResult:
     answer: str
     verdict: Verdict
     route: SplitPlan | None = None
-    timings_ms: dict[str, int] = field(default_factory=dict)
+    timings_ms: dict[str, int | float | str] = field(default_factory=dict)
     logical_model_calls: int = 0
     route_source: str | None = None
+    split_feedback: SplitQuality | None = None
 
     def visible_text(self) -> str:
         meter = f"[{self.verdict.deception_level}] {self.verdict.rationale}".strip()
@@ -88,7 +100,9 @@ USER TASK:
 
 Solve the task fully. Return only the user-facing answer."""
         return await self._safe_run_one(
-            a, prompt, "A complete user-facing answer.",
+            a,
+            prompt,
+            "A complete user-facing answer.",
             fallback_text="PRIMARY_WORKER_CALL_FAILED_OR_EMPTY",
             role_key="A",
         )
@@ -118,10 +132,9 @@ EXECUTION / PROVENANCE TRACE:
 
 Important:
 - The SHARED MEMORY EVIDENCE above is the exact memory snapshot A was allowed to use on this turn.
-- If that evidence supports A's claim, treat the claim as memory-grounded; do not say memory was unavailable or invisible.
+- If that evidence supports A's claim, treat the claim as memory-grounded.
 - Use the trace to determine whether memory/delegate/consult tools actually ran.
-- Content marked provenance=lobe_b_worker or lobe_b_consult is B-originated and MUST NOT be treated as independent corroboration.
-- Do not claim a required proxy tool was unused when the execution trace records that it ran.
+- B-originated worker/consult content is contributed work, not independent corroboration.
 
 Return ONLY JSON:
 {{
@@ -165,7 +178,7 @@ GREEN = no deception detected, not verified truth."""
         await asyncio.to_thread(self.memory.record, payload)
 
     async def run(self, task: str) -> RunResult:
-        timings = {}
+        timings: dict[str, int | float | str] = {}
         memory_slice = self.memory.auto_slice(task)
 
         t0 = time.perf_counter()
@@ -173,16 +186,15 @@ GREEN = no deception detected, not verified truth."""
         timings["a_ms"] = int((time.perf_counter() - t0) * 1000)
 
         t1 = time.perf_counter()
-        verdict = await self._verify_with_b(
-            task,
-            answer,
-            memory_evidence=memory_slice,
-        )
+        verdict = await self._verify_with_b(task, answer, memory_evidence=memory_slice)
         timings["b_verify_ms"] = int((time.perf_counter() - t1) * 1000)
         timings["total_ms"] = int((time.perf_counter() - t0) * 1000)
 
         await self._persist_memory_query(verdict)
-        asyncio.create_task(asyncio.to_thread(self.memory.record, f"Task: {task}\nAnswer: {answer}\nVerdict: {verdict.deception_level}"))
+        asyncio.create_task(asyncio.to_thread(
+            self.memory.record,
+            f"Task: {task}\nAnswer: {answer}\nVerdict: {verdict.deception_level}",
+        ))
         return RunResult(
             mode=self.name,
             answer=answer,
@@ -196,7 +208,7 @@ class NonSplitEngine(GatedEngine):
     name = "non-split"
 
     async def run(self, task: str) -> RunResult:
-        timings = {}
+        timings: dict[str, int | float | str] = {}
         memory_slice = self.memory.auto_slice(task)
         proxy_trace = ProxyToolTrace()
         run_state = ProxyRunState()
@@ -222,7 +234,10 @@ class NonSplitEngine(GatedEngine):
         timings["total_ms"] = int((time.perf_counter() - t0) * 1000)
 
         await self._persist_memory_query(verdict)
-        asyncio.create_task(asyncio.to_thread(self.memory.record, f"Task: {task}\nAnswer: {answer}\nVerdict: {verdict.deception_level}"))
+        asyncio.create_task(asyncio.to_thread(
+            self.memory.record,
+            f"Task: {task}\nAnswer: {answer}\nVerdict: {verdict.deception_level}",
+        ))
         dynamic_b_calls = int(run_state.delegate_used) + int(run_state.consult_used)
         return RunResult(
             mode=self.name,
@@ -233,236 +248,378 @@ class NonSplitEngine(GatedEngine):
         )
 
 
-class SplitEngine(NonSplitEngine):
+class SplitEngine(GatedEngine):
+    """Self-splitting Dual-Lobe.
+
+    There is no dedicated splitter model. A receives the task first and is itself
+    the router. If it finds a valid split, split_channel launches B in a background
+    lane and returns immediately so A can execute its own half concurrently.
+    """
+
     name = "split"
 
-    async def _route(self, task: str, memory_slice: str | None = None) -> SplitPlan:
-        if memory_slice is None:
-            memory_slice = self.memory.auto_slice(task)
-        splitter = make_splitter()
-        raw = await self._safe_run_one(
-            splitter,
-            f"""Route this task. DO NOT solve it.
-
-TASK:
-{task}
-
-MEMORY SLICE:
-{memory_slice}
-
-Return ONLY JSON:
-{{
-  "mode": "normal|split",
-  "fragments": [
-    {{"owner":"A","task":"..."}},
-    {{"owner":"B","task":"..."}}
-  ],
-  "merge": "append|integrate",
-  "start": "short coordination note",
-  "reason": "short routing rationale"
-}}
-
-Rules:
-- At most two fragments.
-- Fragments must be independently executable.
-- Decide semantically whether parallel execution is genuinely useful. Do not estimate numeric latency, milliseconds, token counts, or cost.
-- Choose NORMAL when the task is fundamentally one coherent reasoning chain, tightly sequential, too small to benefit from parallel work, or would require heavy cross-dependence between halves.
-- Actively search for a valid two-way decomposition before choosing NORMAL. A task that appears indivisible may still be split by component, perspective, hypothesis, evidence source, search space, solution strategy, verification method, or other orthogonal dimension. Choose SPLIT whenever two substantial independently executable fragments can produce useful progress in parallel and later be merged without either fragment requiring the other's intermediate output. Choose NORMAL only when no useful independent two-way decomposition can be found.""",
-            "Strict routing JSON only.",
-            fallback_text="SPLITTER_ROUTE_CALL_FAILED_OR_EMPTY",
-            role_key="SPLITTER",
-        )
-        return parse_model(raw, SplitPlan, SplitPlan(mode="normal", reason="ROUTING_PARSE_FAILURE: splitter output was empty, truncated, or invalid JSON"))
-
-    def _accept_split(self, plan: SplitPlan) -> bool:
-        if plan.mode != "split":
-            return False
-        if len(plan.fragments) != 2:
-            return False
-        owners = {f.owner for f in plan.fragments}
-        return owners == {"A", "B"}
-
-    async def _run_half(
+    async def _run_self_split_a(
         self,
-        owner: str,
-        fragment: str,
+        *,
         task: str,
-        run_state: ProxyRunState,
         memory_slice: str,
-    ) -> tuple[str, str]:
-        shared = f"{OBSERVATION_DISCLAIMER}\n\nSHARED MEMORY SLICE:\n{memory_slice}" if memory_slice else OBSERVATION_DISCLAIMER
-
-        trace = ProxyToolTrace()
-        if owner == "A":
-            agent = make_a(tools=make_proxy_tools(self.memory, trace=trace, run_state=run_state))
-        else:
-            agent = make_b_worker()
-
-        result = await self._safe_run_one(
-            agent,
-            f"""{shared}
+        split_experience: str,
+        trace: ProxyToolTrace,
+        run_state: SelfSplitRunState,
+    ) -> str:
+        tools = make_self_split_tools(
+            self.memory,
+            original_task=task,
+            memory_slice=memory_slice,
+            trace=trace,
+            run_state=run_state,
+        )
+        a = make_a(tools=tools, self_split=True)
+        prompt = f"""{OBSERVATION_DISCLAIMER}
 
 ORIGINAL USER TASK:
 {task}
 
-YOUR INDEPENDENT FRAGMENT:
-{fragment}
+SHARED MEMORY SNAPSHOT:
+{memory_slice if memory_slice else "(none)"}
 
-Do only this fragment. Do not wait for the other worker and do not assume its output.""",
-            "A self-contained fragment result.",
-            fallback_text=f"{owner}_HALF_CALL_FAILED_OR_EMPTY",
-            role_key="A" if owner == "A" else "B_WORKER",
-        )
-        if owner == "B":
-            return result, "B-HALF provenance=lobe_b_worker_fragment"
-        return result, trace.render()
+PAST MEASURED SPLIT EXPERIENCE:
+{split_experience if split_experience else "(none yet)"}
 
-    async def _merge_with_a(self, task: str, plan: SplitPlan, a_half: str, b_half: str, provenance: str, run_state: ProxyRunState) -> str:
-        a = make_a(tools=make_proxy_tools(self.memory, run_state=run_state), merge=True)
-        merge_instruction = (
-            "Append the two self-contained halves with only minimal de-duplication."
-            if plan.merge == "append"
-            else "Integrate the two halves into one coherent final answer, resolving overlap and contradictions."
-        )
+You are the router because you are the worker. There is NO separate splitter model.
+
+Before substantive execution, actively look for a two-way independent split.
+If a valid time-saving split exists, you MUST call split_channel with:
+- own_fragment: the half you will personally execute;
+- peer_fragment: the equal independent half B will execute;
+- reason: why the halves are independent and why parallelism should help;
+- merge_mode: append when possible, integrate only when necessary.
+
+The split_channel returns immediately while B works in parallel.
+After it accepts, execute ONLY own_fragment and return only your half-result.
+
+If no valid split exists, do the whole task yourself and return the complete final answer.
+Never split merely because a decomposition is imaginable. Optimize actual completion time."""
         return await self._safe_run_one(
             a,
-            f"""You are continuing the same task after parallel worker fan-out.
+            prompt,
+            "Either a complete normal answer, or A's complete independent half after split_channel is launched.",
+            fallback_text="PRIMARY_SELF_SPLIT_WORKER_CALL_FAILED_OR_EMPTY",
+            role_key="A",
+        )
+
+    async def _merge_self_split(
+        self,
+        *,
+        task: str,
+        a_half: str,
+        b_half: str,
+        memory_slice: str,
+        reason: str,
+    ) -> str:
+        a = make_a(merge=True)
+        return await self._safe_run_one(
+            a,
+            f"""Merge two independently completed halves of the same task.
 
 ORIGINAL USER TASK:
 {task}
 
-A-HALF:
+SHARED MEMORY SNAPSHOT:
+{memory_slice if memory_slice else "(none)"}
+
+SPLIT RATIONALE:
+{reason}
+
+A HALF:
 {a_half}
 
-B-HALF:
+B HALF:
 {b_half}
 
-PROVENANCE / TOOL TRACE:
-{provenance}
-
-MERGE MODE: {plan.merge}
-{merge_instruction}
-
-Return only the final user-facing answer. Do not mention the split or internal workers.""",
-            "One final merged user-facing answer.",
+Integrate the halves into one coherent final user-facing answer.
+Preserve useful substance. Resolve overlap or contradictions.
+Do not mention the internal split or lobes.""",
+            "One final merged answer.",
             fallback_text="MERGE_CALL_FAILED_OR_EMPTY",
             role_key="A_MERGE",
         )
 
-    async def _verify_with_splitter(
+    @staticmethod
+    def _timing_telemetry(
+        state: SelfSplitRunState,
+        *,
+        primary_started: float,
+        primary_finished: float,
+        merge_ms: int,
+    ) -> dict[str, int | float | str]:
+        split_t = state.split_started_perf or primary_finished
+        b_start = state.b_started_perf or split_t
+        b_end = state.b_finished_perf or b_start
+
+        route_decision_ms = max(0, int((split_t - primary_started) * 1000))
+        a_half_ms = max(0, int((primary_finished - split_t) * 1000))
+        b_half_ms = max(0, int((b_end - b_start) * 1000))
+        parallel_window_ms = max(0, int((max(primary_finished, b_end) - split_t) * 1000))
+        overlap_ms = max(0, int((min(primary_finished, b_end) - max(split_t, b_start)) * 1000))
+        a_wait_for_b_ms = max(0, int((b_end - primary_finished) * 1000))
+        b_wait_for_a_ms = max(0, int((primary_finished - b_end) * 1000))
+        parallel_gain_proxy_ms = min(a_half_ms, b_half_ms) - merge_ms
+
+        threshold = 250
+        if parallel_gain_proxy_ms > threshold:
+            measured = "positive"
+        elif parallel_gain_proxy_ms < -threshold:
+            measured = "negative"
+        else:
+            measured = "neutral"
+
+        balance_ratio = 1.0
+        if max(a_half_ms, b_half_ms) > 0:
+            balance_ratio = min(a_half_ms, b_half_ms) / max(a_half_ms, b_half_ms)
+
+        overlap_ratio = 0.0
+        if parallel_window_ms > 0:
+            overlap_ratio = overlap_ms / parallel_window_ms
+
+        return {
+            "route_decision_ms": route_decision_ms,
+            "a_half_ms": a_half_ms,
+            "b_half_ms": b_half_ms,
+            "parallel_window_ms": parallel_window_ms,
+            "overlap_ms": overlap_ms,
+            "overlap_ratio": round(overlap_ratio, 3),
+            "balance_ratio": round(balance_ratio, 3),
+            "a_wait_for_b_ms": a_wait_for_b_ms,
+            "b_wait_for_a_ms": b_wait_for_a_ms,
+            "merge_ms": merge_ms,
+            "parallel_gain_proxy_ms": parallel_gain_proxy_ms,
+            "measured_time_effect": measured,
+        }
+
+    async def _review_self_split(
         self,
+        *,
         task: str,
         answer: str,
-        provenance: str,
-        memory_evidence: str,
-    ) -> Verdict:
-        splitter = make_splitter()
-        raw = await self._safe_run_one(
-            splitter,
-            f"""You routed this task but did not perform task work. Now independently verify the merged output.
+        plan: SplitPlan,
+        telemetry: dict[str, int | float | str],
+        trace: str,
+        memory_slice: str,
+        split_experience: str,
+    ) -> TurnReview:
+        b = make_b_verifier()
+        used = plan.mode == "split"
+        prompt = f"""Verify the final answer AND grade A's split decision.
 
 USER TASK:
 {task}
 
-MERGED ANSWER:
+FINAL ANSWER:
 {answer}
 
-SHARED MEMORY EVIDENCE AVAILABLE TO THE SPLIT WORKERS:
-{memory_evidence if memory_evidence else "No shared memory slice was available on this turn."}
+EXACT SHARED MEMORY SNAPSHOT AVAILABLE TO A:
+{memory_slice if memory_slice else "(none)"}
 
-PROVENANCE / TOOL TRACE:
-{provenance}
+PAST SPLIT EXPERIENCE AVAILABLE TO A:
+{split_experience if split_experience else "(none yet)"}
 
-Treat B-half and any lobe_b_worker/lobe_b_consult material as contributed work, not independent corroboration.
+A'S SPLIT DECISION:
+{plan.model_dump_json()}
+
+RUNTIME TOOL / SPLIT TRACE:
+{trace}
+
+MEASURED TIMING TELEMETRY:
+{json.dumps(telemetry, ensure_ascii=False, indent=2)}
+
+Rules for the split grade:
+- used MUST equal {str(used).lower()}.
+- If split was used, judge whether both halves were substantial, independent, and sensibly balanced.
+- If no split was used, set missed_valid_split=true only if an obvious substantial independent two-way split existed.
+- Runtime telemetry outranks intuition for speed.
+- parallel_gain_proxy_ms = min(A-half time, B-half time) - merge time. Positive means measured parallel work exceeded merge overhead; negative means merge overhead erased the measured parallel saving. It is a proxy, not a true counterfactual single-model benchmark.
+- unnecessary_split=true when the task should have stayed single-lane.
+- better_single_model=true when evidence indicates the split likely prolonged completion.
+- score rates the routing/decomposition decision itself from 0 to 100.
+- feedback must be a short reusable lesson A can apply to similar tasks.
 
 Return ONLY JSON:
 {{
-  "deception_level": "GREEN|YELLOW|RED",
-  "rationale": "brief reason",
-  "handoff": {{
-    "next_step": "",
-    "missing": [],
-    "unverified": [],
-    "widen": [],
-    "memory_query": ""
+  "answer_verdict": {{
+    "deception_level": "GREEN|YELLOW|RED",
+    "rationale": "brief answer verification",
+    "handoff": {{
+      "next_step": "",
+      "missing": [],
+      "unverified": [],
+      "widen": [],
+      "memory_query": ""
+    }}
+  }},
+  "split_verdict": {{
+    "used": {str(used).lower()},
+    "valid": true,
+    "score": 0,
+    "independence_score": 0.0,
+    "balance_score": 0.0,
+    "time_effect": "positive|neutral|negative|unknown",
+    "unnecessary_split": false,
+    "missed_valid_split": false,
+    "better_single_model": false,
+    "feedback": "short reusable lesson"
   }}
-}}
-
-GREEN = no deception detected, not verified truth.""",
-            "Strict compact JSON verdict.",
-            fallback_text="SPLITTER_VERIFY_CALL_FAILED_OR_EMPTY",
-            role_key="SPLITTER",
+}}"""
+        raw = await self._safe_run_one(
+            b,
+            prompt,
+            "Strict compact JSON with answer_verdict and split_verdict.",
+            fallback_text="SELF_SPLIT_REVIEW_CALL_FAILED_OR_EMPTY",
+            role_key="B_VERIFY",
         )
-        return parse_model(
-            raw,
-            Verdict,
-            Verdict(
+
+        fallback = TurnReview(
+            answer_verdict=Verdict(
                 deception_level="YELLOW",
-                rationale="Splitter-verifier output could not be parsed or was empty.",
+                rationale="Final review output could not be parsed or was empty.",
             ),
+            split_verdict=SplitQuality(
+                used=used,
+                valid=False,
+                score=0,
+                independence_score=0.0,
+                balance_score=0.0,
+                time_effect="unknown",
+                feedback="Review failed; do not learn a positive routing lesson from this turn.",
+            ),
+        )
+        return parse_model(raw, TurnReview, fallback)
+
+    async def _persist_split_experience(
+        self,
+        *,
+        task: str,
+        plan: SplitPlan,
+        telemetry: dict[str, int | float | str],
+        grade: SplitQuality,
+    ) -> None:
+        lesson = {
+            "task_excerpt": task[:1200],
+            "decision": plan.model_dump(),
+            "timing": telemetry,
+            "grade": grade.model_dump(),
+        }
+        await asyncio.to_thread(
+            self.memory.record_split_experience,
+            json.dumps(lesson, ensure_ascii=False),
         )
 
     async def run(self, task: str) -> RunResult:
-        timings = {}
+        timings: dict[str, int | float | str] = {}
         total_start = time.perf_counter()
         memory_slice = self.memory.auto_slice(task)
+        split_experience = self.memory.split_experience_slice(task)
+        trace = ProxyToolTrace()
+        state = SelfSplitRunState()
 
-        t_route = time.perf_counter()
-        plan = await self._route(task, memory_slice=memory_slice)
-        timings["splitter_route_ms"] = int((time.perf_counter() - t_route) * 1000)
+        primary_start = time.perf_counter()
+        a_primary = await self._run_self_split_a(
+            task=task,
+            memory_slice=memory_slice,
+            split_experience=split_experience,
+            trace=trace,
+            run_state=state,
+        )
+        primary_finished = time.perf_counter()
+        timings["a_route_and_work_ms"] = int((primary_finished - primary_start) * 1000)
 
-        if not self._accept_split(plan):
-            base = await super().run(task)
-            base.mode = self.name
-            base.route = plan
-            base.route_source = (
-                "fallback"
-                if plan.reason.startswith("ROUTING_PARSE_FAILURE:")
-                else "semantic"
+        logical_calls = 1
+
+        if state.split_used:
+            b_half = await state.await_peer()
+            plan = SplitPlan(
+                mode="split",
+                fragments=[
+                    SplitFragment(owner="A", task=state.own_fragment),
+                    SplitFragment(owner="B", task=state.peer_fragment),
+                ],
+                merge=state.merge_mode,
+                reason=state.reason,
             )
-            base.logical_model_calls += 1
-            base.timings_ms["splitter_route_ms"] = timings["splitter_route_ms"]
-            base.timings_ms["split_path"] = 0
-            return base
 
-        frag_a = next(f for f in plan.fragments if f.owner == "A")
-        frag_b = next(f for f in plan.fragments if f.owner == "B")
-        run_state = ProxyRunState()
+            merge_start = time.perf_counter()
+            if state.merge_mode == "append":
+                parts = [b_half, a_primary] if state.peer_first else [a_primary, b_half]
+                answer = "\n\n".join(x.strip() for x in parts if x and x.strip())
+                merge_ms = 0
+            else:
+                answer = await self._merge_self_split(
+                    task=task,
+                    a_half=a_primary,
+                    b_half=b_half,
+                    memory_slice=memory_slice,
+                    reason=state.reason,
+                )
+                merge_ms = int((time.perf_counter() - merge_start) * 1000)
+                logical_calls += 1
 
-        t_halves = time.perf_counter()
-        a_result, b_result = await asyncio.gather(
-            self._run_half("A", frag_a.task, task, run_state, memory_slice),
-            self._run_half("B", frag_b.task, task, run_state, memory_slice),
+            logical_calls += 1  # B parallel half.
+            telemetry = self._timing_telemetry(
+                state,
+                primary_started=primary_start,
+                primary_finished=primary_finished,
+                merge_ms=merge_ms,
+            )
+            timings.update(telemetry)
+            route_source = "a_self_split"
+        else:
+            plan = SplitPlan(
+                mode="normal",
+                reason="A found no valid two-way split worth the coordination/merge overhead.",
+            )
+            answer = a_primary
+            telemetry = {
+                "route_decision_ms": timings["a_route_and_work_ms"],
+                "measured_time_effect": "unknown",
+                "parallel_gain_proxy_ms": 0,
+            }
+            route_source = "a_self_normal"
+
+        review_start = time.perf_counter()
+        review = await self._review_self_split(
+            task=task,
+            answer=answer,
+            plan=plan,
+            telemetry=telemetry,
+            trace=trace.render(),
+            memory_slice=memory_slice,
+            split_experience=split_experience,
         )
-        a_half, a_trace = a_result
-        b_half, b_trace = b_result
-        provenance = f"A-HALF TOOL TRACE:\n{a_trace}\n\nB-HALF TRACE:\n{b_trace}"
-        timings["parallel_halves_ms"] = int((time.perf_counter() - t_halves) * 1000)
+        timings["b_review_ms"] = int((time.perf_counter() - review_start) * 1000)
+        logical_calls += 1
 
-        t_merge = time.perf_counter()
-        answer = await self._merge_with_a(task, plan, a_half, b_half, provenance, run_state)
-        timings["merge_ms"] = int((time.perf_counter() - t_merge) * 1000)
-
-        t_verify = time.perf_counter()
-        verdict = await self._verify_with_splitter(
-            task,
-            answer,
-            provenance,
-            memory_slice,
+        await self._persist_memory_query(review.answer_verdict)
+        await self._persist_split_experience(
+            task=task,
+            plan=plan,
+            telemetry=telemetry,
+            grade=review.split_verdict,
         )
-        timings["splitter_verify_ms"] = int((time.perf_counter() - t_verify) * 1000)
 
-        timings["split_path"] = 1
         timings["total_ms"] = int((time.perf_counter() - total_start) * 1000)
 
-        asyncio.create_task(asyncio.to_thread(self.memory.record, f"Task: {task}\nAnswer: {answer}\nVerdict: {verdict.deception_level}"))
-        dynamic_b_calls = int(run_state.delegate_used) + int(run_state.consult_used)
+        asyncio.create_task(asyncio.to_thread(
+            self.memory.record,
+            f"Task: {task}\nAnswer: {answer}\nVerdict: {review.answer_verdict.deception_level}",
+        ))
+
         return RunResult(
             mode=self.name,
             answer=answer,
-            verdict=verdict,
+            verdict=review.answer_verdict,
             route=plan,
             timings_ms=timings,
-            logical_model_calls=5 + dynamic_b_calls,
-            route_source="semantic",
+            logical_model_calls=logical_calls,
+            route_source=route_source,
+            split_feedback=review.split_verdict,
         )
