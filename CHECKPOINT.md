@@ -21,3 +21,14 @@ Loop mode:
 Gated and Non-Split remain as controls.
 
 The old dedicated-Splitter and A-merge implementations are preserved only in Git history.
+
+
+Verifier release hardening:
+- one shared full VERIFICATION_PROTOCOL is injected into every B verification/finalization path;
+- original memory/provenance/self-corroboration protections are preserved;
+- every material action/artifact claim requires evidence, with focused proof_requests when evidence is missing;
+- unresolved missing/unverified/proof_requests cannot remain GREEN;
+- empty/malformed verification remains fail-closed YELLOW;
+- blank rationale/final answer fields fail validation;
+- full tool evidence is retained by default for B verification;
+- runtime split facts correct inconsistent model split grading.
