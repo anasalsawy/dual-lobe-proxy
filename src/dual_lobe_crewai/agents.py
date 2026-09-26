@@ -7,6 +7,7 @@ from .prompts import (
     A_PERSONA,
     A_SELF_SPLIT_PERSONA,
     B_VERIFY_PERSONA,
+    B_FINALIZE_PERSONA,
     B_WORKER_PERSONA,
 )
 
@@ -38,6 +39,21 @@ def make_b_verifier() -> Agent:
         backstory=B_VERIFY_PERSONA,
         llm=make_llm("B_VERIFY"),
         tools=[],
+        verbose=False,
+        allow_delegation=False,
+    )
+
+
+def make_b_finalizer(tools=None) -> Agent:
+    return Agent(
+        role="Lobe B — Collector, Finalizer, Verifier, and Split-Quality Peer",
+        goal=(
+            "Merge both completed halves into one canonical answer, repair deficiencies, verify the result, "
+            "and grade the split using evidence and timing telemetry."
+        ),
+        backstory=B_FINALIZE_PERSONA,
+        llm=make_llm("B_VERIFY"),
+        tools=list(tools or []),
         verbose=False,
         allow_delegation=False,
     )
