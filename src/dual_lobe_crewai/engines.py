@@ -16,7 +16,7 @@ from .models import (
     TurnReview,
     Verdict,
 )
-from .prompts import OBSERVATION_DISCLAIMER
+from .prompts import OBSERVATION_DISCLAIMER, VERIFICATION_PROTOCOL
 from .runner import run_one
 from .tools import (
     ProxyRunState,
@@ -134,11 +134,14 @@ SHARED MEMORY EVIDENCE PRESENTED TO A:
 EXECUTION / PROVENANCE TRACE:
 {trace_text}
 
-Important:
+${VERIFICATION_PROTOCOL}
+
+Additional turn-specific requirements:
 - The SHARED MEMORY EVIDENCE above is the exact memory snapshot A was allowed to use on this turn.
-- If that evidence supports A's claim, treat the claim as memory-grounded.
+- If that evidence supports A's claim, treat the claim as memory-grounded; do not say memory was unavailable or invisible.
 - Use the trace to determine whether memory/delegate/consult tools actually ran.
-- B-originated worker/consult content is contributed work, not independent corroboration.
+- Content marked provenance=lobe_b_worker or lobe_b_consult is B-originated and MUST NOT be treated as independent corroboration.
+- Do not claim a required proxy tool was unused when the execution trace records that it ran.
 
 Return ONLY JSON:
 {{
@@ -390,6 +393,13 @@ RUNTIME TOOL TRACE:
 TIMING TELEMETRY:
 {json.dumps(telemetry, ensure_ascii=False, indent=2)}
 
+{VERIFICATION_PROTOCOL}
+
+Additional requirements for this single-lane turn:
+- Apply the verifier protocol to FINAL ANSWER exactly as emitted.
+- Grade the decision not to split separately from answer truthfulness.
+- Do not let a good split decision compensate for an unsupported answer claim, or vice versa.
+
 Return ONLY JSON:
 {{
   "answer_verdict": {{
@@ -473,6 +483,10 @@ A'S COMPLETED HALF:
 B'S COMPLETED HALF:
 {b_half}
 
+WORKER HEALTH:
+- A worker failed sentinel present: {a_half.startswith("PRIMARY_SELF_SPLIT_WORKER_CALL_FAILED_OR_EMPTY")}
+- B worker error: {bool(getattr(plan, "mode", "") == "split" and b_half.startswith("B_HALF_CALL_FAILED"))}
+
 A'S SPLIT PLAN:
 {plan.model_dump_json()}
 
@@ -488,14 +502,18 @@ WORKER TOOL / PROVENANCE TRACE:
 MEASURED TIMING TELEMETRY:
 {json.dumps(telemetry, ensure_ascii=False, indent=2)}
 
+{VERIFICATION_PROTOCOL}
+
 Perform ALL of these in this same call:
 1. COLLECT both halves. Preserve all useful work from each.
 2. MERGE them into one coherent answer for the ORIGINAL USER TASK.
 3. REPAIR deficiencies: remove duplication, resolve contradictions, restore missing prerequisites/conclusions, and fill obvious task-required gaps.
 4. Do NOT invent unsupported facts while repairing. If evidence is insufficient, state the limitation in the final answer.
-5. VERIFY the completed merged answer for unsupported claims, fabricated tool/action claims, contradictions, task drift, and unjustified certainty.
-6. GRADE the split for semantic validity, independence, balance, timing effect, unnecessary splitting, and reusable lessons.
-7. Emit ONE canonical final answer. In loop mode this exact answer becomes the single state for the next cycle.
+5. FREEZE the completed candidate, then apply the full CORE VERIFICATION PROTOCOL to that exact candidate.
+6. If verification exposes a repairable deficiency, repair it and re-check the repaired candidate before emitting.
+7. Keep verification evidence separate from worker authorship: neither A-half nor B-half corroborates itself.
+8. GRADE the split for semantic validity, independence, balance, timing effect, unnecessary splitting, and reusable lessons.
+9. Emit ONE canonical final answer. The answer_verdict MUST describe that exact emitted final_answer. In loop mode this exact answer becomes the single state for the next cycle.
 
 Runtime timing is stronger evidence than intuition for speed.
 parallel_gain_proxy_ms is measured overlap only; it is NOT a matched single-model counterfactual.
@@ -559,6 +577,28 @@ GREEN means no deception detected, not verified truth."""
             ),
         )
         finalized = parse_model(raw, FinalizedTurn, fallback)
+
+        # Runtime hardening: a failed worker lane makes the split itself invalid even
+        # if B was able to repair the final answer. Do not let the model grade over
+        # execution evidence.
+        worker_failed = (
+            a_half.startswith("PRIMARY_SELF_SPLIT_WORKER_CALL_FAILED_OR_EMPTY")
+            or b_half.startswith("B_HALF_CALL_FAILED:")
+            or b_half.startswith("B_HALF_CALL_FAILED_OR_EMPTY")
+        )
+        if worker_failed:
+            finalized.split_verdict = finalized.split_verdict.model_copy(
+                update={
+                    "valid": False,
+                    "score": min(finalized.split_verdict.score, 25),
+                    "time_effect": "unknown",
+                    "feedback": (
+                        "At least one worker lane failed; do not learn a positive split lesson from this cycle. "
+                        + finalized.split_verdict.feedback
+                    )[:1200],
+                }
+            )
+
         if finalizer_trace.events:
             trace.add(
                 "b_finalizer_tools",
