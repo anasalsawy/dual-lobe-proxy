@@ -1,4 +1,4 @@
-from .engines import GatedEngine, NonSplitEngine, SplitEngine
+from .engines import SplitEngine
 from .group_coordination import (
     AgentIdentity,
     FloorMode,
@@ -8,10 +8,11 @@ from .group_coordination import (
     GroupTurnResult,
 )
 
+DualLobeEngine = SplitEngine
+
 __all__ = [
-    "GatedEngine",
-    "NonSplitEngine",
     "SplitEngine",
+    "DualLobeEngine",
     "AgentIdentity",
     "FloorMode",
     "GroupCoordinator",
