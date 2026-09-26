@@ -6,25 +6,13 @@ import json
 import sys
 from dotenv import load_dotenv
 
-from .engines import GatedEngine, NonSplitEngine, SplitEngine
+from .engines import SplitEngine
 
 
-def build_engine(mode: str):
-    if mode == "gated":
-        return GatedEngine()
-    if mode in {"non-split", "nonsplit", "non_split"}:
-        return NonSplitEngine()
-    if mode == "split":
-        return SplitEngine()
-    raise ValueError(f"Unknown mode: {mode}")
-
-
-async def _amain(mode: str, task: str, show_meta: bool, loop_cycles: int):
-    engine = build_engine(mode)
+async def _amain(task: str, show_meta: bool, loop_cycles: int):
+    engine = SplitEngine()
 
     if loop_cycles > 1:
-        if not isinstance(engine, SplitEngine):
-            raise ValueError("--loop-cycles > 1 is supported only in --mode split")
         results = await engine.run_loop(task, cycles=loop_cycles)
         result = results[-1]
     else:
@@ -35,7 +23,7 @@ async def _amain(mode: str, task: str, show_meta: bool, loop_cycles: int):
     if show_meta:
         print("\n--- internal test metadata ---")
         payload = {
-            "mode": result.mode,
+            "architecture": "dual-lobe",
             "cycle_index": result.cycle_index,
             "canonical_state": result.canonical_state,
             "route": result.route.model_dump() if result.route else None,
@@ -66,18 +54,20 @@ def main():
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-    p = argparse.ArgumentParser()
-    p.add_argument("--mode", choices=["gated", "non-split", "split"], default="gated")
+
+    p = argparse.ArgumentParser(
+        description="Dual-Lobe: one current architecture with self-splitting, verification, memory, and group awareness."
+    )
     p.add_argument("--task", required=True)
     p.add_argument("--show-meta", action="store_true")
     p.add_argument(
         "--loop-cycles",
         type=int,
         default=1,
-        help="For split mode, reconverge each cycle into one canonical state and feed it to the next cycle.",
+        help="Reconverge each cycle into one canonical state and feed it to the next cycle.",
     )
     args = p.parse_args()
-    asyncio.run(_amain(args.mode, args.task, args.show_meta, args.loop_cycles))
+    asyncio.run(_amain(args.task, args.show_meta, args.loop_cycles))
 
 
 if __name__ == "__main__":
