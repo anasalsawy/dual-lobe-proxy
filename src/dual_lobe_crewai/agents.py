@@ -3,68 +3,42 @@ from __future__ import annotations
 from crewai import Agent
 
 from .llm_factory import make_llm
-from .prompts import (
-    A_PERSONA,
-    A_SELF_SPLIT_PERSONA,
-    B_VERIFY_PERSONA,
-    B_FINALIZE_PERSONA,
-    B_WORKER_PERSONA,
-)
+from .prompts import A_PERSONA, B_ADVERSARY_PERSONA, CHILD_PERSONA
 
 
-def make_a(tools=None, *, merge: bool = False, self_split: bool = False) -> Agent:
-    persona = A_SELF_SPLIT_PERSONA if self_split and not merge else A_PERSONA
-    role = "Lobe A — Professional Splitter-Executor" if self_split and not merge else "Lobe A — Primary Worker"
-    goal = (
-        "Minimize wall-clock completion time by finding a valid two-way split when one exists, "
-        "then execute your own independent half."
-        if self_split and not merge
-        else "Solve the user's task and own the final user-facing answer."
-    )
+def make_a(tools=None) -> Agent:
     return Agent(
-        role=role,
-        goal=goal,
-        backstory=persona,
-        llm=make_llm("A_MERGE" if merge else "A"),
+        role="Lobe A — Primary Worker and Delegator",
+        goal="Solve the user's task with minimum wall-clock delay, delegating independent work whenever that can save the user time.",
+        backstory=A_PERSONA,
+        llm=make_llm("A"),
         tools=list(tools or []),
         verbose=False,
         allow_delegation=False,
     )
 
 
-def make_b_verifier() -> Agent:
+def make_child_worker(tools=None) -> Agent:
     return Agent(
-        role="Lobe B — Verification and Split-Quality Peer",
-        goal="Verify the final answer and grade the decomposition decision using evidence and timing telemetry.",
-        backstory=B_VERIFY_PERSONA,
-        llm=make_llm("B_VERIFY"),
-        tools=[],
+        role="Temporary Delegated Inference Worker",
+        goal="Execute the assigned independent subtask quickly and return a self-contained result to Lobe A.",
+        backstory=CHILD_PERSONA,
+        llm=make_llm("A_CHILD"),
+        tools=list(tools or []),
         verbose=False,
         allow_delegation=False,
     )
 
 
-def make_b_finalizer(tools=None) -> Agent:
+def make_b_adversary(tools=None) -> Agent:
     return Agent(
-        role="Lobe B — Collector, Finalizer, Verifier, and Split-Quality Peer",
+        role="Lobe B — Independent Adversary and Anti-Deception Verifier",
         goal=(
-            "Merge both completed halves into one canonical answer, repair deficiencies, verify the result, "
-            "and grade the split using evidence and timing telemetry."
+            "Attack A's reasoning, goal-fit, assumptions, feasibility, and evidence; find what A or the user may be missing; "
+            "then repair the answer where possible and verify the exact canonical result."
         ),
-        backstory=B_FINALIZE_PERSONA,
+        backstory=B_ADVERSARY_PERSONA,
         llm=make_llm("B_VERIFY"),
-        tools=list(tools or []),
-        verbose=False,
-        allow_delegation=False,
-    )
-
-
-def make_b_worker(tools=None) -> Agent:
-    return Agent(
-        role="Lobe B — Independent Parallel Worker",
-        goal="Execute one independent task half without depending on Lobe A's intermediate output.",
-        backstory=B_WORKER_PERSONA,
-        llm=make_llm("B_WORKER"),
         tools=list(tools or []),
         verbose=False,
         allow_delegation=False,
