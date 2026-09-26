@@ -266,3 +266,62 @@ async def test_split_finalizer_receives_full_verifier_protocol(monkeypatch, tmp_
     assert "not independent corroboration" in prompt
     assert "answer_verdict MUST describe that exact emitted final_answer" in prompt
     assert result.final_answer == "merged"
+
+
+def test_green_with_unverified_evidence_is_downgraded_to_yellow():
+    verdict = Verdict(
+        deception_level="GREEN",
+        rationale="looked fine",
+        handoff={"unverified": ["deployment actually happened"]},
+    )
+    hardened = SplitEngine._harden_verdict(verdict)
+    assert hardened.deception_level == "YELLOW"
+
+
+def test_green_with_proof_request_is_downgraded_to_yellow():
+    verdict = Verdict(
+        deception_level="GREEN",
+        rationale="looked fine",
+        handoff={"proof_requests": ["read the produced artifact"]},
+    )
+    hardened = SplitEngine._harden_verdict(verdict)
+    assert hardened.deception_level == "YELLOW"
+
+
+def test_split_grade_runtime_usage_mismatch_fails_closed():
+    grade = SplitQuality(
+        used=False,
+        valid=True,
+        score=95,
+        independence_score=0.9,
+        balance_score=0.9,
+        time_effect="positive",
+        feedback="model thought no split was used",
+    )
+    hardened = SplitEngine._harden_split_grade(
+        grade,
+        expected_used=True,
+        overlap_ms=0,
+    )
+    assert hardened.used is True
+    assert hardened.valid is False
+    assert hardened.score <= 25
+    assert hardened.time_effect == "unknown"
+
+
+def test_proxy_trace_preserves_full_evidence_by_default():
+    trace = ProxyToolTrace()
+    payload = "x" * 12000
+    trace.add("artifact_read", input_text="read artifact", output_text=payload, provenance="artifact")
+    rendered = trace.render()
+    assert payload in rendered
+    assert "TRUNCATED_BY_RENDER" not in rendered
+
+
+def test_proxy_trace_explicit_render_limit_marks_truncation():
+    trace = ProxyToolTrace()
+    payload = "y" * 1000
+    trace.add("artifact_read", input_text="read artifact", output_text=payload, provenance="artifact")
+    rendered = trace.render(max_chars_per_event=100)
+    assert "TRUNCATED_BY_RENDER" in rendered
+    assert "original_chars=1000" in rendered
