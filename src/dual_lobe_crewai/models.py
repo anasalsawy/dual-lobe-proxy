@@ -47,3 +47,9 @@ class SplitQuality(BaseModel):
 class TurnReview(BaseModel):
     answer_verdict: Verdict
     split_verdict: SplitQuality
+
+
+class FinalizedTurn(BaseModel):
+    final_answer: str
+    answer_verdict: Verdict
+    split_verdict: SplitQuality
