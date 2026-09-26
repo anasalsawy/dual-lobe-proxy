@@ -1,15 +1,13 @@
 from __future__ import annotations
 
+import json
+import os
 import re
 from dataclasses import dataclass, field
-from enum import Enum
+from pathlib import Path
 from typing import Awaitable, Callable, Iterable
 
-
-class FloorMode(str, Enum):
-    OBSERVE = "observe"
-    RESPOND = "respond"
-    BROADCAST = "broadcast"
+from .json_utils import extract_json_object
 
 
 @dataclass(frozen=True)
@@ -18,17 +16,6 @@ class AgentIdentity:
     display_name: str
     aliases: tuple[str, ...] = ()
     role: str = ""
-
-    def all_names(self) -> tuple[str, ...]:
-        values = [self.display_name, *self.aliases]
-        seen: set[str] = set()
-        ordered: list[str] = []
-        for value in values:
-            key = value.strip().casefold()
-            if key and key not in seen:
-                seen.add(key)
-                ordered.append(value.strip())
-        return tuple(ordered)
 
 
 @dataclass(frozen=True)
@@ -45,9 +32,7 @@ class GroupMessage:
 @dataclass(frozen=True)
 class AgentDelivery:
     agent_id: str
-    mode: FloorMode
     can_emit: bool
-    text: str
     addressed_agents: tuple[str, ...]
 
 
@@ -56,201 +41,51 @@ class GroupTurnResult:
     deliveries: dict[str, AgentDelivery]
     published: dict[str, str] = field(default_factory=dict)
     suppressed: tuple[str, ...] = ()
-
-
-@dataclass
-class AgentRuntimeState:
-    awareness_queue: list[str] = field(default_factory=list)
-    active_floor: bool = False
-    current_task: str | None = None
-
-    def enqueue_awareness(self, text: str) -> None:
-        if text.strip():
-            self.awareness_queue.append(text.strip())
-
-    def drain_awareness(self) -> list[str]:
-        items = list(self.awareness_queue)
-        self.awareness_queue.clear()
-        return items
+    router_reason: str = ""
 
 
 class GroupCoordinator:
-    """Portable group-awareness and floor-control proof of concept.
-
-    The coordinator is deliberately model-agnostic. It separates message
-    visibility from speaking permission, so non-addressed agents may remain
-    aware without receiving a user-facing turn.
-    """
+    """Deterministic enforcement only. B decides addressing; code enforces B's decision."""
 
     def __init__(self, identities: Iterable[AgentIdentity]):
         identities = list(identities)
         if not identities:
             raise ValueError("At least one agent identity is required.")
-
         ids = [x.agent_id for x in identities]
         if len(ids) != len(set(ids)):
             raise ValueError("agent_id values must be unique.")
-
         self.identities = {x.agent_id: x for x in identities}
-        self.states = {x.agent_id: AgentRuntimeState() for x in identities}
 
-        self._alias_to_id: dict[str, str] = {}
-        for identity in identities:
-            for alias in identity.all_names():
-                key = self._norm(alias)
-                existing = self._alias_to_id.get(key)
-                if existing and existing != identity.agent_id:
-                    raise ValueError(f"Alias collision: {alias!r}")
-                self._alias_to_id[key] = identity.agent_id
+    def validated_targets(self, targets: Iterable[str]) -> tuple[str, ...]:
+        allowed = set(self.identities)
+        return tuple(dict.fromkeys(x for x in targets if x in allowed))
 
-    @staticmethod
-    def _norm(value: str) -> str:
-        return re.sub(r"\s+", " ", value.strip().casefold())
-
-    @staticmethod
-    def _contains_alias(text: str, alias: str) -> bool:
-        escaped = re.escape(alias)
-        pattern = rf"(?<!\w)@?{escaped}(?!\w)"
-        return re.search(pattern, text, flags=re.IGNORECASE) is not None
-
-    def resolve_targets(self, message: GroupMessage) -> tuple[str, ...]:
-        if message.broadcast:
-            return tuple(self.identities)
-
-        explicit = [x for x in message.explicit_target_ids if x in self.identities]
-        if explicit:
-            return tuple(dict.fromkeys(explicit))
-
-        if message.reply_to_agent_id in self.identities:
-            return (message.reply_to_agent_id,)  # reply metadata is authoritative
-
-        found: list[str] = []
-        text = message.text or ""
-        aliases = sorted(self._alias_to_id, key=len, reverse=True)
-
-        # Explicit @mentions count as addressing anywhere in the message.
-        for alias in aliases:
-            bare = alias.lstrip("@")
-            if re.search(rf"(?<!\w)@{re.escape(bare)}(?!\w)", text, flags=re.IGNORECASE):
-                agent_id = self._alias_to_id[alias]
-                if agent_id not in found:
-                    found.append(agent_id)
-
-        # Bare names/aliases only count deterministically when used as a
-        # vocative/direct address, not merely mentioned in third person.
-        # Examples accepted:
-        #   "Sarah, check this"
-        #   "Sarah and David, compare findings"
-        #   "What do you think, Sarah?"
-        if not found:
-            start_window = text.strip()
-            for alias in aliases:
-                bare = alias.lstrip("@")
-                # Start-of-message direct address followed by comma/colon/dash,
-                # or by conjunction joining another addressed name.
-                start_pat = rf"^\s*{re.escape(bare)}(?=\s*(?:[,;:—-]|\band\b|&))"
-                if re.search(start_pat, start_window, flags=re.IGNORECASE):
-                    agent_id = self._alias_to_id[alias]
-                    if agent_id not in found:
-                        found.append(agent_id)
-
-            # If one start-of-message addressee was found, capture additional
-            # names in the same vocative prefix before the first comma/colon.
-            if found:
-                prefix = re.split(r"[,;:—-]", start_window, maxsplit=1)[0]
-                for alias in aliases:
-                    bare = alias.lstrip("@")
-                    if self._contains_alias(prefix, bare):
-                        agent_id = self._alias_to_id[alias]
-                        if agent_id not in found:
-                            found.append(agent_id)
-
-        if not found:
-            for alias in aliases:
-                bare = alias.lstrip("@")
-                # End-of-message vocative: "what do you think, Sarah?"
-                end_pat = rf"[,;:]\s*{re.escape(bare)}\s*[?.!]*\s*$"
-                if re.search(end_pat, text, flags=re.IGNORECASE):
-                    agent_id = self._alias_to_id[alias]
-                    if agent_id not in found:
-                        found.append(agent_id)
-
-        broadcast_words = ("everyone", "everybody", "all agents", "team")
-        if not found and any(self._contains_alias(text, word) for word in broadcast_words):
-            return tuple(self.identities)
-
-        return tuple(found)
-
-    def route_to_targets(self, message: GroupMessage, targets: tuple[str, ...]) -> dict[str, AgentDelivery]:
-        target_set = set(targets)
-        is_broadcast = len(target_set) == len(self.identities) and bool(target_set)
-
-        deliveries: dict[str, AgentDelivery] = {}
-        for agent_id, identity in self.identities.items():
-            if agent_id in target_set:
-                mode = FloorMode.BROADCAST if is_broadcast else FloorMode.RESPOND
-                can_emit = True
-                self.states[agent_id].active_floor = True
-                text = (
-                    f"GROUP TURN. You were explicitly addressed as {identity.display_name}. "
-                    "You have permission to respond to the group. Preserve your current task state."
-                )
-            else:
-                mode = FloorMode.OBSERVE
-                can_emit = False
-                self.states[agent_id].active_floor = False
-                text = (
-                    "GROUP AWARENESS EVENT. You were not addressed. Do not respond to this message. "
-                    "Keep working on your current task and incorporate the event only if relevant."
-                )
-                self.states[agent_id].enqueue_awareness(
-                    f"{message.sender_id}: {message.text}"
-                )
-
-            deliveries[agent_id] = AgentDelivery(
+    def route_to_targets(self, targets: tuple[str, ...]) -> dict[str, AgentDelivery]:
+        valid = self.validated_targets(targets)
+        target_set = set(valid)
+        return {
+            agent_id: AgentDelivery(
                 agent_id=agent_id,
-                mode=mode,
-                can_emit=can_emit,
-                text=text,
-                addressed_agents=targets,
+                can_emit=agent_id in target_set,
+                addressed_agents=valid,
             )
-        return deliveries
-
-    def route(self, message: GroupMessage) -> dict[str, AgentDelivery]:
-        return self.route_to_targets(message, self.resolve_targets(message))
-
-    def consume_awareness_context(self, agent_id: str) -> str:
-        if agent_id not in self.states:
-            raise KeyError(agent_id)
-        items = self.states[agent_id].drain_awareness()
-        if not items:
-            return ""
-        body = "\n".join(f"- {item}" for item in items)
-        return (
-            "RECENT GROUP EVENTS:\n"
-            f"{body}\n"
-            "You were not granted the floor for these events. Use them only as context and continue your task."
-        )
+            for agent_id in self.identities
+        }
 
     @staticmethod
     def gate_output(delivery: AgentDelivery, generated_text: str) -> str | None:
-        """Authoritative transport gate.
-
-        Even if a non-addressed model generates text, it is not publishable.
-        """
         if not delivery.can_emit:
             return None
         text = (generated_text or "").strip()
         return text or None
 
 
-
 class GroupDualLobeRuntime:
-    """Live-call integration layer for a group of Dual-Lobe agents.
+    """In group mode, B is the conversation observer and routing lobe.
 
-    Single-agent sessions bypass group routing entirely. Multi-agent sessions
-    use deterministic routing first and call the semantic resolver only when
-    deterministic metadata/name matching finds no target.
+    B follows the conversation and decides which A instance(s) are actually
+    addressed by each new message. Deterministic code validates B's chosen IDs
+    and enforces the speaking floor. Non-addressed A instances are not invoked.
     """
 
     def __init__(
@@ -258,90 +93,147 @@ class GroupDualLobeRuntime:
         identities: Iterable[AgentIdentity],
         *,
         engine_factory: Callable[[AgentIdentity], object] | None = None,
-        semantic_resolver: Callable[[GroupMessage, tuple[AgentIdentity, ...]], Awaitable[tuple[str, ...]]] | None = None,
+        b_router: Callable[
+            [GroupMessage, tuple[AgentIdentity, ...], tuple[dict, ...]],
+            Awaitable[tuple[tuple[str, ...], str]],
+        ] | None = None,
+        history_limit: int = 40,
     ):
         identities = list(identities)
         self.coordinator = GroupCoordinator(identities)
-        self.semantic_resolver = semantic_resolver
+        self.b_router = b_router
+        self.history_limit = max(4, history_limit)
+        self.history: dict[str, list[dict]] = {}
+
         if engine_factory is None:
-            from .engines import SplitEngine
+            from .engines import DualLobeEngine
             from .memory import JsonlMemoryStore
-            from pathlib import Path
-            import os
+
             base = Path(os.getenv("DUAL_LOBE_GROUP_MEMORY_DIR", ".dual_lobe_group_memory"))
 
             def engine_factory(identity: AgentIdentity):
                 safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", identity.agent_id)
-                return SplitEngine(memory=JsonlMemoryStore(str(base / f"{safe_id}.jsonl")))
+                return DualLobeEngine(
+                    memory=JsonlMemoryStore(str(base / f"{safe_id}.a.jsonl")),
+                    b_memory=JsonlMemoryStore(str(base / f"{safe_id}.b.jsonl")),
+                )
 
         self.engines = {identity.agent_id: engine_factory(identity) for identity in identities}
 
-    async def _default_semantic_resolver(
+    def _recent_history(self, group_id: str) -> tuple[dict, ...]:
+        return tuple(self.history.get(group_id, [])[-self.history_limit:])
+
+    def _append_history(self, group_id: str, row: dict) -> None:
+        rows = self.history.setdefault(group_id, [])
+        rows.append(row)
+        if len(rows) > self.history_limit * 2:
+            del rows[:-self.history_limit]
+
+    async def _default_b_router(
         self,
         message: GroupMessage,
         identities: tuple[AgentIdentity, ...],
-    ) -> tuple[str, ...]:
-        """Resolve genuinely ambiguous addressing with one small LLM call.
-
-        This is never reached for a single-agent session or when deterministic
-        metadata/name/alias/broadcast routing already found a target.
-        """
-        import json
-        from .agents import make_a
-        from .json_utils import extract_json_object
+        history: tuple[dict, ...],
+    ) -> tuple[tuple[str, ...], str]:
+        from .agents import make_b_adversary
         from .runner import run_one
 
         roster = [
             {
-                "agent_id": identity.agent_id,
-                "display_name": identity.display_name,
-                "aliases": list(identity.aliases),
-                "role": identity.role,
+                "agent_id": x.agent_id,
+                "display_name": x.display_name,
+                "aliases": list(x.aliases),
+                "role": x.role,
             }
-            for identity in identities
+            for x in identities
         ]
-        prompt = (
-            "You are only an addressing resolver for a multi-agent group chat.\n"
-            "Decide which agent or agents the message is asking to respond.\n"
-            "Do NOT answer the message itself. Do NOT assign work merely because an agent could do it.\n"
-            "Return no targets for an informational statement with no implied respondent.\n"
-            "Use only agent_ids from the roster.\n\n"
-            f"ROSTER:\n{json.dumps(roster, ensure_ascii=False)}\n\n"
-            f"MESSAGE:\n{message.text}\n\n"
-            'Return ONLY JSON: {"target_ids":["agent_id"],"broadcast":false,"reason":"brief"}'
-        )
-        agent = make_a(tools=None)
+        metadata = {
+            "sender_id": message.sender_id,
+            "group_id": message.group_id,
+            "reply_to_agent_id": message.reply_to_agent_id,
+            "explicit_target_ids": list(message.explicit_target_ids),
+            "broadcast": message.broadcast,
+        }
+
+        prompt = f"""You are Lobe B acting as the persistent conversation observer and floor router for a group chat.
+
+Your standing job in group mode is to FOLLOW the conversation, understand who is speaking to whom, and answer exactly one question:
+
+WHO IS ACTUALLY ADDRESSED BY THE CURRENT MESSAGE?
+
+You are not choosing who would be useful.
+You are not assigning work.
+You are not answering the user's message.
+You are deciding which A instance(s), if any, have actually been given the conversational floor.
+
+ROSTER:
+{json.dumps(roster, ensure_ascii=False, indent=2)}
+
+AUTHORITATIVE TRANSPORT METADATA:
+{json.dumps(metadata, ensure_ascii=False, indent=2)}
+
+RECENT CONVERSATION BEFORE THIS MESSAGE:
+{json.dumps(history, ensure_ascii=False, indent=2) if history else "(none)"}
+
+CURRENT MESSAGE:
+{message.text}
+
+Routing rules:
+- Explicit platform target IDs, reply-to metadata, and broadcast metadata are strong authoritative evidence.
+- Distinguish ADDRESS from MENTION. "Sarah said the logs are clean" does not address Sarah.
+- Follow conversational continuity. A short reply like "what about that?" may address the participant who currently holds the relevant floor.
+- Human-to-human conversation must not wake an agent simply because an agent's name or role is mentioned.
+- A role phrase like "the backend person" addresses an agent only when the speaker is actually calling on that role.
+- A genuine request to everyone/all agents may target all.
+- If nobody is addressed, return an empty target list.
+- If genuinely ambiguous, prefer no target over creating a reply storm.
+- Use only agent_ids from the roster.
+
+Return ONLY JSON:
+{{"target_ids":["agent_id"],"broadcast":false,"reason":"brief explanation of who was addressed and why"}}"""
+
+        b = make_b_adversary(tools=None)
         raw = await run_one(
-            agent,
+            b,
             prompt,
-            "Strict JSON selecting zero or more addressed agent IDs.",
-            role_key="A",
+            "Strict JSON identifying the actually addressed A instance(s).",
+            role_key="B_VERIFY",
         )
         try:
             data = extract_json_object(raw) or {}
         except Exception:
-            return ()
+            return (), "B routing output could not be parsed."
+
         if bool(data.get("broadcast")):
-            return tuple(self.coordinator.identities)
+            return tuple(self.coordinator.identities), str(data.get("reason") or "B identified a broadcast.")
+
         allowed = set(self.coordinator.identities)
         out: list[str] = []
         for agent_id in data.get("target_ids") or []:
             if agent_id in allowed and agent_id not in out:
                 out.append(agent_id)
-        return tuple(out)
+        return tuple(out), str(data.get("reason") or "")
 
-    async def _resolve_targets(self, message: GroupMessage) -> tuple[str, ...]:
-        deterministic = self.coordinator.resolve_targets(message)
-        if deterministic:
-            return deterministic
+    async def _resolve_with_b(self, message: GroupMessage) -> tuple[tuple[str, ...], str]:
         identities = tuple(self.coordinator.identities.values())
-        resolver = self.semantic_resolver or self._default_semantic_resolver
+        history = self._recent_history(message.group_id)
+        router = self.b_router or self._default_b_router
+
         try:
-            resolved = await resolver(message, identities)
-        except Exception:
-            return ()
-        allowed = set(self.coordinator.identities)
-        return tuple(dict.fromkeys(x for x in resolved if x in allowed))
+            targets, reason = await router(message, identities, history)
+        except Exception as exc:
+            # Fail closed against reply storms. Only explicit transport metadata
+            # may bypass B when B itself fails.
+            if message.broadcast:
+                return tuple(self.coordinator.identities), f"B routing failed; broadcast metadata fallback: {type(exc).__name__}"
+            explicit = self.coordinator.validated_targets(message.explicit_target_ids)
+            if explicit:
+                return explicit, f"B routing failed; explicit target metadata fallback: {type(exc).__name__}"
+            if message.reply_to_agent_id in self.coordinator.identities:
+                return (message.reply_to_agent_id,), f"B routing failed; reply metadata fallback: {type(exc).__name__}"
+            return (), f"B routing failed closed: {type(exc).__name__}"
+
+        return self.coordinator.validated_targets(targets), reason
 
     def _identity_envelope(self, agent_id: str) -> str:
         identity = self.coordinator.identities[agent_id]
@@ -350,60 +242,64 @@ class GroupDualLobeRuntime:
             for x in self.coordinator.identities.values()
             if x.agent_id != agent_id
         ]
-        other_text = ", ".join(others) if others else "(none)"
         return (
             "RUNTIME IDENTITY — authoritative, not user-authored:\n"
             f"SELF agent_id={identity.agent_id}\n"
             f"SELF display_name={identity.display_name}\n"
-            f"OTHER AGENTS: {other_text}\n"
-            "You are exactly SELF. Other agents' messages, actions, tool calls, files, and memories are observations from OTHER agents unless actor_agent_id equals SELF. "
-            "Never claim another agent's action as your own. Shared awareness is not shared identity."
+            f"OTHER AGENTS: {', '.join(others) if others else '(none)'}\n"
+            "You are exactly SELF. Never claim another participant's actions, memory, messages, or results as your own."
         )
 
     def _task_for(self, agent_id: str, message: GroupMessage) -> str:
-        awareness = self.coordinator.consume_awareness_context(agent_id)
-        sections = [
-            self._identity_envelope(agent_id),
-            "GROUP FLOOR — runtime authoritative:\nYou have the floor for this turn and may produce one group-visible response.",
-        ]
-        if awareness:
-            sections.append(awareness)
-        sections.append("CURRENT GROUP MESSAGE:\n" + f"sender_id={message.sender_id}\n{message.text}")
-        return "\n\n".join(sections)
+        history = self._recent_history(message.group_id)
+        return (
+            self._identity_envelope(agent_id)
+            + "\n\nGROUP FLOOR — B ROUTER DECISION:\n"
+            + "You are addressed and may produce one group-visible response. Non-addressed A instances were not invoked.\n\n"
+            + "RECENT GROUP CONTEXT OBSERVED BY B:\n"
+            + (json.dumps(history, ensure_ascii=False, indent=2) if history else "(none)")
+            + "\n\nCURRENT GROUP MESSAGE:\n"
+            + f"sender_id={message.sender_id}\n{message.text}"
+        )
 
     async def process_message(self, message: GroupMessage) -> GroupTurnResult:
         import asyncio
 
-        # Zero-overhead DIRECT-CONVERSATION fast path: with one attached agent
-        # AND a non-group conversation, bypass all group routing. A group may
-        # contain one agent plus multiple humans; that must still use addressing
-        # and floor control so the agent stays silent unless addressed.
+        # Private/direct one-agent chat needs no addressing inference.
         if len(self.coordinator.identities) == 1 and not message.is_group:
             agent_id = next(iter(self.coordinator.identities))
             result = await self.engines[agent_id].run(message.text)
-            generated = getattr(result, "answer", str(result))
-            delivery = AgentDelivery(
-                agent_id=agent_id,
-                mode=FloorMode.RESPOND,
-                can_emit=True,
-                text="",
-                addressed_agents=(agent_id,),
-            )
-            text = (generated or "").strip()
+            text = (getattr(result, "answer", str(result)) or "").strip()
+            delivery = AgentDelivery(agent_id=agent_id, can_emit=True, addressed_agents=(agent_id,))
             return GroupTurnResult(
                 deliveries={agent_id: delivery},
                 published={agent_id: text} if text else {},
                 suppressed=(),
+                router_reason="direct one-agent fast path",
             )
 
-        targets = await self._resolve_targets(message)
-        deliveries = self.coordinator.route_to_targets(message, targets)
+        # In group mode B sees every message and owns addressing interpretation.
+        targets, reason = await self._resolve_with_b(message)
+        deliveries = self.coordinator.route_to_targets(targets)
+
+        # Store the incoming message after routing so B does not see it twice.
+        self._append_history(
+            message.group_id,
+            {
+                "kind": "message",
+                "sender_id": message.sender_id,
+                "text": message.text,
+                "addressed_agent_ids": list(targets),
+            },
+        )
+
         active = [agent_id for agent_id, delivery in deliveries.items() if delivery.can_emit]
         if not active:
             return GroupTurnResult(
                 deliveries=deliveries,
                 published={},
                 suppressed=tuple(self.coordinator.identities),
+                router_reason=reason,
             )
 
         async def invoke(agent_id: str) -> tuple[str, str | None]:
@@ -414,12 +310,20 @@ class GroupDualLobeRuntime:
 
         pairs = await asyncio.gather(*(invoke(agent_id) for agent_id in active))
         published = {agent_id: text for agent_id, text in pairs if text}
-        suppressed = tuple(
-            agent_id for agent_id, delivery in deliveries.items()
-            if not delivery.can_emit
-        )
+
+        for agent_id, text in published.items():
+            self._append_history(
+                message.group_id,
+                {
+                    "kind": "agent_response",
+                    "sender_id": agent_id,
+                    "text": text,
+                },
+            )
+
         return GroupTurnResult(
             deliveries=deliveries,
             published=published,
-            suppressed=suppressed,
+            suppressed=tuple(x for x in self.coordinator.identities if x not in active),
+            router_reason=reason,
         )
