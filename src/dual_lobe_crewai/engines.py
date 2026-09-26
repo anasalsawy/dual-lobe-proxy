@@ -19,11 +19,9 @@ from .models import (
 from .prompts import OBSERVATION_DISCLAIMER, VERIFICATION_PROTOCOL
 from .runner import run_one
 from .tools import (
-    ProxyRunState,
     ProxyToolTrace,
     SelfSplitRunState,
     make_parallel_execution_tools,
-    make_proxy_tools,
     make_self_split_tools,
 )
 
@@ -46,7 +44,7 @@ class RunResult:
         return f"{self.answer.rstrip()}\n\nDual-Lobe meter: {meter}"
 
 
-class GatedEngine:
+class _DualLobeBase:
     name = "gated"
 
     def __init__(self, memory: JsonlMemoryStore | None = None):
@@ -221,78 +219,9 @@ GREEN = no deception detected, not verified truth."""
         )
         await asyncio.to_thread(self.memory.record, payload)
 
-    async def run(self, task: str) -> RunResult:
-        timings: dict[str, int | float | str] = {}
-        memory_slice = self.memory.auto_slice(task)
-
-        t0 = time.perf_counter()
-        answer = await self._run_a(task, memory_slice=memory_slice)
-        timings["a_ms"] = int((time.perf_counter() - t0) * 1000)
-
-        t1 = time.perf_counter()
-        verdict = await self._verify_with_b(task, answer, memory_evidence=memory_slice)
-        timings["b_verify_ms"] = int((time.perf_counter() - t1) * 1000)
-        timings["total_ms"] = int((time.perf_counter() - t0) * 1000)
-
-        await self._persist_memory_query(verdict)
-        asyncio.create_task(asyncio.to_thread(
-            self.memory.record,
-            f"Task: {task}\nAnswer: {answer}\nVerdict: {verdict.deception_level}",
-        ))
-        return RunResult(
-            mode=self.name,
-            answer=answer,
-            verdict=verdict,
-            timings_ms=timings,
-            logical_model_calls=2,
-        )
 
 
-class NonSplitEngine(GatedEngine):
-    name = "non-split"
-
-    async def run(self, task: str) -> RunResult:
-        timings: dict[str, int | float | str] = {}
-        memory_slice = self.memory.auto_slice(task)
-        proxy_trace = ProxyToolTrace()
-        run_state = ProxyRunState()
-        tools = make_proxy_tools(self.memory, trace=proxy_trace, run_state=run_state)
-
-        t0 = time.perf_counter()
-        answer = await self._run_a(
-            task,
-            tools=tools,
-            include_broadening=True,
-            memory_slice=memory_slice,
-        )
-        timings["a_ms"] = int((time.perf_counter() - t0) * 1000)
-
-        t1 = time.perf_counter()
-        verdict = await self._verify_with_b(
-            task,
-            answer,
-            proxy_trace=proxy_trace.render(),
-            memory_evidence=memory_slice,
-        )
-        timings["b_verify_ms"] = int((time.perf_counter() - t1) * 1000)
-        timings["total_ms"] = int((time.perf_counter() - t0) * 1000)
-
-        await self._persist_memory_query(verdict)
-        asyncio.create_task(asyncio.to_thread(
-            self.memory.record,
-            f"Task: {task}\nAnswer: {answer}\nVerdict: {verdict.deception_level}",
-        ))
-        dynamic_b_calls = int(run_state.delegate_used) + int(run_state.consult_used)
-        return RunResult(
-            mode=self.name,
-            answer=answer,
-            verdict=verdict,
-            timings_ms=timings,
-            logical_model_calls=2 + dynamic_b_calls,
-        )
-
-
-class SplitEngine(GatedEngine):
+class SplitEngine(_DualLobeBase):
     """Self-splitting Dual-Lobe with B as the reconvergence point.
 
     A owns routing and one work half. split_channel starts B's independent half
@@ -301,7 +230,7 @@ class SplitEngine(GatedEngine):
     grading the split in one call.
     """
 
-    name = "split"
+    name = "dual-lobe"
 
     async def _run_self_split_a(
         self,
