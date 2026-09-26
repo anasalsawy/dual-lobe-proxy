@@ -741,3 +741,101 @@ async def test_group_semantic_fallback_can_choose_no_target_without_invoking_age
     assert seen["semantic"] == 1
     assert seen["calls"] == 0
     assert result.published == {}
+
+
+@pytest.mark.asyncio
+async def test_one_agent_multi_user_group_does_not_bypass_floor_control():
+    calls = []
+
+    class FakeResult:
+        answer = "agent reply"
+
+    class FakeEngine:
+        async def run(self, task):
+            calls.append(task)
+            return FakeResult()
+
+    async def semantic_none(message, identities):
+        return ()
+
+    runtime = GroupDualLobeRuntime(
+        [AgentIdentity("helper", "Helper")],
+        engine_factory=lambda identity: FakeEngine(),
+        semantic_resolver=semantic_none,
+    )
+
+    # Two humans may be talking in the same group. The sole agent must not
+    # answer just because it is the only agent attached.
+    result = await runtime.process_message(
+        GroupMessage(
+            text="John, did you finish the spreadsheet?",
+            sender_id="alice",
+            group_id="team-chat",
+            is_group=True,
+        )
+    )
+
+    assert calls == []
+    assert result.published == {}
+    assert result.suppressed == ("helper",)
+
+
+@pytest.mark.asyncio
+async def test_one_agent_multi_user_group_responds_when_named():
+    calls = []
+
+    class FakeResult:
+        answer = "agent reply"
+
+    class FakeEngine:
+        async def run(self, task):
+            calls.append(task)
+            return FakeResult()
+
+    runtime = GroupDualLobeRuntime(
+        [AgentIdentity("helper", "Helper", aliases=("@helper",))],
+        engine_factory=lambda identity: FakeEngine(),
+    )
+
+    result = await runtime.process_message(
+        GroupMessage(
+            text="Helper, can you check the spreadsheet?",
+            sender_id="alice",
+            group_id="team-chat",
+            is_group=True,
+        )
+    )
+
+    assert len(calls) == 1
+    assert result.published == {"helper": "agent reply"}
+
+
+@pytest.mark.asyncio
+async def test_one_agent_direct_chat_still_uses_zero_routing_fast_path():
+    seen = {"semantic": 0, "task": None}
+
+    class FakeResult:
+        answer = "direct reply"
+
+    class FakeEngine:
+        async def run(self, task):
+            seen["task"] = task
+            return FakeResult()
+
+    async def semantic_should_not_run(message, identities):
+        seen["semantic"] += 1
+        raise AssertionError("semantic resolver should not run in direct one-agent chat")
+
+    runtime = GroupDualLobeRuntime(
+        [AgentIdentity("helper", "Helper")],
+        engine_factory=lambda identity: FakeEngine(),
+        semantic_resolver=semantic_should_not_run,
+    )
+
+    result = await runtime.process_message(
+        GroupMessage(text="hello", sender_id="alice", is_group=False)
+    )
+
+    assert seen["semantic"] == 0
+    assert seen["task"] == "hello"
+    assert result.published == {"helper": "direct reply"}
