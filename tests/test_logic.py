@@ -6,7 +6,7 @@ import dual_lobe_crewai.engines as engines_module
 from dual_lobe_crewai.engines import SplitEngine, RunResult
 from dual_lobe_crewai.json_utils import extract_json_object, parse_model
 from dual_lobe_crewai.memory import JsonlMemoryStore
-from dual_lobe_crewai.models import SplitQuality, TurnReview, Verdict
+from dual_lobe_crewai.models import FinalizedTurn, SplitQuality, TurnReview, Verdict
 from dual_lobe_crewai.tools import ProxyRunState, SelfSplitRunState
 
 
@@ -72,52 +72,42 @@ def test_self_split_channel_can_only_be_claimed_once():
     state.executor.shutdown(wait=False, cancel_futures=True)
 
 
-def test_split_timing_reports_same_turn_overlap():
+def test_split_timing_reports_parallel_overlap_and_join_wait():
     state = SelfSplitRunState()
     base = time.perf_counter()
     state.split_used = True
     state.split_started_perf = base + 1.0
     state.b_started_perf = base + 1.0
     state.b_finished_perf = base + 5.0
-    state.collect_started_perf = base + 4.5
-    state.collect_finished_perf = base + 5.0
-    state.collected = True
     telemetry = SplitEngine._timing_telemetry(
         state,
         primary_started=base,
-        primary_finished=base + 6.0,
+        primary_finished=base + 4.5,
     )
     assert telemetry["a_half_ms"] >= 3400
     assert telemetry["b_half_ms"] >= 3900
     assert telemetry["overlap_ms"] > 3000
     assert telemetry["parallel_gain_proxy_ms"] == telemetry["overlap_ms"]
-    assert telemetry["collect_wait_ms"] >= 400
-    assert telemetry["a_finalize_ms"] >= 900
-    assert telemetry["same_turn_collect"] is True
+    assert telemetry["join_wait_ms"] >= 400
     state.executor.shutdown(wait=False, cancel_futures=True)
 
 
-def test_self_split_state_collects_peer_into_same_run():
-    import concurrent.futures
-
-    state = SelfSplitRunState()
-    assert state.claim_split(
-        own_fragment="A half",
-        peer_fragment="B half",
-        reason="independent",
-        merge_mode="integrate",
-        peer_first=False,
+def test_finalized_turn_contains_canonical_answer_and_both_grades():
+    out = FinalizedTurn(
+        final_answer="merged repaired answer",
+        answer_verdict=Verdict(deception_level="GREEN", rationale="ok"),
+        split_verdict=SplitQuality(
+            used=True,
+            valid=True,
+            score=90,
+            independence_score=0.9,
+            balance_score=0.8,
+            time_effect="positive",
+            feedback="good split",
+        ),
     )
-    fut = concurrent.futures.Future()
-    fut.set_result("B completed result")
-    state.future = fut
-    got = state.collect_peer("A completed result")
-    assert got == "B completed result"
-    assert state.collected is True
-    assert state.own_result == "A completed result"
-    assert state.collect_started_perf is not None
-    assert state.collect_finished_perf is not None
-    state.executor.shutdown(wait=False, cancel_futures=True)
+    assert out.final_answer == "merged repaired answer"
+    assert out.split_verdict.used is True
 
 
 def test_turn_review_schema_supports_split_grade():
