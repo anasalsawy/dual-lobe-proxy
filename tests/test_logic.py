@@ -4,6 +4,7 @@ import pytest
 
 import dual_lobe_crewai.engines as engines_module
 from dual_lobe_crewai.engines import SplitEngine, RunResult
+from dual_lobe_crewai.group_coordination import AgentIdentity, FloorMode, GroupCoordinator, GroupMessage
 from dual_lobe_crewai.json_utils import extract_json_object, parse_model
 from dual_lobe_crewai.memory import JsonlMemoryStore
 from dual_lobe_crewai.models import FinalizedTurn, SplitFragment, SplitPlan, SplitQuality, TurnReview, Verdict
@@ -328,3 +329,98 @@ def test_proxy_trace_explicit_render_limit_marks_truncation():
     rendered = trace.render(max_chars_per_event=100)
     assert "TRUNCATED_BY_RENDER" in rendered
     assert "original_chars=1000" in rendered
+
+
+def test_group_named_agent_only_can_respond():
+    group = GroupCoordinator([
+        AgentIdentity("sarah", "Sarah", aliases=("@sarah",)),
+        AgentIdentity("david", "David", aliases=("@david",)),
+        AgentIdentity("maya", "Maya", aliases=("@maya",)),
+    ])
+    deliveries = group.route(GroupMessage(text="Sarah, check the deployment logs"))
+    assert deliveries["sarah"].mode == FloorMode.RESPOND
+    assert deliveries["sarah"].can_emit is True
+    assert deliveries["david"].mode == FloorMode.OBSERVE
+    assert deliveries["david"].can_emit is False
+    assert deliveries["maya"].can_emit is False
+
+
+def test_group_non_addressed_agents_still_receive_awareness():
+    group = GroupCoordinator([
+        AgentIdentity("sarah", "Sarah"),
+        AgentIdentity("david", "David"),
+    ])
+    group.states["david"].current_task = "write retry logic"
+    deliveries = group.route(GroupMessage(text="Sarah, production is PostgreSQL 17"))
+    assert deliveries["david"].can_emit is False
+    assert group.states["david"].current_task == "write retry logic"
+    awareness = group.consume_awareness_context("david")
+    assert "PostgreSQL 17" in awareness
+    assert "not granted the floor" in awareness
+    assert group.consume_awareness_context("david") == ""
+
+
+def test_group_output_gate_blocks_accidental_model_output():
+    group = GroupCoordinator([
+        AgentIdentity("sarah", "Sarah"),
+        AgentIdentity("david", "David"),
+    ])
+    deliveries = group.route(GroupMessage(text="Sarah, status?"))
+    assert GroupCoordinator.gate_output(deliveries["david"], "Sure, here is my status") is None
+    assert GroupCoordinator.gate_output(deliveries["sarah"], "Checking now.") == "Checking now."
+
+
+def test_group_multiple_named_agents_can_respond():
+    group = GroupCoordinator([
+        AgentIdentity("sarah", "Sarah"),
+        AgentIdentity("david", "David"),
+        AgentIdentity("maya", "Maya"),
+    ])
+    deliveries = group.route(GroupMessage(text="Sarah and David, compare your findings."))
+    assert deliveries["sarah"].can_emit is True
+    assert deliveries["david"].can_emit is True
+    assert deliveries["maya"].can_emit is False
+
+
+def test_group_broadcast_allows_everyone():
+    group = GroupCoordinator([
+        AgentIdentity("sarah", "Sarah"),
+        AgentIdentity("david", "David"),
+    ])
+    deliveries = group.route(GroupMessage(text="Everyone, status?"))
+    assert all(d.can_emit for d in deliveries.values())
+    assert all(d.mode == FloorMode.BROADCAST for d in deliveries.values())
+
+
+def test_group_reply_metadata_overrides_plain_text_ambiguity():
+    group = GroupCoordinator([
+        AgentIdentity("sarah", "Sarah"),
+        AgentIdentity("david", "David"),
+    ])
+    deliveries = group.route(GroupMessage(
+        text="Can you fix it?",
+        reply_to_agent_id="sarah",
+    ))
+    assert deliveries["sarah"].can_emit is True
+    assert deliveries["david"].can_emit is False
+
+
+def test_group_explicit_platform_targets_are_authoritative():
+    group = GroupCoordinator([
+        AgentIdentity("sarah", "Sarah"),
+        AgentIdentity("david", "David"),
+    ])
+    deliveries = group.route(GroupMessage(
+        text="please review",
+        explicit_target_ids=("david",),
+    ))
+    assert deliveries["david"].can_emit is True
+    assert deliveries["sarah"].can_emit is False
+
+
+def test_group_alias_collision_is_rejected():
+    with pytest.raises(ValueError):
+        GroupCoordinator([
+            AgentIdentity("one", "Alpha", aliases=("coder",)),
+            AgentIdentity("two", "Beta", aliases=("coder",)),
+        ])
