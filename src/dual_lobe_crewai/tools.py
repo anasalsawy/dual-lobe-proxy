@@ -2,188 +2,324 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Literal, Type
+from typing import Type
 
 from pydantic import BaseModel, Field
 from crewai.tools import BaseTool
 
-from .agents import make_b_worker
+from .agents import make_child_worker
 from .memory import JsonlMemoryStore
 from .runner import run_one
 
 
 @dataclass
-class SelfSplitRunState:
-    split_used: bool = False
-    own_fragment: str = ""
-    peer_fragment: str = ""
-    reason: str = ""
-    merge_mode: str = "integrate"
-    peer_first: bool = False
-    split_started_perf: float | None = None
-    b_started_perf: float | None = None
-    b_finished_perf: float | None = None
-    b_result: str = ""
-    b_error: str = ""
-    future: concurrent.futures.Future | None = None
+class ProxyToolEvent:
+    name: str
+    input_text: str
+    output_text: str
+    provenance: str
+    ts: float = field(default_factory=time.time)
+
+
+class ProxyToolTrace:
+    def __init__(self):
+        self.events: list[ProxyToolEvent] = []
+        self._lock = threading.Lock()
+
+    def add(self, name: str, *, input_text: str = "", output_text: str = "", provenance: str = "") -> None:
+        with self._lock:
+            self.events.append(ProxyToolEvent(name, str(input_text or ""), str(output_text or ""), str(provenance or "")))
+
+    def render(self, max_chars_per_event: int | None = None) -> str:
+        with self._lock:
+            events = list(self.events)
+        rows = []
+        for i, event in enumerate(events, 1):
+            output = event.output_text
+            if max_chars_per_event is not None and len(output) > max_chars_per_event:
+                original = len(output)
+                output = output[:max_chars_per_event] + f"\n[TRUNCATED_BY_RENDER: original_chars={original}]"
+            rows.append(
+                f"[{i}] tool={event.name}\nprovenance={event.provenance}\n"
+                f"input={event.input_text}\noutput={output}"
+            )
+        return "\n\n".join(rows)
+
+
+class MemorySearchInput(BaseModel):
+    query: str = Field(..., description="Focused query for relevant persistent memory.")
+    limit: int = Field(4, ge=1, le=10)
+
+
+class MemorySearchTool(BaseTool):
+    name: str = "memory_search"
+    description: str = "Search persistent memory for relevant prior context."
+    args_schema: Type[BaseModel] = MemorySearchInput
+    store: JsonlMemoryStore
+    trace: ProxyToolTrace
+
+    def _run(self, query: str, limit: int = 4) -> str:
+        hits = self.store.search(query, limit=limit, include_split_experience=False)
+        result = "\n".join(f"- {x}" for x in hits) if hits else "NO_MEMORY_HITS"
+        self.trace.add(self.name, input_text=query, output_text=result, provenance="persistent_memory")
+        return result
+
+
+@dataclass
+class DelegateJob:
+    job_id: str
+    task: str
+    future: concurrent.futures.Future
+    launched_perf: float
+    result: str = ""
+    error: str = ""
+    collected: bool = False
+
+
+@dataclass
+class DelegateRunState:
+    max_children: int = field(default_factory=lambda: max(1, int(os.getenv("DUAL_LOBE_MAX_CHILDREN", "6"))))
+    jobs: dict[str, DelegateJob] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
-    executor: concurrent.futures.ThreadPoolExecutor = field(
-        default_factory=lambda: concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="dual-lobe-b"),
-        repr=False,
-    )
+    executor: concurrent.futures.ThreadPoolExecutor = field(init=False, repr=False)
 
-    def claim_split(
-        self,
-        *,
-        own_fragment: str,
-        peer_fragment: str,
-        reason: str,
-        merge_mode: str,
-        peer_first: bool,
-    ) -> bool:
+    def __post_init__(self) -> None:
+        self.executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.max_children,
+            thread_name_prefix="dual-lobe-child",
+        )
+
+    @property
+    def child_count(self) -> int:
         with self.lock:
-            if self.split_used:
-                return False
-            self.split_used = True
-            self.own_fragment = own_fragment.strip()
-            self.peer_fragment = peer_fragment.strip()
-            self.reason = reason.strip()
-            self.merge_mode = merge_mode
-            self.peer_first = peer_first
-            self.split_started_perf = time.perf_counter()
-            return True
+            return len(self.jobs)
 
-    async def await_peer(self) -> str:
-        if not self.future:
-            return ""
-        try:
-            return await asyncio.to_thread(self.future.result)
-        finally:
-            self.executor.shutdown(wait=False, cancel_futures=False)
+    def close(self) -> None:
+        self.executor.shutdown(wait=False, cancel_futures=False)
 
 
-class SplitChannelInput(BaseModel):
-    own_fragment: str = Field(..., description="The substantial independent half Lobe A will execute itself.")
-    peer_fragment: str = Field(..., description="The substantial independent half Lobe B will execute concurrently.")
-    reason: str = Field(..., description="Why these halves are independent and why parallel execution should save time.")
-    merge_mode: Literal["append", "integrate"] = Field(
-        "integrate",
-        description="Use append when halves can be joined directly; integrate only when a synthesis pass is genuinely required.",
+class DelegateInput(BaseModel):
+    tasks: list[str] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Independent substantial subtasks to launch concurrently. Delegation means temporary parallel inference "
+            "to save user time, not managerial handoff."
+        ),
     )
-    peer_first: bool = Field(False, description="For append mode only, place B's finished half before A's half.")
+    reason: str = Field("", description="Why these subtasks can run independently and reduce wall-clock time.")
 
 
-class SplitChannelTool(BaseTool):
-    name: str = "split_channel"
+class DelegateTool(BaseTool):
+    name: str = "delegate"
     description: str = (
-        "Launch the second independent execution lane. Call exactly once when a valid two-way split exists. "
-        "It returns immediately so B works concurrently while A executes own_fragment."
+        "Spawn temporary inference workers for independent subtasks. This is a speed primitive, not managerial handoff. "
+        "Launch work early; the call returns job IDs immediately so you can continue useful work."
     )
-    args_schema: Type[BaseModel] = SplitChannelInput
+    args_schema: Type[BaseModel] = DelegateInput
     original_task: str
     memory_slice: str
     store: JsonlMemoryStore
     trace: ProxyToolTrace
-    run_state: SelfSplitRunState
+    run_state: DelegateRunState
 
-    def _run(
-        self,
-        own_fragment: str,
-        peer_fragment: str,
-        reason: str,
-        merge_mode: str = "integrate",
-        peer_first: bool = False,
-    ) -> str:
-        if not own_fragment.strip() or not peer_fragment.strip():
-            result = "SPLIT_REJECTED: both halves must be non-empty and substantial."
-            self.trace.add(self.name, input_text=reason, output_text=result, provenance="split_validation")
+    def _run(self, tasks: list[str], reason: str = "") -> str:
+        cleaned = [str(x).strip() for x in tasks if str(x).strip()]
+        if not cleaned:
+            result = "DELEGATION_REJECTED: no non-empty subtasks."
+            self.trace.add(self.name, input_text=reason, output_text=result, provenance="delegation_control")
             return result
 
-        if not self.run_state.claim_split(
-            own_fragment=own_fragment,
-            peer_fragment=peer_fragment,
-            reason=reason,
-            merge_mode=merge_mode,
-            peer_first=peer_first,
-        ):
-            result = "SPLIT_REJECTED: split_channel may be used only once per run."
-            self.trace.add(self.name, input_text=reason, output_text=result, provenance="split_validation")
-            return result
+        with self.run_state.lock:
+            remaining = self.run_state.max_children - len(self.run_state.jobs)
+            if remaining <= 0:
+                result = f"DELEGATION_REJECTED: child limit {self.run_state.max_children} reached."
+                self.trace.add(self.name, input_text=reason, output_text=result, provenance="delegation_control")
+                return result
+            cleaned = cleaned[:remaining]
 
-        state = self.run_state
-        original_task = self.original_task
-        memory_slice = self.memory_slice
+        launched = []
+        for delegated_task in cleaned:
+            with self.run_state.lock:
+                job_id = f"child-{len(self.run_state.jobs) + 1}"
+            child_trace = ProxyToolTrace()
 
-        def peer_worker() -> str:
-            state.b_started_perf = time.perf_counter()
-            try:
-                b_trace = ProxyToolTrace()
-                # B gets the same execution/tool plane as A's worker lane.
-                # split_channel itself is orchestration control and is intentionally
-                # not exposed to B, preventing recursive fan-out.
-                b_tools = make_parallel_execution_tools(self.store, trace=b_trace)
-                b = make_b_worker(tools=b_tools)
-                prompt = f"""ORIGINAL USER TASK:
-{original_task}
+            def child_work(job_id=job_id, delegated_task=delegated_task, child_trace=child_trace):
+                try:
+                    child = make_child_worker(tools=make_worker_tools(self.store, trace=child_trace))
+                    prompt = f"""PARENT USER TASK:
+{self.original_task}
 
-IMMUTABLE SHARED MEMORY SNAPSHOT:
-{memory_slice if memory_slice else "(none)"}
+IMMUTABLE MEMORY SNAPSHOT:
+{self.memory_slice if self.memory_slice else "(none)"}
 
-YOUR INDEPENDENT HALF:
-{peer_fragment}
+YOUR DELEGATED SUBTASK:
+{delegated_task}
 
-Execute only this half. Do not wait for A and do not assume A's intermediate output.
-Return a self-contained half-result suitable for later append or merge."""
-                result = asyncio.run(run_one(b, prompt, "A complete independent half-result.", role_key="B_WORKER"))
-                state.b_result = str(result)
-                self.trace.add(
-                    "b_parallel_tools",
-                    input_text=peer_fragment,
-                    output_text=b_trace.render(),
-                    provenance="lobe_b_tool_trace",
+Execute only this bounded subtask.
+You are a temporary compute worker, not Lobe B.
+Do not speak directly to the user.
+Return a self-contained result, relevant evidence, uncertainty, and any failure conditions."""
+                    result = asyncio.run(run_one(
+                        child,
+                        prompt,
+                        "A self-contained delegated subtask result.",
+                        role_key="A_CHILD",
+                    ))
+                    return str(result), "", child_trace.render()
+                except Exception as exc:
+                    return (
+                        f"CHILD_CALL_FAILED: {type(exc).__name__}: {exc}",
+                        f"{type(exc).__name__}: {exc}",
+                        child_trace.render(),
+                    )
+
+            future = self.run_state.executor.submit(child_work)
+            with self.run_state.lock:
+                self.run_state.jobs[job_id] = DelegateJob(
+                    job_id=job_id,
+                    task=delegated_task,
+                    future=future,
+                    launched_perf=time.perf_counter(),
                 )
-                return state.b_result
-            except Exception as exc:
-                state.b_error = f"{type(exc).__name__}: {exc}"
-                state.b_result = f"B_HALF_CALL_FAILED: {state.b_error}"
-                return state.b_result
-            finally:
-                state.b_finished_perf = time.perf_counter()
-
-        state.future = state.executor.submit(peer_worker)
+            launched.append(job_id)
 
         result = (
-            "SPLIT_ACCEPTED. A and B are now executing independent halves concurrently. "
-            "Complete ONLY own_fragment yourself and return that half-result. "
-            "The runtime will collect both completed halves and B will merge, repair, verify, and finalize."
+            "DELEGATION_STARTED: " + ", ".join(launched)
+            + ". Continue your own useful work now. Collect these jobs before finalizing when their results matter."
         )
         self.trace.add(
             self.name,
-            input_text=f"own={own_fragment}\npeer={peer_fragment}\nreason={reason}\nmerge={merge_mode}",
+            input_text=f"tasks={cleaned}\nreason={reason}",
             output_text=result,
-            provenance="parallel_split_launch",
+            provenance="delegation_launch",
         )
         return result
 
 
-def make_self_split_tools(
+class DelegateCollectInput(BaseModel):
+    job_ids: list[str] = Field(default_factory=list, description="Jobs to collect. Empty means all jobs.")
+    wait: bool = Field(True, description="Wait for selected jobs to finish. False performs a non-blocking poll.")
+
+
+class DelegateCollectTool(BaseTool):
+    name: str = "delegate_collect"
+    description: str = "Collect results from temporary delegated workers. Empty job_ids collects all launched jobs."
+    args_schema: Type[BaseModel] = DelegateCollectInput
+    trace: ProxyToolTrace
+    run_state: DelegateRunState
+
+    def _collect_one(self, job: DelegateJob, wait: bool) -> str:
+        if not wait and not job.future.done():
+            return f"{job.job_id}: PENDING"
+        try:
+            payload = job.future.result() if wait or job.future.done() else None
+        except Exception as exc:
+            job.error = f"{type(exc).__name__}: {exc}"
+            job.result = f"CHILD_CALL_FAILED: {job.error}"
+            job.collected = True
+            return f"{job.job_id}: {job.result}"
+
+        if payload is None:
+            return f"{job.job_id}: PENDING"
+
+        result, error, child_trace = payload
+        job.result = result
+        job.error = error
+        if not job.collected:
+            self.trace.add(
+                f"{job.job_id}_result",
+                input_text=job.task,
+                output_text=result,
+                provenance="delegated_child_output",
+            )
+            if child_trace:
+                self.trace.add(
+                    f"{job.job_id}_tools",
+                    input_text=job.task,
+                    output_text=child_trace,
+                    provenance="delegated_child_tool_trace",
+                )
+            job.collected = True
+        return f"{job.job_id} ({job.task}):\n{result}"
+
+    def _run(self, job_ids: list[str] | None = None, wait: bool = True) -> str:
+        ids = list(job_ids or [])
+        with self.run_state.lock:
+            if not ids:
+                ids = list(self.run_state.jobs)
+            jobs = [self.run_state.jobs[x] for x in ids if x in self.run_state.jobs]
+        if not jobs:
+            return "NO_DELEGATED_JOBS"
+        result = "\n\n".join(self._collect_one(job, wait) for job in jobs)
+        self.trace.add(
+            self.name,
+            input_text=f"job_ids={ids}; wait={wait}",
+            output_text=result,
+            provenance="delegation_collect",
+        )
+        return result
+
+
+class DelegateStatusInput(BaseModel):
+    job_ids: list[str] = Field(default_factory=list, description="Jobs to inspect. Empty means all jobs.")
+
+
+class DelegateStatusTool(BaseTool):
+    name: str = "delegate_status"
+    description: str = "Check whether delegated workers are pending or complete without waiting."
+    args_schema: Type[BaseModel] = DelegateStatusInput
+    run_state: DelegateRunState
+
+    def _run(self, job_ids: list[str] | None = None) -> str:
+        ids = list(job_ids or [])
+        with self.run_state.lock:
+            if not ids:
+                ids = list(self.run_state.jobs)
+            jobs = [self.run_state.jobs[x] for x in ids if x in self.run_state.jobs]
+        if not jobs:
+            return "NO_DELEGATED_JOBS"
+        return "\n".join(
+            f"{job.job_id}: {'DONE' if job.future.done() else 'RUNNING'} — {job.task}"
+            for job in jobs
+        )
+
+
+def make_worker_tools(store: JsonlMemoryStore, *, trace: ProxyToolTrace) -> list[BaseTool]:
+    # Children and B do not get delegate(), preventing recursive fan-out.
+    return [MemorySearchTool(store=store, trace=trace)]
+
+
+def make_a_tools(
     store: JsonlMemoryStore,
     *,
     original_task: str,
     memory_slice: str,
     trace: ProxyToolTrace,
-    run_state: SelfSplitRunState,
-):
+    run_state: DelegateRunState,
+) -> list[BaseTool]:
     return [
-        *make_parallel_execution_tools(store, trace=trace),
-        SplitChannelTool(
+        *make_worker_tools(store, trace=trace),
+        DelegateTool(
             original_task=original_task,
             memory_slice=memory_slice,
             store=store,
             trace=trace,
             run_state=run_state,
         ),
+        DelegateCollectTool(trace=trace, run_state=run_state),
+        DelegateStatusTool(run_state=run_state),
     ]
+
+
+async def collect_all_delegate_results(run_state: DelegateRunState, trace: ProxyToolTrace) -> str:
+    with run_state.lock:
+        has_jobs = bool(run_state.jobs)
+    if not has_jobs:
+        return ""
+    collector = DelegateCollectTool(trace=trace, run_state=run_state)
+    return await asyncio.to_thread(collector._run, [], True)
