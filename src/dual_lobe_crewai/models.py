@@ -19,38 +19,10 @@ class Verdict(BaseModel):
     handoff: Handoff = Field(default_factory=Handoff)
 
 
-class SplitFragment(BaseModel):
-    owner: Literal["A", "B"]
-    task: str = Field(min_length=1)
-
-
-class SplitPlan(BaseModel):
-    mode: Literal["normal", "split"]
-    fragments: list[SplitFragment] = Field(default_factory=list)
-    merge: Literal["append", "integrate"] = "integrate"
-    start: str = ""
-    reason: str = Field(min_length=1)
-
-
-class SplitQuality(BaseModel):
-    used: bool
-    valid: bool
-    score: int = Field(ge=0, le=100)
-    independence_score: float = Field(ge=0.0, le=1.0)
-    balance_score: float = Field(ge=0.0, le=1.0)
-    time_effect: Literal["positive", "neutral", "negative", "unknown"]
-    unnecessary_split: bool = False
-    missed_valid_split: bool = False
-    better_single_model: bool = False
-    feedback: str = Field(min_length=1)
-
-
-class TurnReview(BaseModel):
-    answer_verdict: Verdict
-    split_verdict: SplitQuality
-
-
-class FinalizedTurn(BaseModel):
+class AdversarialReview(BaseModel):
     final_answer: str = Field(min_length=1)
     answer_verdict: Verdict
-    split_verdict: SplitQuality
+    challenges: list[str] = Field(default_factory=list)
+    intent_risks: list[str] = Field(default_factory=list)
+    overlooked_context: list[str] = Field(default_factory=list)
+    delegation_note: str = ""
