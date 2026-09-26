@@ -43,13 +43,13 @@ def make_b_verifier() -> Agent:
     )
 
 
-def make_b_worker() -> Agent:
+def make_b_worker(tools=None) -> Agent:
     return Agent(
         role="Lobe B — Independent Parallel Worker",
         goal="Execute one independent task half without depending on Lobe A's intermediate output.",
         backstory=B_WORKER_PERSONA,
         llm=make_llm("B_WORKER"),
-        tools=[],
+        tools=list(tools or []),
         verbose=False,
         allow_delegation=False,
     )
