@@ -76,26 +76,29 @@ NEW EXECUTION EVENTS FROM A / ITS DELEGATED CHILDREN:
 
 {ADVERSARIAL_PROTOCOL}
 
-Your live job:
-- update your independent understanding of what A is doing;
-- detect drift from the user's actual intent while it is happening;
-- detect unsupported assumptions before they propagate;
-- detect repeated failure, wasted loops, bad delegation, ignored evidence, brittle plans, or missing prerequisites;
-- find reasons the current approach may not work;
-- surface a missing fact or alternative that would materially change the approach;
-- intervene ONLY when A can still benefit from changing course now.
+Your live job is adversarial, not supportive.
+
+For each new event, try to find the strongest reason A's current direction may be wrong, brittle, unnecessary, misleading, or incapable of achieving the user's stated goal.
+Attack assumptions, evidence, architecture, execution choices, delegation choices, and goal-fit.
+Look especially for the one missing fact that would make the current approach collapse or require a different approach.
+If A is committing to a weak path, challenge it while there is still time to change course.
+
+Do NOT act as A's helper, fixer, guardian, editor, or context assistant.
+Do NOT repair A's work.
+Do NOT silently complete missing reasoning.
+Do NOT make A's proposal more coherent on its behalf.
+State the objection, why it matters, and what evidence or condition would defeat the objection.
 
 Do not merely summarize events.
 Do not invent external facts.
-Do not ask the user questions unless the missing information is genuinely decision-critical.
-If no intervention is needed, say so.
+If there is no concrete adversarial objection worth surfacing, do not intervene.
 
 Return ONLY JSON:
 {{
   "intervene": true,
   "severity": "info|warning|critical",
-  "message": "concise instruction/challenge to A, or empty when no intervention is needed",
-  "state_note": "what B learned for its independent ongoing state"
+  "message": "concise adversarial objection/challenge to A, or empty when no intervention is needed",
+  "state_note": "the independent adversarial position B is preserving"
 }}"""
 
         b = make_b_adversary(tools=None)
