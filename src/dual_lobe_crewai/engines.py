@@ -134,7 +134,7 @@ SHARED MEMORY EVIDENCE PRESENTED TO A:
 EXECUTION / PROVENANCE TRACE:
 {trace_text}
 
-${VERIFICATION_PROTOCOL}
+{VERIFICATION_PROTOCOL}
 
 Additional turn-specific requirements:
 - The SHARED MEMORY EVIDENCE above is the exact memory snapshot A was allowed to use on this turn.
