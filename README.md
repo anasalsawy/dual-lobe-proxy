@@ -1,81 +1,110 @@
 # Dual-Lobe CrewAI
 
-Dual-Lobe is a single current architecture for improving reasoning robustness in single-agent and multi-agent settings.
+Dual-Lobe is a two-process reasoning runtime built around a persistent primary worker (**A**) and a persistent independent adversary/verifier (**B**).
 
-It is designed around several recurring failure modes:
-- tunnel vision and missed context;
-- unsupported or overconfident claims;
-- memory loss across longer work;
-- identity confusion in shared environments;
-- reply storms and poor conversational coordination in groups.
+The current architecture deliberately does **not** split the user's task into an A-half and B-half.
 
 ## Current architecture
 
-There is one supported Dual-Lobe runtime.
-
 ```text
-task + memory -> A
-                  ├─ A works directly when no useful split exists
-                  └─ when useful:
-                       A half ───────────────────────────────┐
-                       B half via split_channel ─────────────┤ concurrent
-                                                            ↓
-                                           B reconvergence
-                                 merge + repair + verification
-                                                            ↓
-                                           canonical answer
+                         temporary child
+                       ↗
+User task → A ──delegate── temporary child
+             │         ↘
+             │           temporary child
+             │
+             │ execution events
+             ↓
+      B persistent live observer
+        │       │
+        │       └─ intervene during A's run when useful
+        │
+        └─ final adversarial repair + anti-deception verification
+                          ↓
+                   canonical answer
 ```
 
-A receives the full task and acts as router + worker. If a substantial independent two-way split is likely to save time without hurting quality, A starts B's independent work through `split_channel` while continuing its own half. The runtime then sends the completed work to B for one final reconvergence step: merge, repair, verification, split grading, and one canonical answer.
+### A — worker + delegation
 
-If no useful split exists, A stays single-lane and B performs the final review.
+A owns execution and the user-facing task.
 
-There are no selectable Gated, Non-Split, or dedicated-Splitter product modes in the current release.
+Delegation is defined as a **compute-acceleration primitive**, not managerial handoff. It means spawning temporary inference workers for independent work so useful tasks happen concurrently and the user waits less.
 
-## Anti-deception verification
+A is explicitly encouraged to delegate substantial independent work early. Children are temporary compute workers. They are not B.
 
-The B verification/finalization path checks:
-- unsupported factual claims;
-- fabricated or exaggerated action/tool/file claims;
-- contradictions and silent task drift;
-- unjustified certainty;
-- missing requirements;
-- whether claimed actions or artifacts are actually supported by evidence.
+Default child cap is controlled by `DUAL_LOBE_MAX_CHILDREN` (default 6).
 
-GREEN means **no deception detected from available evidence**, not “verified truth.”
+### B — persistent independent adversary
 
-Unresolved `missing`, `unverified`, or `proof_requests` cannot remain GREEN.
+B is not an extra worker lane and is not a polite reviewer.
 
-## Anti-tunnel-vision behavior
+Its standing job is to challenge A:
+- find hidden assumptions and brittle logic;
+- find reasons a plan/project may fail in practice;
+- test whether the work actually satisfies the user's intent;
+- detect when the user or A may be solving the wrong problem;
+- find missing facts that could change the approach;
+- challenge unnecessary/duplicative work and surface the need to check existing alternatives;
+- detect ignored evidence, repeated failures, task drift, and unjustified certainty;
+- audit A's use of delegation;
+- perform final anti-deception verification.
 
-A is instructed to broaden the problem before committing:
-- missing prerequisites;
-- alternative explanations;
-- mechanisms;
-- tradeoffs;
-- failure modes;
-- overlooked questions;
-- independent work that can be explored in parallel.
+## Continuous B
 
-## Persistent memory
+B is now **event-driven and continuously present alongside A**, rather than appearing only at the final gate.
 
-Dual-Lobe uses a durable JSONL memory store for task context and keeps split-experience memory logically separate. Relevant memory can be supplied to later turns without pretending the base model was retrained.
+While A is executing, B:
+1. forms its own independent task view;
+2. watches meaningful runtime/tool/delegation events;
+3. updates its own persistent state;
+4. emits a live intervention when A can still benefit from changing course;
+5. streams that intervention back into A's tool flow;
+6. still performs a full final adversarial review and verification.
 
-## Group awareness and address-aware orchestration
+B does not burn inference in a blind busy-loop. It wakes on meaningful events. `DUAL_LOBE_B_LIVE_MAX_CALLS` caps live observations per run (default 6).
 
-The runtime also supports group coordination through `GroupDualLobeRuntime`.
+## Anti-deception — primary feature
 
-Core behavior:
-- explicit platform target IDs, replies, @mentions, and clear direct-name addressing are routed deterministically;
-- ambiguous role-based wording can use semantic fallback;
-- only intended agents are invoked;
-- non-addressed agents remain silent but can retain awareness for a later natural turn;
-- one agent in a multi-human group does not answer merely because it is the only agent present;
-- direct one-human / one-agent chat bypasses group-routing overhead;
-- multiple addressed agents may run concurrently;
-- each agent receives an authoritative SELF/OTHER identity envelope and separate default memory.
+The verifier uses a strict evidence protocol:
 
-This is intended to reduce reply storms, addressing collapse, and identity confusion in shared conversations.
+- verify against the original user intent;
+- mentally classify material claims as **OBSERVED / INFERRED / ASSUMED / UNKNOWN**;
+- detect unsupported factual claims and fabricated/exaggerated action claims;
+- require positive evidence for files, edits, deployments, tests, external actions, bookings, payments, messages, and artifacts;
+- treat worker text as contributed work, not independent corroboration;
+- actively seek disconfirming evidence instead of only support;
+- bind the verdict to the exact final answer;
+- fail closed: malformed or incomplete verification cannot become GREEN.
+
+**GREEN means only “no deception detected from available evidence.”** It does not mean universal truth.
+
+Unresolved `missing`, `unverified`, or `proof_requests` force at least YELLOW.
+
+## Group chat: B owns conversational routing
+
+When `is_group=true`, B has an additional persistent job: **follow the conversation and decide who is actually addressed by each message.**
+
+```text
+group conversation
+      ↓
+B observes roster + transport metadata + recent conversation + new message
+      ↓
+"who is actually addressed?"
+      ↓
+deterministic runtime validates B's agent IDs
+      ↓
+only addressed A instance(s) run
+```
+
+B distinguishes address from mention, follows conversational continuity, understands role-based addressing, and can return no target. Deterministic code does not pretend to understand the conversation; it only validates IDs and enforces B's floor decision.
+
+If B routing fails, the runtime fails closed against reply storms, except for authoritative transport metadata such as explicit target IDs, reply-to metadata, or an explicit broadcast.
+
+Direct one-agent/private chat bypasses this routing inference.
+
+## Independent memory
+
+A and B use separate persistent JSONL memory lineages by default. B's live observations and adversarial findings therefore accumulate independently from A's task memory.
 
 ## Install
 
@@ -89,18 +118,17 @@ pip install -e .
 dual-lobe --task "Diagnose this failure without guessing." --show-meta
 ```
 
-Optional reconverging loop:
+Optional repeated cycles:
 
 ```bash
 dual-lobe --task "Continue improving this result." --loop-cycles 3 --show-meta
 ```
 
-## Group example
+## Core call shape
 
-```bash
-python examples/live_group_dual_lobe.py
-```
+Without delegation, one task cycle consists of:
+- A primary call;
+- zero or more live B observation calls while A runs;
+- B final adversarial/verification call.
 
-## Release policy
-
-The package contains only the current Dual-Lobe architecture. Historical variants remain recoverable from Git history but are not supported, selectable, exported, documented, or packaged as current models.
+Delegated child calls are additional and intentional parallel compute. The exact logical-call count is surfaced in metadata.
