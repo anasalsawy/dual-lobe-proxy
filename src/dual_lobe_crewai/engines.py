@@ -9,10 +9,12 @@ from .agents import make_a, make_b_adversary
 from .json_utils import parse_model
 from .memory import JsonlMemoryStore
 from .models import AdversarialReview, Verdict
+from .live_b import LiveBMonitor
 from .prompts import ADVERSARIAL_PROTOCOL, OBSERVATION_DISCLAIMER, VERIFICATION_PROTOCOL
 from .runner import run_one
 from .tools import (
     DelegateRunState,
+    LiveBState,
     ProxyToolTrace,
     collect_all_delegate_results,
     make_a_tools,
@@ -101,6 +103,7 @@ class DualLobeEngine:
         canonical_state: str,
         trace: ProxyToolTrace,
         delegate_state: DelegateRunState,
+        live_b_state: LiveBState,
     ) -> str:
         a = make_a(
             tools=make_a_tools(
@@ -109,6 +112,7 @@ class DualLobeEngine:
                 memory_slice=memory_slice,
                 trace=trace,
                 run_state=delegate_state,
+                live_b_state=live_b_state,
             )
         )
         prompt = f"""{OBSERVATION_DISCLAIMER}
@@ -131,6 +135,13 @@ DELEGATION POLICY — IMPORTANT:
 - Continue your own useful work while children run.
 - Collect delegated results before finalizing when they are material to the answer.
 - Do not delegate tiny work whose coordination overhead is likely larger than the time saved.
+
+LIVE B:
+- Lobe B is running concurrently with you, observing meaningful execution events.
+- B is an independent adversary, not your manager and not a delegated worker.
+- New B interventions are automatically surfaced through tool results when available.
+- Use b_live_check at meaningful checkpoints when you have been doing substantial tool/delegation work or before committing to a major approach.
+- Treat B's challenge as an independent objection to evaluate, not an instruction to obey blindly.
 
 Solve the user's task completely. Use delegated children aggressively when doing so materially shortens execution time.
 Return only the user-facing candidate answer."""
@@ -280,6 +291,14 @@ Do not include a challenge merely to populate a field. Empty lists are correct w
         b_memory = self.b_memory.auto_slice(task)
         trace = ProxyToolTrace()
         delegate_state = DelegateRunState()
+        live_b_state = LiveBState()
+        live_monitor = LiveBMonitor(
+            task=task,
+            b_memory=self.b_memory,
+            trace=trace,
+            state=live_b_state,
+        )
+        live_task = asyncio.create_task(live_monitor.run())
 
         try:
             a_start = time.perf_counter()
@@ -289,12 +308,19 @@ Do not include a challenge merely to populate a field. Empty lists are correct w
                 canonical_state=canonical_state,
                 trace=trace,
                 delegate_state=delegate_state,
+                live_b_state=live_b_state,
             )
             timings["a_ms"] = int((time.perf_counter() - a_start) * 1000)
 
             collect_start = time.perf_counter()
             delegated_results = await collect_all_delegate_results(delegate_state, trace)
             timings["delegate_join_ms"] = int((time.perf_counter() - collect_start) * 1000)
+
+            # Stop B's live execution loop only after A and delegated work have
+            # produced their execution events. B flushes the last event batch.
+            live_monitor.stop()
+            await live_task
+            timings["b_live_calls"] = live_monitor.calls
 
             b_start = time.perf_counter()
             review = await self._adversarial_review(
@@ -309,6 +335,9 @@ Do not include a challenge merely to populate a field. Empty lists are correct w
             )
             timings["b_adversary_verify_ms"] = int((time.perf_counter() - b_start) * 1000)
         finally:
+            live_monitor.stop()
+            if not live_task.done():
+                await live_task
             delegate_state.close()
 
         await self._persist_memories(task=task, review=review)
@@ -323,7 +352,7 @@ Do not include a challenge merely to populate a field. Empty lists are correct w
             overlooked_context=review.overlooked_context,
             delegation_note=review.delegation_note,
             timings_ms=timings,
-            logical_model_calls=2 + delegate_state.child_count,
+            logical_model_calls=2 + delegate_state.child_count + live_monitor.calls,
             canonical_state=review.final_answer,
             cycle_index=cycle_index,
         )
