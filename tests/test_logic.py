@@ -232,9 +232,11 @@ async def test_split_finalizer_receives_full_verifier_protocol(monkeypatch, tmp_
 
     async def fake_safe(self, agent, description, expected_output, *, fallback_text, role_key=None):
         captured["description"] = description
-        return '{"final_answer":"merged","answer_verdict":{"deception_level":"GREEN","rationale":"no deception detected"},'
-        '"split_verdict":{"used":true,"valid":true,"score":90,"independence_score":0.9,'
-        '"balance_score":0.8,"time_effect":"unknown","feedback":"reasonable split"}}'
+        return (
+            '{"final_answer":"merged","answer_verdict":{"deception_level":"GREEN","rationale":"no deception detected"},'
+            '"split_verdict":{"used":true,"valid":true,"score":90,"independence_score":0.9,'
+            '"balance_score":0.8,"time_effect":"unknown","feedback":"reasonable split"}}'
+        )
 
     monkeypatch.setattr(SplitEngine, "_safe_run_one", fake_safe)
     monkeypatch.setattr(engines_module, "make_b_finalizer", lambda tools=None: object())
