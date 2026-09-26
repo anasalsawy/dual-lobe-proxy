@@ -615,3 +615,129 @@ def test_group_default_runtime_uses_separate_memory_per_agent(monkeypatch, tmp_p
     assert sarah_path != david_path
     assert sarah_path.name == "sarah.jsonl"
     assert david_path.name == "david.jsonl"
+
+
+@pytest.mark.asyncio
+async def test_group_single_agent_bypasses_all_group_routing_and_semantic_resolution():
+    seen = {"semantic": 0, "task": None}
+
+    class FakeResult:
+        answer = "single reply"
+
+    class FakeEngine:
+        async def run(self, task):
+            seen["task"] = task
+            return FakeResult()
+
+    async def semantic_should_not_run(message, identities):
+        seen["semantic"] += 1
+        raise AssertionError("semantic resolver must not run for one agent")
+
+    runtime = GroupDualLobeRuntime(
+        [AgentIdentity("solo", "Solo")],
+        engine_factory=lambda identity: FakeEngine(),
+        semantic_resolver=semantic_should_not_run,
+    )
+
+    result = await runtime.process_message(GroupMessage(text="hello there"))
+
+    assert seen["semantic"] == 0
+    assert seen["task"] == "hello there"
+    assert result.published == {"solo": "single reply"}
+
+
+@pytest.mark.asyncio
+async def test_group_deterministic_target_skips_semantic_fallback():
+    seen = {"semantic": 0, "calls": []}
+
+    class FakeResult:
+        def __init__(self, answer):
+            self.answer = answer
+
+    class FakeEngine:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+
+        async def run(self, task):
+            seen["calls"].append(self.agent_id)
+            return FakeResult("ok")
+
+    async def semantic_should_not_run(message, identities):
+        seen["semantic"] += 1
+        return ("david",)
+
+    runtime = GroupDualLobeRuntime(
+        [AgentIdentity("sarah", "Sarah"), AgentIdentity("david", "David")],
+        engine_factory=lambda identity: FakeEngine(identity.agent_id),
+        semantic_resolver=semantic_should_not_run,
+    )
+
+    result = await runtime.process_message(GroupMessage(text="Sarah, check this"))
+
+    assert seen["semantic"] == 0
+    assert seen["calls"] == ["sarah"]
+    assert set(result.published) == {"sarah"}
+
+
+@pytest.mark.asyncio
+async def test_group_ambiguous_message_uses_semantic_fallback_only_then():
+    seen = {"semantic": 0, "calls": []}
+
+    class FakeResult:
+        def __init__(self, answer):
+            self.answer = answer
+
+    class FakeEngine:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+
+        async def run(self, task):
+            seen["calls"].append(self.agent_id)
+            return FakeResult(f"{self.agent_id}-reply")
+
+    async def semantic_resolver(message, identities):
+        seen["semantic"] += 1
+        assert message.text == "Can the backend person check this?"
+        assert {x.agent_id for x in identities} == {"sarah", "david"}
+        return ("david",)
+
+    runtime = GroupDualLobeRuntime(
+        [
+            AgentIdentity("sarah", "Sarah", role="research"),
+            AgentIdentity("david", "David", role="backend engineering"),
+        ],
+        engine_factory=lambda identity: FakeEngine(identity.agent_id),
+        semantic_resolver=semantic_resolver,
+    )
+
+    result = await runtime.process_message(GroupMessage(text="Can the backend person check this?"))
+
+    assert seen["semantic"] == 1
+    assert seen["calls"] == ["david"]
+    assert result.published == {"david": "david-reply"}
+
+
+@pytest.mark.asyncio
+async def test_group_semantic_fallback_can_choose_no_target_without_invoking_agents():
+    seen = {"semantic": 0, "calls": 0}
+
+    class FakeEngine:
+        async def run(self, task):
+            seen["calls"] += 1
+            raise AssertionError("no agent should run")
+
+    async def semantic_resolver(message, identities):
+        seen["semantic"] += 1
+        return ()
+
+    runtime = GroupDualLobeRuntime(
+        [AgentIdentity("sarah", "Sarah"), AgentIdentity("david", "David")],
+        engine_factory=lambda identity: FakeEngine(),
+        semantic_resolver=semantic_resolver,
+    )
+
+    result = await runtime.process_message(GroupMessage(text="The deployment finished at noon."))
+
+    assert seen["semantic"] == 1
+    assert seen["calls"] == 0
+    assert result.published == {}
