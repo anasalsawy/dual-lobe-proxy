@@ -519,3 +519,99 @@ async def test_group_live_runtime_multiple_targets_run_concurrently_and_identity
     assert "OTHER AGENTS: David (agent_id=david), Maya (agent_id=maya)" in seen["sarah"]
     assert "SELF agent_id=david" in seen["david"]
     assert "OTHER AGENTS: Sarah (agent_id=sarah), Maya (agent_id=maya)" in seen["david"]
+
+
+@pytest.mark.asyncio
+async def test_group_live_runtime_no_target_makes_zero_model_calls():
+    calls = []
+
+    class FakeEngine:
+        async def run(self, task):
+            calls.append(task)
+            raise AssertionError("No agent should be invoked when nobody has the floor.")
+
+    runtime = GroupDualLobeRuntime(
+        [AgentIdentity("sarah", "Sarah"), AgentIdentity("david", "David")],
+        engine_factory=lambda identity: FakeEngine(),
+    )
+
+    result = await runtime.process_message(GroupMessage(text="The deployment finished at noon."))
+
+    assert calls == []
+    assert result.published == {}
+    assert set(result.suppressed) == {"sarah", "david"}
+
+
+@pytest.mark.asyncio
+async def test_group_live_runtime_broadcast_invokes_all_agents():
+    calls = []
+
+    class FakeResult:
+        def __init__(self, answer):
+            self.answer = answer
+
+    class FakeEngine:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+
+        async def run(self, task):
+            calls.append(self.agent_id)
+            return FakeResult(f"{self.agent_id}-ok")
+
+    runtime = GroupDualLobeRuntime(
+        [
+            AgentIdentity("sarah", "Sarah"),
+            AgentIdentity("david", "David"),
+            AgentIdentity("maya", "Maya"),
+        ],
+        engine_factory=lambda identity: FakeEngine(identity.agent_id),
+    )
+
+    result = await runtime.process_message(GroupMessage(text="Everyone, status?"))
+
+    assert set(calls) == {"sarah", "david", "maya"}
+    assert set(result.published) == {"sarah", "david", "maya"}
+    assert result.suppressed == ()
+
+
+@pytest.mark.asyncio
+async def test_group_live_runtime_multi_target_execution_is_concurrent():
+    class FakeResult:
+        def __init__(self, answer):
+            self.answer = answer
+
+    class FakeEngine:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+
+        async def run(self, task):
+            import asyncio
+            await asyncio.sleep(0.15)
+            return FakeResult(self.agent_id)
+
+    runtime = GroupDualLobeRuntime(
+        [AgentIdentity("sarah", "Sarah"), AgentIdentity("david", "David")],
+        engine_factory=lambda identity: FakeEngine(identity.agent_id),
+    )
+
+    started = time.perf_counter()
+    result = await runtime.process_message(GroupMessage(text="Sarah and David, compare findings"))
+    elapsed = time.perf_counter() - started
+
+    assert set(result.published) == {"sarah", "david"}
+    assert elapsed < 0.27
+
+
+def test_group_default_runtime_uses_separate_memory_per_agent(monkeypatch, tmp_path):
+    monkeypatch.setenv("DUAL_LOBE_GROUP_MEMORY_DIR", str(tmp_path))
+    runtime = GroupDualLobeRuntime([
+        AgentIdentity("sarah", "Sarah"),
+        AgentIdentity("david", "David"),
+    ])
+
+    sarah_path = runtime.engines["sarah"].memory.path
+    david_path = runtime.engines["david"].memory.path
+
+    assert sarah_path != david_path
+    assert sarah_path.name == "sarah.jsonl"
+    assert david_path.name == "david.jsonl"
