@@ -52,6 +52,41 @@ class GatedEngine:
     def __init__(self, memory: JsonlMemoryStore | None = None):
         self.memory = memory or JsonlMemoryStore()
 
+    @staticmethod
+    def _harden_verdict(verdict: Verdict) -> Verdict:
+        unresolved = (
+            verdict.handoff.missing
+            or verdict.handoff.unverified
+            or verdict.handoff.proof_requests
+        )
+        if verdict.deception_level == "GREEN" and unresolved:
+            return verdict.model_copy(
+                update={
+                    "deception_level": "YELLOW",
+                    "rationale": (
+                        "Verifier reported unresolved evidence or task gaps; GREEN is not allowed while "
+                        "missing/unverified/proof_requests remain. " + verdict.rationale
+                    )[:1600],
+                }
+            )
+        return verdict
+
+    @staticmethod
+    def _harden_split_grade(grade: SplitQuality, *, expected_used: bool, overlap_ms: int | float | None = None) -> SplitQuality:
+        updates = {}
+        feedback_prefix = ""
+        if grade.used != expected_used:
+            updates["used"] = expected_used
+            updates["valid"] = False
+            updates["score"] = min(grade.score, 25)
+            feedback_prefix += "Runtime split usage disagreed with model grade; grade was corrected. "
+        if expected_used and (overlap_ms or 0) <= 0 and grade.time_effect == "positive":
+            updates["time_effect"] = "unknown"
+            feedback_prefix += "No measured A/B overlap supports a positive timing claim. "
+        if feedback_prefix:
+            updates["feedback"] = (feedback_prefix + grade.feedback)[:1200]
+        return grade.model_copy(update=updates) if updates else grade
+
     def _injections(
         self,
         task: str,
@@ -152,7 +187,8 @@ Return ONLY JSON:
     "missing": [],
     "unverified": [],
     "widen": [],
-    "memory_query": ""
+    "memory_query": "",
+    "proof_requests": []
   }}
 }}
 
@@ -164,7 +200,7 @@ GREEN = no deception detected, not verified truth."""
             fallback_text="VERIFIER_CALL_FAILED_OR_EMPTY",
             role_key="B_VERIFY",
         )
-        return parse_model(
+        verdict = parse_model(
             raw,
             Verdict,
             Verdict(
@@ -172,6 +208,7 @@ GREEN = no deception detected, not verified truth."""
                 rationale="Verifier output could not be parsed or was empty.",
             ),
         )
+        return self._harden_verdict(verdict)
 
     async def _persist_memory_query(self, verdict: Verdict) -> None:
         query = (verdict.handoff.memory_query or "").strip()
@@ -451,7 +488,14 @@ GREEN means no deception detected, not verified truth."""
                 feedback="Review failed; do not learn a positive routing lesson from this turn.",
             ),
         )
-        return parse_model(raw, TurnReview, fallback)
+        review = parse_model(raw, TurnReview, fallback)
+        review.answer_verdict = self._harden_verdict(review.answer_verdict)
+        review.split_verdict = self._harden_split_grade(
+            review.split_verdict,
+            expected_used=False,
+            overlap_ms=0,
+        )
+        return review
 
     async def _finalize_split_with_b(
         self,
@@ -577,6 +621,12 @@ GREEN means no deception detected, not verified truth."""
             ),
         )
         finalized = parse_model(raw, FinalizedTurn, fallback)
+        finalized.answer_verdict = self._harden_verdict(finalized.answer_verdict)
+        finalized.split_verdict = self._harden_split_grade(
+            finalized.split_verdict,
+            expected_used=True,
+            overlap_ms=telemetry.get("overlap_ms", 0),
+        )
 
         # Runtime hardening: a failed worker lane makes the split itself invalid even
         # if B was able to repair the final answer. Do not let the model grade over
