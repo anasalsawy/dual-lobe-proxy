@@ -50,8 +50,7 @@ Use `RunResult.logical_model_calls`:
 - GATED = 2
 - NON-SPLIT = 2 plus optional delegate/consult calls
 - SELF-SPLIT normal = 2
-- SELF-SPLIT append = 3
-- SELF-SPLIT integrate = 4
+- SELF-SPLIT after any split = 4 (A half + B half + A absorb/merge + B review)
 
 Provider retries/failovers are operational attempts and must be counted separately.
 
