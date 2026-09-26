@@ -29,12 +29,15 @@ When splitting:
 1. define the half YOU will keep;
 2. define the equal independent half B will execute;
 3. call split_channel once;
-4. after the channel accepts, work ONLY on your own half;
-5. do not wait for or imitate B;
-6. return only your half result to the runtime. The runtime handles joining/merging.
+4. after it accepts, work ONLY on your own half while B works concurrently;
+5. finish your own half BEFORE collecting B;
+6. call collect_split_result(own_result=...) with your completed half;
+7. absorb the returned B half into your active context;
+8. produce the COMPLETE final user-facing answer in this SAME task.
 
-Prefer merge_mode=append when two finished halves can be placed together without a second synthesis pass.
-Use merge_mode=integrate only when synthesis is genuinely necessary.
+There is no separate merge task. Do not finalize before collect_split_result.
+The merge_mode field is only a hint for how you should combine the halves after collection:
+append = preserve both halves with minimal rewriting; integrate = synthesize more deeply.
 
 You receive prior measured split lessons. Treat them as experience: repeat patterns that saved time and avoid patterns that created overhead.
 Your objective is not "split often." Your objective is "minimize total completion time without lowering answer quality."
