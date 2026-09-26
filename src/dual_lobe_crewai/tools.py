@@ -169,6 +169,10 @@ class SelfSplitRunState:
     b_finished_perf: float | None = None
     b_result: str = ""
     b_error: str = ""
+    collected: bool = False
+    own_result: str = ""
+    collect_started_perf: float | None = None
+    collect_finished_perf: float | None = None
     future: concurrent.futures.Future | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
     executor: concurrent.futures.ThreadPoolExecutor = field(
@@ -196,6 +200,28 @@ class SelfSplitRunState:
             self.peer_first = peer_first
             self.split_started_perf = time.perf_counter()
             return True
+
+    def collect_peer(self, own_result: str) -> str:
+        with self.lock:
+            if not self.split_used:
+                return "SPLIT_COLLECT_REJECTED: no split is active."
+            if self.collected:
+                return "SPLIT_COLLECT_REJECTED: B's half was already collected."
+            self.collected = True
+            self.own_result = (own_result or "").strip()
+            self.collect_started_perf = time.perf_counter()
+            future = self.future
+        if future is None:
+            result = "B_HALF_CALL_FAILED: split worker future was not created."
+        else:
+            try:
+                result = str(future.result())
+            except Exception as exc:
+                result = f"B_HALF_CALL_FAILED: {type(exc).__name__}: {exc}"
+        with self.lock:
+            self.collect_finished_perf = time.perf_counter()
+            self.b_result = result
+        return result
 
     async def await_peer(self) -> str:
         if not self.future:
@@ -297,8 +323,9 @@ Return a self-contained half-result suitable for later append or merge."""
         state.future = state.executor.submit(peer_worker)
 
         result = (
-            "SPLIT_ACCEPTED. B is now executing peer_fragment concurrently. "
-            "Immediately execute ONLY own_fragment yourself; do not solve B's half and do not wait for B."
+            "SPLIT_ACCEPTED. A and B are now executing independent halves concurrently. "
+            "Complete ONLY own_fragment yourself. When your half is complete, call collect_split_result "
+            "with your completed half as own_result. Do not finalize before collecting B."
         )
         self.trace.add(
             self.name,
@@ -307,6 +334,50 @@ Return a self-contained half-result suitable for later append or merge."""
             provenance="parallel_split_launch",
         )
         return result
+
+
+class CollectSplitInput(BaseModel):
+    own_result: str = Field(
+        ...,
+        description="Your completed A-half result. Finish your independent half BEFORE calling this tool.",
+    )
+
+
+class CollectSplitResultTool(BaseTool):
+    name: str = "collect_split_result"
+    description: str = (
+        "After finishing A's own independent half, submit that completed half and collect B's concurrently "
+        "computed half. The returned B result is injected into this SAME active A task so A can absorb both "
+        "halves and write the complete final answer without a separate merge run."
+    )
+    args_schema: Type[BaseModel] = CollectSplitInput
+    trace: ProxyToolTrace
+    run_state: SelfSplitRunState
+
+    def _run(self, own_result: str) -> str:
+        if not (own_result or "").strip():
+            result = "SPLIT_COLLECT_REJECTED: own_result must contain A's completed half."
+            self.trace.add(
+                self.name,
+                input_text="",
+                output_text=result,
+                provenance="split_validation",
+            )
+            return result
+
+        started = time.perf_counter()
+        result = self.run_state.collect_peer(own_result)
+        waited_ms = int((time.perf_counter() - started) * 1000)
+        self.trace.add(
+            self.name,
+            input_text=own_result,
+            output_text=f"waited_ms={waited_ms}\n{result}",
+            provenance="parallel_split_collect",
+        )
+        return (
+            "B_HALF_RESULT (absorb this with your already-completed A half, then produce the complete "
+            "user-facing answer in this same task):\n" + result
+        )
 
 
 def make_proxy_tools(store: JsonlMemoryStore, trace: ProxyToolTrace | None = None, run_state: ProxyRunState | None = None):
@@ -348,6 +419,10 @@ def make_self_split_tools(
             original_task=original_task,
             memory_slice=memory_slice,
             store=store,
+            trace=trace,
+            run_state=run_state,
+        ),
+        CollectSplitResultTool(
             trace=trace,
             run_state=run_state,
         ),
