@@ -839,3 +839,174 @@ async def test_one_agent_direct_chat_still_uses_zero_routing_fast_path():
     assert seen["semantic"] == 0
     assert seen["task"] == "hello"
     assert result.published == {"helper": "direct reply"}
+
+
+@pytest.mark.asyncio
+async def test_group_scenario_matrix():
+    events = []
+
+    class FakeResult:
+        def __init__(self, answer):
+            self.answer = answer
+
+    class FakeEngine:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+        async def run(self, task):
+            events.append(("run", self.agent_id, task))
+            return FakeResult(f"{self.agent_id}-reply")
+
+    semantic_calls = []
+
+    async def semantic_resolver(message, identities):
+        semantic_calls.append(message.text)
+        text = message.text.lower()
+        if "backend person" in text:
+            return ("david",)
+        if "research person" in text:
+            return ("sarah",)
+        if "whoever handles ops" in text:
+            return ("maya",)
+        return ()
+
+    runtime = GroupDualLobeRuntime(
+        [
+            AgentIdentity("sarah", "Sarah", aliases=("@sarah",), role="research"),
+            AgentIdentity("david", "David", aliases=("@david",), role="backend engineering"),
+            AgentIdentity("maya", "Maya", aliases=("@maya",), role="operations"),
+        ],
+        engine_factory=lambda identity: FakeEngine(identity.agent_id),
+        semantic_resolver=semantic_resolver,
+    )
+
+    scenarios = [
+        {
+            "name": "explicit_name",
+            "message": GroupMessage(text="Sarah, check the logs", is_group=True),
+            "expected": {"sarah"},
+            "semantic": False,
+        },
+        {
+            "name": "explicit_mention",
+            "message": GroupMessage(text="@david can you review this?", is_group=True),
+            "expected": {"david"},
+            "semantic": False,
+        },
+        {
+            "name": "multiple_explicit_names",
+            "message": GroupMessage(text="Sarah and David, compare your findings", is_group=True),
+            "expected": {"sarah", "david"},
+            "semantic": False,
+        },
+        {
+            "name": "broadcast",
+            "message": GroupMessage(text="Everyone, status?", is_group=True),
+            "expected": {"sarah", "david", "maya"},
+            "semantic": False,
+        },
+        {
+            "name": "reply_metadata",
+            "message": GroupMessage(text="can you fix it?", is_group=True, reply_to_agent_id="maya"),
+            "expected": {"maya"},
+            "semantic": False,
+        },
+        {
+            "name": "explicit_platform_target",
+            "message": GroupMessage(text="please review", is_group=True, explicit_target_ids=("david",)),
+            "expected": {"david"},
+            "semantic": False,
+        },
+        {
+            "name": "implicit_role_backend",
+            "message": GroupMessage(text="Can the backend person check this?", is_group=True),
+            "expected": {"david"},
+            "semantic": True,
+        },
+        {
+            "name": "implicit_role_research",
+            "message": GroupMessage(text="Can the research person investigate this?", is_group=True),
+            "expected": {"sarah"},
+            "semantic": True,
+        },
+        {
+            "name": "implicit_role_ops",
+            "message": GroupMessage(text="Whoever handles ops, check the deployment.", is_group=True),
+            "expected": {"maya"},
+            "semantic": True,
+        },
+        {
+            "name": "mention_not_address",
+            "message": GroupMessage(text="Sarah said the logs looked clean.", is_group=True),
+            "expected": set(),
+            "semantic": True,
+        },
+        {
+            "name": "human_to_human_with_agent_present",
+            "message": GroupMessage(text="John, did you finish the spreadsheet?", sender_id="alice", is_group=True),
+            "expected": set(),
+            "semantic": True,
+        },
+        {
+            "name": "informational_statement",
+            "message": GroupMessage(text="The deployment finished at noon.", is_group=True),
+            "expected": set(),
+            "semantic": True,
+        },
+    ]
+
+    for scenario in scenarios:
+        before_sem = len(semantic_calls)
+        before_runs = len(events)
+        result = await runtime.process_message(scenario["message"])
+        got = set(result.published)
+        assert got == scenario["expected"], scenario["name"]
+        sem_used = len(semantic_calls) > before_sem
+        assert sem_used is scenario["semantic"], scenario["name"]
+        invoked = {agent_id for kind, agent_id, _ in events[before_runs:] if kind == "run"}
+        assert invoked == scenario["expected"], scenario["name"]
+
+
+@pytest.mark.asyncio
+async def test_group_scenario_single_agent_direct_vs_group():
+    calls = []
+
+    class FakeResult:
+        answer = "ok"
+
+    class FakeEngine:
+        async def run(self, task):
+            calls.append(task)
+            return FakeResult()
+
+    semantic_calls = []
+    async def semantic_none(message, identities):
+        semantic_calls.append(message.text)
+        return ()
+
+    runtime = GroupDualLobeRuntime(
+        [AgentIdentity("helper", "Helper", aliases=("@helper",), role="assistant")],
+        engine_factory=lambda identity: FakeEngine(),
+        semantic_resolver=semantic_none,
+    )
+
+    # Direct: zero-routing fast path.
+    direct = await runtime.process_message(GroupMessage(text="hello", is_group=False))
+    assert direct.published == {"helper": "ok"}
+    assert calls == ["hello"]
+    assert semantic_calls == []
+
+    # Group, not addressed: stay silent and use semantic fallback.
+    group_unaddressed = await runtime.process_message(
+        GroupMessage(text="Alice, can you send me the file?", sender_id="bob", is_group=True)
+    )
+    assert group_unaddressed.published == {}
+    assert calls == ["hello"]
+    assert semantic_calls == ["Alice, can you send me the file?"]
+
+    # Group, addressed: deterministic name match, no new semantic call.
+    group_addressed = await runtime.process_message(
+        GroupMessage(text="Helper, can you send me the file?", sender_id="bob", is_group=True)
+    )
+    assert group_addressed.published == {"helper": "ok"}
+    assert len(calls) == 2
+    assert semantic_calls == ["Alice, can you send me the file?"]
