@@ -295,63 +295,21 @@ If a valid time-saving split exists, you MUST call split_channel with:
 - reason: why the halves are independent and why parallelism should help;
 - merge_mode: append when possible, integrate only when necessary.
 
-The split_channel returns immediately while B works in parallel.
-After it accepts, execute ONLY own_fragment and return only your half-result.
+After split_channel accepts, A and B are working concurrently.
+Execute ONLY own_fragment yourself. Finish your own half first.
+Then call collect_split_result and pass your completed half as own_result.
+That tool returns B's concurrently computed half into THIS SAME active A task.
+Absorb both halves and then produce the complete final user-facing answer.
+There is NO separate merge run.
 
 If no valid split exists, do the whole task yourself and return the complete final answer.
 Never split merely because a decomposition is imaginable. Optimize actual completion time."""
         return await self._safe_run_one(
             a,
             prompt,
-            "Either a complete normal answer, or A's complete independent half after split_channel is launched.",
+            "One complete final user-facing answer. If split_channel was used, collect_split_result must be used before finalizing.",
             fallback_text="PRIMARY_SELF_SPLIT_WORKER_CALL_FAILED_OR_EMPTY",
             role_key="A",
-        )
-
-    async def _merge_self_split(
-        self,
-        *,
-        task: str,
-        a_half: str,
-        b_half: str,
-        memory_slice: str,
-        reason: str,
-        merge_mode: str,
-        peer_first: bool,
-    ) -> str:
-        a = make_a(merge=True)
-        return await self._safe_run_one(
-            a,
-            f"""Merge two independently completed halves of the same task.
-
-ORIGINAL USER TASK:
-{task}
-
-SHARED MEMORY SNAPSHOT:
-{memory_slice if memory_slice else "(none)"}
-
-SPLIT RATIONALE:
-{reason}
-
-MERGE MODE REQUESTED BY A:
-{merge_mode}
-
-ORDER HINT:
-{"B half first, then A half" if peer_first else "A half first, then B half"}
-
-A HALF:
-{a_half}
-
-B HALF:
-{b_half}
-
-You are A and must ABSORB B's completed half, then produce the entire final user-facing answer yourself.
-Even when merge_mode is "append", YOU still emit the whole answer; use minimal rewriting and preserve both halves.
-When merge_mode is "integrate", synthesize them more deeply and resolve overlap or contradictions.
-Do not mention the internal split or lobes.""",
-            "One final merged answer.",
-            fallback_text="MERGE_CALL_FAILED_OR_EMPTY",
-            role_key="A_MERGE",
         )
 
     @staticmethod
@@ -360,28 +318,20 @@ Do not mention the internal split or lobes.""",
         *,
         primary_started: float,
         primary_finished: float,
-        merge_ms: int,
     ) -> dict[str, int | float | str]:
         split_t = state.split_started_perf or primary_finished
         b_start = state.b_started_perf or split_t
         b_end = state.b_finished_perf or b_start
+        collect_start = state.collect_started_perf or primary_finished
+        collect_end = state.collect_finished_perf or collect_start
 
         route_decision_ms = max(0, int((split_t - primary_started) * 1000))
-        a_half_ms = max(0, int((primary_finished - split_t) * 1000))
+        a_half_ms = max(0, int((collect_start - split_t) * 1000))
         b_half_ms = max(0, int((b_end - b_start) * 1000))
-        parallel_window_ms = max(0, int((max(primary_finished, b_end) - split_t) * 1000))
-        overlap_ms = max(0, int((min(primary_finished, b_end) - max(split_t, b_start)) * 1000))
-        a_wait_for_b_ms = max(0, int((b_end - primary_finished) * 1000))
-        b_wait_for_a_ms = max(0, int((primary_finished - b_end) * 1000))
-        parallel_gain_proxy_ms = min(a_half_ms, b_half_ms) - merge_ms
-
-        threshold = 250
-        if parallel_gain_proxy_ms > threshold:
-            measured = "positive"
-        elif parallel_gain_proxy_ms < -threshold:
-            measured = "negative"
-        else:
-            measured = "neutral"
+        collect_wait_ms = max(0, int((collect_end - collect_start) * 1000))
+        a_finalize_ms = max(0, int((primary_finished - collect_end) * 1000))
+        overlap_ms = max(0, int((min(collect_start, b_end) - max(split_t, b_start)) * 1000))
+        parallel_window_ms = max(0, int((max(collect_start, b_end) - split_t) * 1000))
 
         balance_ratio = 1.0
         if max(a_half_ms, b_half_ms) > 0:
@@ -391,6 +341,10 @@ Do not mention the internal split or lobes.""",
         if parallel_window_ms > 0:
             overlap_ratio = overlap_ms / parallel_window_ms
 
+        # This is measured overlap, not a true matched single-model counterfactual.
+        parallel_gain_proxy_ms = overlap_ms
+        measured = "positive" if overlap_ms > 250 else "neutral"
+
         return {
             "route_decision_ms": route_decision_ms,
             "a_half_ms": a_half_ms,
@@ -399,11 +353,12 @@ Do not mention the internal split or lobes.""",
             "overlap_ms": overlap_ms,
             "overlap_ratio": round(overlap_ratio, 3),
             "balance_ratio": round(balance_ratio, 3),
-            "a_wait_for_b_ms": a_wait_for_b_ms,
-            "b_wait_for_a_ms": b_wait_for_a_ms,
-            "merge_ms": merge_ms,
+            "collect_wait_ms": collect_wait_ms,
+            "a_finalize_ms": a_finalize_ms,
+            "merge_ms": 0,
             "parallel_gain_proxy_ms": parallel_gain_proxy_ms,
             "measured_time_effect": measured,
+            "same_turn_collect": bool(state.collected),
         }
 
     async def _review_self_split(
@@ -444,10 +399,15 @@ MEASURED TIMING TELEMETRY:
 
 Rules for the split grade:
 - used MUST equal {str(used).lower()}.
+- If a split was used but same_turn_collect is false, the split execution contract failed: valid=false and score must be low.
 - If split was used, judge whether both halves were substantial, independent, and sensibly balanced.
 - If no split was used, set missed_valid_split=true only if an obvious substantial independent two-way split existed.
 - Runtime telemetry outranks intuition for speed.
-- parallel_gain_proxy_ms = min(A-half time, B-half time) - merge time. Positive means measured parallel work exceeded merge overhead; negative means merge overhead erased the measured parallel saving. It is a proxy, not a true counterfactual single-model benchmark.
+- same_turn_collect must be true on a successful split.
+- overlap_ms is the measured period during which A and B were both working.
+- collect_wait_ms is how long A had to wait after finishing its own half.
+- a_finalize_ms is A's same-turn time after B's result was injected to produce the whole final answer.
+- parallel_gain_proxy_ms equals overlap_ms. It is a concurrency proxy, NOT a true matched single-model counterfactual.
 - unnecessary_split=true when the task should have stayed single-lane.
 - better_single_model=true when evidence indicates the split likely prolonged completion.
 - score rates the routing/decomposition decision itself from 0 to 100.
@@ -545,7 +505,12 @@ Return ONLY JSON:
         logical_calls = 1
 
         if state.split_used:
-            b_half = await state.await_peer()
+            # The successful path collects B back into the SAME active A CrewAI task.
+            # Awaiting here is cleanup only if A violated the contract; it never creates
+            # another A inference and never injects B after A has already finished.
+            if state.future is not None and not state.future.done():
+                await state.await_peer()
+
             plan = SplitPlan(
                 mode="split",
                 fragments=[
@@ -556,29 +521,16 @@ Return ONLY JSON:
                 reason=state.reason,
             )
 
-            # A always absorbs B's half and authors the complete final response.
-            # "append" now means a light A-authored assembly, not bypassing A.
-            merge_start = time.perf_counter()
-            answer = await self._merge_self_split(
-                task=task,
-                a_half=a_primary,
-                b_half=b_half,
-                memory_slice=memory_slice,
-                reason=state.reason,
-                merge_mode=state.merge_mode,
-                peer_first=state.peer_first,
-            )
-            merge_ms = int((time.perf_counter() - merge_start) * 1000)
-            logical_calls += 1  # A absorb/merge call.
-            logical_calls += 1  # B parallel half.
+            answer = a_primary
             telemetry = self._timing_telemetry(
                 state,
                 primary_started=primary_start,
                 primary_finished=primary_finished,
-                merge_ms=merge_ms,
             )
             timings.update(telemetry)
             route_source = "a_self_split"
+            logical_calls += 1  # nested concurrent B worker
+
         else:
             plan = SplitPlan(
                 mode="normal",
