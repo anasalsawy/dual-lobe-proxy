@@ -1,20 +1,19 @@
-from .engines import SplitEngine
+from .engines import DualLobeEngine
 from .group_coordination import (
     AgentIdentity,
-    FloorMode,
     GroupCoordinator,
     GroupDualLobeRuntime,
     GroupMessage,
     GroupTurnResult,
 )
 
-DualLobeEngine = SplitEngine
+# Compatibility alias for older imports; there is only one current architecture.
+SplitEngine = DualLobeEngine
 
 __all__ = [
-    "SplitEngine",
     "DualLobeEngine",
+    "SplitEngine",
     "AgentIdentity",
-    "FloorMode",
     "GroupCoordinator",
     "GroupDualLobeRuntime",
     "GroupMessage",
