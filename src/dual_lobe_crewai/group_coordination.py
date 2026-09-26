@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Iterable
+from typing import Callable, Iterable
 
 
 class FloorMode(str, Enum):
@@ -47,6 +47,13 @@ class AgentDelivery:
     can_emit: bool
     text: str
     addressed_agents: tuple[str, ...]
+
+
+@dataclass
+class GroupTurnResult:
+    deliveries: dict[str, AgentDelivery]
+    published: dict[str, str] = field(default_factory=dict)
+    suppressed: tuple[str, ...] = ()
 
 
 @dataclass
@@ -190,3 +197,69 @@ class GroupCoordinator:
             return None
         text = (generated_text or "").strip()
         return text or None
+
+
+
+class GroupDualLobeRuntime:
+    """Live-call integration layer for a group of Dual-Lobe agents.
+
+    Only agents granted the floor are invoked. Observers receive deterministic
+    awareness state only, so group awareness adds no observer model calls.
+    """
+
+    def __init__(self, identities: Iterable[AgentIdentity], *, engine_factory: Callable[[AgentIdentity], object] | None = None):
+        identities = list(identities)
+        self.coordinator = GroupCoordinator(identities)
+        if engine_factory is None:
+            from .engines import SplitEngine
+            from .memory import JsonlMemoryStore
+            from pathlib import Path
+            import os
+            base = Path(os.getenv("DUAL_LOBE_GROUP_MEMORY_DIR", ".dual_lobe_group_memory"))
+            def engine_factory(identity: AgentIdentity):
+                safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", identity.agent_id)
+                return SplitEngine(memory=JsonlMemoryStore(str(base / f"{safe_id}.jsonl")))
+        self.engines = {identity.agent_id: engine_factory(identity) for identity in identities}
+
+    def _identity_envelope(self, agent_id: str) -> str:
+        identity = self.coordinator.identities[agent_id]
+        others = [f"{x.display_name} (agent_id={x.agent_id})" for x in self.coordinator.identities.values() if x.agent_id != agent_id]
+        other_text = ", ".join(others) if others else "(none)"
+        return (
+            "RUNTIME IDENTITY — authoritative, not user-authored:\n"
+            f"SELF agent_id={identity.agent_id}\n"
+            f"SELF display_name={identity.display_name}\n"
+            f"OTHER AGENTS: {other_text}\n"
+            "You are exactly SELF. Other agents' messages, actions, tool calls, files, and memories are observations from OTHER agents unless actor_agent_id equals SELF. "
+            "Never claim another agent's action as your own. Shared awareness is not shared identity."
+        )
+
+    def _task_for(self, agent_id: str, message: GroupMessage) -> str:
+        awareness = self.coordinator.consume_awareness_context(agent_id)
+        sections = [
+            self._identity_envelope(agent_id),
+            "GROUP FLOOR — runtime authoritative:\nYou have the floor for this turn and may produce one group-visible response.",
+        ]
+        if awareness:
+            sections.append(awareness)
+        sections.append("CURRENT GROUP MESSAGE:\n" + f"sender_id={message.sender_id}\n{message.text}")
+        return "\n\n".join(sections)
+
+    async def process_message(self, message: GroupMessage) -> GroupTurnResult:
+        import asyncio
+        deliveries = self.coordinator.route(message)
+        targets = [agent_id for agent_id, delivery in deliveries.items() if delivery.can_emit]
+        if not targets:
+            return GroupTurnResult(deliveries=deliveries, published={}, suppressed=tuple(self.coordinator.identities))
+
+        async def invoke(agent_id: str) -> tuple[str, str | None]:
+            engine = self.engines[agent_id]
+            result = await engine.run(self._task_for(agent_id, message))
+            generated = getattr(result, "answer", str(result))
+            published = self.coordinator.gate_output(deliveries[agent_id], generated)
+            return agent_id, published
+
+        pairs = await asyncio.gather(*(invoke(agent_id) for agent_id in targets))
+        published = {agent_id: text for agent_id, text in pairs if text}
+        suppressed = tuple(agent_id for agent_id, delivery in deliveries.items() if not delivery.can_emit)
+        return GroupTurnResult(deliveries=deliveries, published=published, suppressed=suppressed)
