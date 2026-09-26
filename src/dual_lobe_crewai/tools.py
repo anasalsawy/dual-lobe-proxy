@@ -39,18 +39,29 @@ class ProxyToolTrace:
         with self.lock:
             self.events.append({
                 "tool": tool,
-                "input": input_text[:2000],
-                "output": output_text[:4000],
+                "input": input_text,
+                "output": output_text,
                 "provenance": provenance,
             })
 
-    def render(self) -> str:
+    def render(self, *, max_chars_per_event: int | None = None) -> str:
         with self.lock:
             events = list(self.events)
         if not events:
             return "No proxy tools were used."
+
+        def maybe_limit(value: str) -> str:
+            if max_chars_per_event is None or len(value) <= max_chars_per_event:
+                return value
+            return (
+                value[:max_chars_per_event]
+                + f"\n[TRUNCATED_BY_RENDER: original_chars={len(value)}]"
+            )
+
         return "\n".join(
-            f"{i}. tool={e['tool']} provenance={e['provenance']}\n   input={e['input']}\n   output={e['output']}"
+            f"{i}. tool={e['tool']} provenance={e['provenance']}\n"
+            f"   input={maybe_limit(e['input'])}\n"
+            f"   output={maybe_limit(e['output'])}"
             for i, e in enumerate(events, 1)
         )
 
