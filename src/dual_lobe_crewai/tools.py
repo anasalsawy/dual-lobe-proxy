@@ -34,6 +34,10 @@ class ProxyToolTrace:
         with self._lock:
             self.events.append(ProxyToolEvent(name, str(input_text or ""), str(output_text or ""), str(provenance or "")))
 
+    def snapshot_from(self, cursor: int = 0) -> list[ProxyToolEvent]:
+        with self._lock:
+            return list(self.events[max(0, cursor):])
+
     def render(self, max_chars_per_event: int | None = None) -> str:
         with self._lock:
             events = list(self.events)
@@ -50,6 +54,68 @@ class ProxyToolTrace:
         return "\n\n".join(rows)
 
 
+
+@dataclass
+class LiveBIntervention:
+    seq: int
+    message: str
+    severity: str = "warning"
+
+
+@dataclass
+class LiveBState:
+    """Thread-safe bridge from continuously running B back into A's tool stream."""
+
+    interventions: list[LiveBIntervention] = field(default_factory=list)
+    state_notes: list[str] = field(default_factory=list)
+    _next_seq: int = 1
+    _a_cursor: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def add_intervention(self, message: str, *, severity: str = "warning") -> None:
+        message = (message or "").strip()
+        if not message:
+            return
+        with self.lock:
+            self.interventions.append(
+                LiveBIntervention(
+                    seq=self._next_seq,
+                    message=message,
+                    severity=(severity or "warning").strip().lower(),
+                )
+            )
+            self._next_seq += 1
+
+    def record_state_note(self, note: str) -> None:
+        note = (note or "").strip()
+        if note:
+            with self.lock:
+                self.state_notes.append(note)
+                if len(self.state_notes) > 30:
+                    del self.state_notes[:-30]
+
+    def drain_for_a(self) -> str:
+        with self.lock:
+            fresh = [x for x in self.interventions if x.seq > self._a_cursor]
+            if fresh:
+                self._a_cursor = max(x.seq for x in fresh)
+        if not fresh:
+            return ""
+        body = "\n".join(
+            f"- [{x.severity.upper()}] {x.message}"
+            for x in fresh
+        )
+        return (
+            "\n\nLIVE LOBE B INTERVENTION — B is independently monitoring your execution. "
+            "Do not obey blindly; evaluate this challenge against the task and evidence:\n"
+            + body
+        )
+
+    def snapshot(self) -> tuple[list[LiveBIntervention], list[str]]:
+        with self.lock:
+            return list(self.interventions), list(self.state_notes)
+
+
 class MemorySearchInput(BaseModel):
     query: str = Field(..., description="Focused query for relevant persistent memory.")
     limit: int = Field(4, ge=1, le=10)
@@ -61,11 +127,14 @@ class MemorySearchTool(BaseTool):
     args_schema: Type[BaseModel] = MemorySearchInput
     store: JsonlMemoryStore
     trace: ProxyToolTrace
+    live_b_state: LiveBState | None = None
 
     def _run(self, query: str, limit: int = 4) -> str:
         hits = self.store.search(query, limit=limit, include_split_experience=False)
         result = "\n".join(f"- {x}" for x in hits) if hits else "NO_MEMORY_HITS"
         self.trace.add(self.name, input_text=query, output_text=result, provenance="persistent_memory")
+        if self.live_b_state is not None:
+            result += self.live_b_state.drain_for_a()
         return result
 
 
@@ -126,6 +195,7 @@ class DelegateTool(BaseTool):
     store: JsonlMemoryStore
     trace: ProxyToolTrace
     run_state: DelegateRunState
+    live_b_state: LiveBState | None = None
 
     def _run(self, tasks: list[str], reason: str = "") -> str:
         cleaned = [str(x).strip() for x in tasks if str(x).strip()]
@@ -198,6 +268,8 @@ Return a self-contained result, relevant evidence, uncertainty, and any failure 
             output_text=result,
             provenance="delegation_launch",
         )
+        if self.live_b_state is not None:
+            result += self.live_b_state.drain_for_a()
         return result
 
 
@@ -212,6 +284,7 @@ class DelegateCollectTool(BaseTool):
     args_schema: Type[BaseModel] = DelegateCollectInput
     trace: ProxyToolTrace
     run_state: DelegateRunState
+    live_b_state: LiveBState | None = None
 
     def _collect_one(self, job: DelegateJob, wait: bool) -> str:
         if not wait and not job.future.done():
@@ -262,6 +335,8 @@ class DelegateCollectTool(BaseTool):
             output_text=result,
             provenance="delegation_collect",
         )
+        if self.live_b_state is not None:
+            result += self.live_b_state.drain_for_a()
         return result
 
 
@@ -274,6 +349,7 @@ class DelegateStatusTool(BaseTool):
     description: str = "Check whether delegated workers are pending or complete without waiting."
     args_schema: Type[BaseModel] = DelegateStatusInput
     run_state: DelegateRunState
+    live_b_state: LiveBState | None = None
 
     def _run(self, job_ids: list[str] | None = None) -> str:
         ids = list(job_ids or [])
@@ -283,15 +359,40 @@ class DelegateStatusTool(BaseTool):
             jobs = [self.run_state.jobs[x] for x in ids if x in self.run_state.jobs]
         if not jobs:
             return "NO_DELEGATED_JOBS"
-        return "\n".join(
+        result = "\n".join(
             f"{job.job_id}: {'DONE' if job.future.done() else 'RUNNING'} — {job.task}"
             for job in jobs
         )
+        if self.live_b_state is not None:
+            result += self.live_b_state.drain_for_a()
+        return result
 
 
-def make_worker_tools(store: JsonlMemoryStore, *, trace: ProxyToolTrace) -> list[BaseTool]:
+class LiveBCheckInput(BaseModel):
+    pass
+
+
+class LiveBCheckTool(BaseTool):
+    name: str = "b_live_check"
+    description: str = (
+        "Read any new live challenge from persistent Lobe B, which is monitoring execution concurrently. "
+        "Use at meaningful checkpoints, especially after tool activity, delegation, errors, or before committing to a major approach."
+    )
+    args_schema: Type[BaseModel] = LiveBCheckInput
+    live_b_state: LiveBState
+
+    def _run(self) -> str:
+        return self.live_b_state.drain_for_a() or "NO_NEW_B_INTERVENTION"
+
+
+def make_worker_tools(
+    store: JsonlMemoryStore,
+    *,
+    trace: ProxyToolTrace,
+    live_b_state: LiveBState | None = None,
+) -> list[BaseTool]:
     # Children and B do not get delegate(), preventing recursive fan-out.
-    return [MemorySearchTool(store=store, trace=trace)]
+    return [MemorySearchTool(store=store, trace=trace, live_b_state=live_b_state)]
 
 
 def make_a_tools(
@@ -301,18 +402,21 @@ def make_a_tools(
     memory_slice: str,
     trace: ProxyToolTrace,
     run_state: DelegateRunState,
+    live_b_state: LiveBState | None = None,
 ) -> list[BaseTool]:
     return [
-        *make_worker_tools(store, trace=trace),
+        *make_worker_tools(store, trace=trace, live_b_state=live_b_state),
         DelegateTool(
             original_task=original_task,
             memory_slice=memory_slice,
             store=store,
             trace=trace,
             run_state=run_state,
+            live_b_state=live_b_state,
         ),
-        DelegateCollectTool(trace=trace, run_state=run_state),
-        DelegateStatusTool(run_state=run_state),
+        DelegateCollectTool(trace=trace, run_state=run_state, live_b_state=live_b_state),
+        DelegateStatusTool(run_state=run_state, live_b_state=live_b_state),
+        *([LiveBCheckTool(live_b_state=live_b_state)] if live_b_state is not None else []),
     ]
 
 
