@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dual-lobe-crewai"
-version = "0.1.0"
-description = "Three CrewAI implementations of the Dual-Lobe architecture: gated, non-split, and split."
+version = "0.2.0"
+description = "Dual-Lobe: self-splitting reasoning, verification, persistent memory, and group-aware orchestration."
 requires-python = ">=3.10"
 dependencies = [
   "crewai>=0.80.0",
