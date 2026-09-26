@@ -237,6 +237,7 @@ async def test_split_finalizer_receives_full_verifier_protocol(monkeypatch, tmp_
         '"balance_score":0.8,"time_effect":"unknown","feedback":"reasonable split"}}'
 
     monkeypatch.setattr(SplitEngine, "_safe_run_one", fake_safe)
+    monkeypatch.setattr(engines_module, "make_b_finalizer", lambda tools=None: object())
     store = JsonlMemoryStore(str(tmp_path / "m.jsonl"))
     engine = SplitEngine(memory=store)
     plan = SplitPlan(
