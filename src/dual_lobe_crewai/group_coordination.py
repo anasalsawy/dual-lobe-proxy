@@ -126,13 +126,54 @@ class GroupCoordinator:
 
         found: list[str] = []
         text = message.text or ""
-        # Longest aliases first prevents a short alias from shadowing a longer one.
         aliases = sorted(self._alias_to_id, key=len, reverse=True)
+
+        # Explicit @mentions count as addressing anywhere in the message.
         for alias in aliases:
-            if self._contains_alias(text, alias):
+            bare = alias.lstrip("@")
+            if re.search(rf"(?<!\\w)@{re.escape(bare)}(?!\\w)", text, flags=re.IGNORECASE):
                 agent_id = self._alias_to_id[alias]
                 if agent_id not in found:
                     found.append(agent_id)
+
+        # Bare names/aliases only count deterministically when used as a
+        # vocative/direct address, not merely mentioned in third person.
+        # Examples accepted:
+        #   "Sarah, check this"
+        #   "Sarah and David, compare findings"
+        #   "What do you think, Sarah?"
+        if not found:
+            start_window = text.strip()
+            for alias in aliases:
+                bare = alias.lstrip("@")
+                # Start-of-message direct address followed by comma/colon/dash,
+                # or by conjunction joining another addressed name.
+                start_pat = rf"^\\s*{re.escape(bare)}(?=\\s*(?:[,;:—-]|\\band\\b|&))"
+                if re.search(start_pat, start_window, flags=re.IGNORECASE):
+                    agent_id = self._alias_to_id[alias]
+                    if agent_id not in found:
+                        found.append(agent_id)
+
+            # If one start-of-message addressee was found, capture additional
+            # names in the same vocative prefix before the first comma/colon.
+            if found:
+                prefix = re.split(r"[,;:—-]", start_window, maxsplit=1)[0]
+                for alias in aliases:
+                    bare = alias.lstrip("@")
+                    if self._contains_alias(prefix, bare):
+                        agent_id = self._alias_to_id[alias]
+                        if agent_id not in found:
+                            found.append(agent_id)
+
+        if not found:
+            for alias in aliases:
+                bare = alias.lstrip("@")
+                # End-of-message vocative: "what do you think, Sarah?"
+                end_pat = rf"[,;:]\\s*{re.escape(bare)}\\s*[?.!]*\\s*$"
+                if re.search(end_pat, text, flags=re.IGNORECASE):
+                    agent_id = self._alias_to_id[alias]
+                    if agent_id not in found:
+                        found.append(agent_id)
 
         broadcast_words = ("everyone", "everybody", "all agents", "team")
         if not found and any(self._contains_alias(text, word) for word in broadcast_words):
