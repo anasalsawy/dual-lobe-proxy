@@ -31,9 +31,8 @@ In addition to final-answer quality and total latency, Self-Split must record:
 - parallel window
 - overlap and overlap ratio
 - balance ratio
-- collect wait time after A completes its half
-- A same-turn finalize time after B is collected
-- merge time (should remain 0; no separate merge inference)
+- join wait time after the first worker half finishes
+- B finalizer/verifier time
 - parallel_gain_proxy_ms
 - measured time effect
 - B split score
@@ -50,14 +49,16 @@ Use `RunResult.logical_model_calls`:
 - GATED = 2
 - NON-SPLIT = 2 plus optional delegate/consult calls
 - SELF-SPLIT normal = 2
-- SELF-SPLIT after any split = 3 logical executions (one active A task containing route/work/collect/final answer + concurrent B worker + B review)
+- SELF-SPLIT after any split = 3 logical executions (A route/half + concurrent B worker half + B merge/repair/verify/finalize)
 
 Provider retries/failovers are operational attempts and must be counted separately.
 
 ## Important interpretation
 
-`parallel_gain_proxy_ms` is not a true single-model counterfactual. It asks whether the measured parallel work saved more time than the measured merge cost:
+`parallel_gain_proxy_ms` is not a true single-model counterfactual. It currently records measured A/B execution overlap:
 
-`overlap_ms` (measured A/B execution overlap; compare matched control runs for true end-to-end speedup)
+`overlap_ms`
+
+Use matched control runs for true end-to-end speedup; overlap alone is not a counterfactual.
 
 For rigorous speed claims, compare matched Gated/Non-Split/Self-Split runs of the same task.
