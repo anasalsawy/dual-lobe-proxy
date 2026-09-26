@@ -23,7 +23,7 @@ There is **no dedicated splitter model anymore**.
 
 ```text
                      ┌── A keeps half A ───────────────┐
-task + memory -> A ──┤                                  ├─ append/merge -> B verify + split grade
+task + memory -> A ──┤                                  ├─ A absorbs B half / authors whole answer -> B verify + split grade
                      └── split_channel -> B half B ────┘
 ```
 
@@ -34,8 +34,9 @@ If a valid time-saving split exists, A MUST split:
 - A keeps one half;
 - `split_channel` launches B's half in a background lane and returns immediately;
 - A executes its own half while B executes concurrently;
-- append is preferred when possible to avoid a costly synthesis call;
-- integrate invokes A merge only when synthesis is actually needed.
+- B receives the same task/execution tools as A's worker lane (the split_channel control-plane tool is A-only to prevent recursive fan-out);
+- after both halves finish, A ALWAYS absorbs B's half and authors the complete final answer;
+- "append" means a light A-authored assembly; "integrate" means deeper synthesis. Both still go through A.
 
 If no useful split exists, A stays single-lane.
 
@@ -94,8 +95,7 @@ Typical logical inference counts now are:
 - Gated: 2 — A + B verify
 - Non-Split: 2, plus any optional delegate/consult calls
 - Self-Split NORMAL: 2 — A self-routes/works + B review
-- Self-Split with append: 3 — A + concurrent B half + B review
-- Self-Split with integrate: 4 — A + concurrent B half + A merge + B review
+- Self-Split after a split: 4 — A half + concurrent B half + A absorb/merge + B review
 
 The old dedicated splitter route call has been removed.
 
