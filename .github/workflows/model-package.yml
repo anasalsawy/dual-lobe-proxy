@@ -1,0 +1,27 @@
+name: model-package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build model folder
+        run: |
+          mkdir -p dist/dual-lobe-model
+          cp -r src dist/dual-lobe-model/
+          cp pyproject.toml .env.example README.md CHECKPOINT.md dist/dual-lobe-model/
+          cp -r benchmarks dist/dual-lobe-model/
+          cp -r tests dist/dual-lobe-model/
+          cp .gitignore dist/dual-lobe-model/
+          cd dist
+          zip -r dual-lobe-model.zip dual-lobe-model
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dual-lobe-model
+          path: dist/dual-lobe-model.zip
+          if-no-files-found: error
