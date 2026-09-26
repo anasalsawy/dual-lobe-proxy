@@ -899,6 +899,18 @@ async def test_group_scenario_matrix():
             "semantic": False,
         },
         {
+            "name": "end_vocative_address",
+            "message": GroupMessage(text="What do you think, Sarah?", is_group=True),
+            "expected": {"sarah"},
+            "semantic": False,
+        },
+        {
+            "name": "platform_style_mention_is_address",
+            "message": GroupMessage(text="FYI @maya please check this when free", is_group=True),
+            "expected": {"maya"},
+            "semantic": False,
+        },
+        {
             "name": "broadcast",
             "message": GroupMessage(text="Everyone, status?", is_group=True),
             "expected": {"sarah", "david", "maya"},
