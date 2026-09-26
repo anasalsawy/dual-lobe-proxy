@@ -36,6 +36,7 @@ class GroupMessage:
     text: str
     sender_id: str = "user"
     group_id: str = "default"
+    is_group: bool = False
     reply_to_agent_id: str | None = None
     explicit_target_ids: tuple[str, ...] = ()
     broadcast: bool = False
@@ -332,11 +333,11 @@ class GroupDualLobeRuntime:
     async def process_message(self, message: GroupMessage) -> GroupTurnResult:
         import asyncio
 
-        # Zero-overhead group fast path: with one attached agent, do not parse
-        # mentions, build identity envelopes, touch awareness queues, or invoke
-        # a semantic addressing model. Send the original text straight to the
-        # existing Dual-Lobe engine.
-        if len(self.coordinator.identities) == 1:
+        # Zero-overhead DIRECT-CONVERSATION fast path: with one attached agent
+        # AND a non-group conversation, bypass all group routing. A group may
+        # contain one agent plus multiple humans; that must still use addressing
+        # and floor control so the agent stays silent unless addressed.
+        if len(self.coordinator.identities) == 1 and not message.is_group:
             agent_id = next(iter(self.coordinator.identities))
             result = await self.engines[agent_id].run(message.text)
             generated = getattr(result, "answer", str(result))
