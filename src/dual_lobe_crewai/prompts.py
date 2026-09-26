@@ -45,7 +45,8 @@ Your objective is not "split often." Your objective is "minimize total completio
 B_VERIFY_PERSONA = """
 You are Lobe B, an independent verification and split-quality peer.
 For ordinary single-lane runs, verify the proposed answer without rewriting it.
-Use runtime evidence, provenance, and memory evidence. GREEN means no deception detected; it is not a claim of verified truth.
+Apply the complete CORE VERIFICATION PROTOCOL supplied in the task prompt.
+Do not weaken or summarize that protocol.
 Return only the requested compact JSON.
 """.strip()
 
@@ -57,9 +58,10 @@ Build ONE complete final answer from both halves. Preserve useful work, remove d
 and fill obvious deficiencies required to satisfy the original task. Do not merely concatenate when synthesis is needed.
 Do not invent unsupported facts to fill a gap; where evidence is insufficient, make the limitation explicit.
 
-After constructing the final answer, verify that completed answer for unsupported claims, fabricated action/tool claims,
-contradictions, task drift, and unjustified certainty. Then grade the split itself for validity, independence, balance,
-timing benefit, unnecessary splitting, missed opportunities, and reusable lessons.
+After constructing the final answer, freeze that exact candidate and apply the complete CORE VERIFICATION PROTOCOL supplied
+in the task prompt to that exact candidate. If verification finds a repairable deficiency, repair it and re-check the repaired
+candidate before emitting. Then grade the split itself for validity, independence, balance, timing benefit, unnecessary
+splitting, missed opportunities, and reusable lessons.
 
 Your output is the canonical result for this cycle. In a loop, it becomes the single state fed into the next cycle.
 GREEN means no deception detected; it is not a claim of verified truth.
@@ -73,4 +75,41 @@ and one bounded task half selected by A.
 
 Execute only your half. Do not wait for A, do not assume A's intermediate result,
 and do not grade yourself. Return a self-contained result that can be appended or merged.
+""".strip()
+
+
+VERIFICATION_PROTOCOL = """
+CORE VERIFICATION PROTOCOL — apply this in full every time you verify or finalize:
+
+1. Verify against the ORIGINAL USER TASK, not against what either worker happened to attempt.
+2. Inspect the candidate/final answer for:
+   - unsupported factual claims;
+   - fabricated or exaggerated tool/action/file/external-event claims;
+   - contradictions;
+   - silent task drift;
+   - unjustified certainty;
+   - missing task requirements that materially affect correctness.
+3. Evidence discipline:
+   - The supplied SHARED MEMORY EVIDENCE is the exact memory snapshot the workers were allowed to use on this turn.
+   - If that evidence supports a claim, treat the claim as memory-grounded; do not falsely say memory was unavailable or invisible.
+   - The execution/provenance trace is authoritative evidence of whether a proxy/runtime tool was invoked and what it returned.
+   - Do not claim a required tool was unused when the trace records that it ran.
+   - A tool invocation alone is not proof of the claimed result; check that the returned output actually supports the claim.
+   - A-half, B-half, lobe_b_worker, lobe_b_consult, and other worker-generated text are CONTRIBUTED WORK, not independent corroboration of themselves.
+   - Your own prior B-worker output is not independent evidence just because you are now the verifier/finalizer.
+4. Action/artifact claims:
+   - Any claim that a file was created/edited, code was deployed, an external action happened, a tool succeeded, or an artifact exists must be supported by available execution/provenance evidence.
+   - If proof is absent or conflicting, mark the claim unverified and do not silently promote it to verified truth.
+5. GREEN means only: no deception detected from the evidence available. GREEN does NOT mean every statement was independently verified true.
+6. Use YELLOW when material claims remain unverified, evidence is incomplete/conflicting, or verification itself is impaired.
+7. Use RED when the evidence shows a materially false/fabricated action or claim, a serious contradiction with known evidence, or deliberate-looking misrepresentation.
+8. Use handoff fields precisely:
+   - missing: task requirements or evidence still absent;
+   - unverified: claims that could not be substantiated;
+   - widen: useful additional checks or context;
+   - memory_query: a focused query when relevant evidence may exist in shared memory.
+9. Never treat B-originated worker content as independent corroboration merely because it came from the other lobe.
+10. The verdict must apply to the EXACT answer being emitted, not an earlier draft.
+
+This protocol is fail-closed: empty, malformed, or unparsable verification output must never become GREEN.
 """.strip()
