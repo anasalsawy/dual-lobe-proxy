@@ -226,6 +226,7 @@ class SplitChannelTool(BaseTool):
     args_schema: Type[BaseModel] = SplitChannelInput
     original_task: str
     memory_slice: str
+    store: JsonlMemoryStore
     trace: ProxyToolTrace
     run_state: SelfSplitRunState
 
@@ -260,7 +261,12 @@ class SplitChannelTool(BaseTool):
         def peer_worker() -> str:
             state.b_started_perf = time.perf_counter()
             try:
-                b = make_b_worker()
+                b_trace = ProxyToolTrace()
+                # B gets the same execution/tool plane as A's worker lane.
+                # split_channel itself is orchestration control and is intentionally
+                # not exposed to B, preventing recursive fan-out.
+                b_tools = make_parallel_execution_tools(self.store, trace=b_trace)
+                b = make_b_worker(tools=b_tools)
                 prompt = f"""ORIGINAL USER TASK:
 {original_task}
 
@@ -274,6 +280,12 @@ Execute only this half. Do not wait for A and do not assume A's intermediate out
 Return a self-contained half-result suitable for later append or merge."""
                 result = asyncio.run(run_one(b, prompt, "A complete independent half-result.", role_key="B_WORKER"))
                 state.b_result = str(result)
+                self.trace.add(
+                    "b_parallel_tools",
+                    input_text=peer_fragment,
+                    output_text=b_trace.render(),
+                    provenance="lobe_b_tool_trace",
+                )
                 return state.b_result
             except Exception as exc:
                 state.b_error = f"{type(exc).__name__}: {exc}"
@@ -307,6 +319,21 @@ def make_proxy_tools(store: JsonlMemoryStore, trace: ProxyToolTrace | None = Non
     ]
 
 
+def make_parallel_execution_tools(
+    store: JsonlMemoryStore,
+    *,
+    trace: ProxyToolTrace,
+):
+    """Execution/tool plane shared by A and B worker lanes.
+
+    Add future task-capability tools here so both halves receive the same
+    capabilities. Orchestration-only split_channel is added only to A.
+    """
+    return [
+        ProxyMemorySearchTool(store=store, trace=trace),
+    ]
+
+
 def make_self_split_tools(
     store: JsonlMemoryStore,
     *,
@@ -316,10 +343,11 @@ def make_self_split_tools(
     run_state: SelfSplitRunState,
 ):
     return [
-        ProxyMemorySearchTool(store=store, trace=trace),
+        *make_parallel_execution_tools(store, trace=trace),
         SplitChannelTool(
             original_task=original_task,
             memory_slice=memory_slice,
+            store=store,
             trace=trace,
             run_state=run_state,
         ),
