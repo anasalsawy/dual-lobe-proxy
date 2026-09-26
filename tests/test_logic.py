@@ -4,7 +4,7 @@ import pytest
 
 import dual_lobe_crewai.engines as engines_module
 from dual_lobe_crewai.engines import SplitEngine, RunResult
-from dual_lobe_crewai.group_coordination import AgentIdentity, FloorMode, GroupCoordinator, GroupMessage
+from dual_lobe_crewai.group_coordination import AgentIdentity, FloorMode, GroupCoordinator, GroupDualLobeRuntime, GroupMessage
 from dual_lobe_crewai.json_utils import extract_json_object, parse_model
 from dual_lobe_crewai.memory import JsonlMemoryStore
 from dual_lobe_crewai.models import FinalizedTurn, SplitFragment, SplitPlan, SplitQuality, TurnReview, Verdict
@@ -424,3 +424,98 @@ def test_group_alias_collision_is_rejected():
             AgentIdentity("one", "Alpha", aliases=("coder",)),
             AgentIdentity("two", "Beta", aliases=("coder",)),
         ])
+
+
+@pytest.mark.asyncio
+async def test_group_live_runtime_invokes_only_addressed_agent():
+    calls = []
+
+    class FakeResult:
+        def __init__(self, answer):
+            self.answer = answer
+
+    class FakeEngine:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+
+        async def run(self, task):
+            calls.append((self.agent_id, task))
+            return FakeResult(f"{self.agent_id} reply")
+
+    runtime = GroupDualLobeRuntime(
+        [
+            AgentIdentity("sarah", "Sarah"),
+            AgentIdentity("david", "David"),
+            AgentIdentity("maya", "Maya"),
+        ],
+        engine_factory=lambda identity: FakeEngine(identity.agent_id),
+    )
+
+    result = await runtime.process_message(GroupMessage(text="Sarah, check the logs"))
+
+    assert [agent_id for agent_id, _ in calls] == ["sarah"]
+    assert result.published == {"sarah": "sarah reply"}
+    assert set(result.suppressed) == {"david", "maya"}
+
+
+@pytest.mark.asyncio
+async def test_group_live_runtime_keeps_observer_awareness_for_next_real_turn():
+    calls = []
+
+    class FakeResult:
+        def __init__(self, answer):
+            self.answer = answer
+
+    class FakeEngine:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+
+        async def run(self, task):
+            calls.append((self.agent_id, task))
+            return FakeResult("ok")
+
+    runtime = GroupDualLobeRuntime(
+        [AgentIdentity("sarah", "Sarah"), AgentIdentity("david", "David")],
+        engine_factory=lambda identity: FakeEngine(identity.agent_id),
+    )
+
+    await runtime.process_message(GroupMessage(text="Sarah, production is PostgreSQL 17"))
+    assert [x[0] for x in calls] == ["sarah"]
+
+    await runtime.process_message(GroupMessage(text="David, adjust your migration plan"))
+    david_tasks = [task for agent_id, task in calls if agent_id == "david"]
+    assert len(david_tasks) == 1
+    assert "PostgreSQL 17" in david_tasks[0]
+    assert "SELF agent_id=david" in david_tasks[0]
+    assert "Sarah (agent_id=sarah)" in david_tasks[0]
+
+
+@pytest.mark.asyncio
+async def test_group_live_runtime_multiple_targets_run_concurrently_and_identity_isolated():
+    seen = {}
+
+    class FakeResult:
+        def __init__(self, answer):
+            self.answer = answer
+
+    class FakeEngine:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+
+        async def run(self, task):
+            seen[self.agent_id] = task
+            return FakeResult(self.agent_id)
+
+    runtime = GroupDualLobeRuntime(
+        [AgentIdentity("sarah", "Sarah"), AgentIdentity("david", "David"), AgentIdentity("maya", "Maya")],
+        engine_factory=lambda identity: FakeEngine(identity.agent_id),
+    )
+
+    result = await runtime.process_message(GroupMessage(text="Sarah and David, compare findings"))
+
+    assert set(result.published) == {"sarah", "david"}
+    assert result.suppressed == ("maya",)
+    assert "SELF agent_id=sarah" in seen["sarah"]
+    assert "OTHER AGENTS: David (agent_id=david), Maya (agent_id=maya)" in seen["sarah"]
+    assert "SELF agent_id=david" in seen["david"]
+    assert "OTHER AGENTS: Sarah (agent_id=sarah), Maya (agent_id=maya)" in seen["david"]
