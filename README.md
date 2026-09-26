@@ -50,6 +50,24 @@ If no useful split exists, A stays single-lane.
 
 The objective is **minimum wall-clock completion time without loss of answer quality**, not maximum split frequency.
 
+## Verifier hardening
+
+B's finalizer does **not** use a watered-down "verify this" instruction. The active runtime injects one shared `VERIFICATION_PROTOCOL` into every B verification path (Gated, Non-Split, Self-Split normal, and Self-Split finalization).
+
+That protocol preserves the original anti-deception rules and adds deterministic guards:
+- check unsupported factual claims, fabricated tool/action/file claims, contradictions, silent task drift, and unjustified certainty;
+- treat the exact memory snapshot and execution/provenance trace as evidence;
+- never treat A-half, B-half, delegated B text, or B's own prior worker output as independent corroboration;
+- require proof for every material action/artifact claim, including actual artifact content or direct retrieval evidence when available;
+- never call GREEN "verified truth" — GREEN only means no deception detected from available evidence;
+- any unresolved `missing`, `unverified`, or `proof_requests` automatically prevents GREEN at runtime;
+- malformed/empty verifier output fails closed to YELLOW;
+- blank rationales and blank finalized answers fail schema validation;
+- runtime split facts override inconsistent model grading (for example, a model cannot say no split occurred when the runtime records one);
+- full tool trace evidence is preserved by default instead of silently truncating it before verification.
+
+The B finalizer first merges/repairs the two halves, then verifies the exact candidate it will emit. If verification exposes a repairable deficiency, B repairs it and re-checks before emitting the canonical answer.
+
 ## Split feedback loop
 
 Every successful Self-Split turn reconverges at B. In one final call B:
