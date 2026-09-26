@@ -9,7 +9,7 @@ from dual_lobe_crewai.json_utils import extract_json_object, parse_model
 from dual_lobe_crewai.memory import JsonlMemoryStore
 from dual_lobe_crewai.models import FinalizedTurn, SplitFragment, SplitPlan, SplitQuality, TurnReview, Verdict
 from dual_lobe_crewai.prompts import VERIFICATION_PROTOCOL
-from dual_lobe_crewai.tools import ProxyRunState, ProxyToolTrace, SelfSplitRunState
+from dual_lobe_crewai.tools import ProxyToolTrace, SelfSplitRunState
 
 
 def test_empty_verdict_fails_closed_to_yellow():
@@ -78,13 +78,6 @@ def test_split_experience_is_separate_from_ordinary_auto_slice(tmp_path):
     assert "SPLIT_EXPERIENCE" not in ordinary
     assert "score" in split
 
-
-def test_legacy_non_split_caps_are_run_scoped():
-    state = ProxyRunState()
-    assert state.claim("delegate") is True
-    assert state.claim("delegate") is False
-    assert state.claim("consult") is True
-    assert state.claim("consult") is False
 
 
 def test_self_split_channel_can_only_be_claimed_once():
