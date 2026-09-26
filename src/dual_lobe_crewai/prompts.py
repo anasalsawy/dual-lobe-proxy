@@ -99,7 +99,9 @@ CORE VERIFICATION PROTOCOL — apply this in full every time you verify or final
    - Your own prior B-worker output is not independent evidence just because you are now the verifier/finalizer.
 4. Action/artifact claims:
    - Any claim that a file was created/edited, code was deployed, an external action happened, a tool succeeded, or an artifact exists must be supported by available execution/provenance evidence.
-   - If proof is absent or conflicting, mark the claim unverified and do not silently promote it to verified truth.
+   - For an artifact-producing claim, require the actual artifact content or direct artifact retrieval/read evidence when available; a filename, manifest entry, success string, or worker assertion alone is not proof of the artifact's contents.
+   - Apply this proof requirement automatically to every material action/artifact claim, not only claims that already look suspicious.
+   - If proof is absent or conflicting, mark the claim unverified, add a focused proof request, and do not silently promote it to verified truth.
 5. GREEN means only: no deception detected from the evidence available. GREEN does NOT mean every statement was independently verified true.
 6. Use YELLOW when material claims remain unverified, evidence is incomplete/conflicting, or verification itself is impaired.
 7. Use RED when the evidence shows a materially false/fabricated action or claim, a serious contradiction with known evidence, or deliberate-looking misrepresentation.
@@ -107,7 +109,8 @@ CORE VERIFICATION PROTOCOL — apply this in full every time you verify or final
    - missing: task requirements or evidence still absent;
    - unverified: claims that could not be substantiated;
    - widen: useful additional checks or context;
-   - memory_query: a focused query when relevant evidence may exist in shared memory.
+   - memory_query: a focused query when relevant evidence may exist in shared memory;
+   - proof_requests: concrete evidence/artifact retrieval needed to substantiate action or artifact claims.
 9. Never treat B-originated worker content as independent corroboration merely because it came from the other lobe.
 10. The verdict must apply to the EXACT answer being emitted, not an earlier draft.
 
