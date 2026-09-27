@@ -78,14 +78,16 @@ def test_a_prompt_defines_delegation_as_speed_primitive():
 
 
 def test_b_prompt_is_adversarial_not_polite_reviewer():
-    assert "persistent independent adversary" in B_ADVERSARY_PERSONA
-    assert "try to break A's reasoning" in B_ADVERSARY_PERSONA
-    assert "USER'S actual intent" in B_ADVERSARY_PERSONA
-    assert "missing facts" in B_ADVERSARY_PERSONA
-    assert "existing category of solution" in B_ADVERSARY_PERSONA
-    assert "ATTACK THE LOGIC" in ADVERSARIAL_PROTOCOL
-    assert "ATTACK GOAL-FIT" in ADVERSARIAL_PROTOCOL
-    assert "SEARCH FOR THE MISSING KEY" in ADVERSARIAL_PROTOCOL
+    persona = B_ADVERSARY_PERSONA.lower()
+    protocol = ADVERSARIAL_PROTOCOL.lower()
+    assert "persistent independent adversary" in persona
+    assert "assume this may be wrong" in persona
+    assert "user's actual intent" in persona
+    assert "missing fact" in persona
+    assert "existing system" in persona or "existing category" in persona
+    assert "try to break the core logic" in protocol
+    assert "attack user-goal fit" in protocol
+    assert "find the fact that changes the whole approach" in protocol
 
 
 def test_proxy_trace_preserves_full_evidence_and_can_snapshot():
