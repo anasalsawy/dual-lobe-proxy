@@ -19,7 +19,8 @@ from dual_lobe_crewai.prompts import (
     B_ADVERSARY_PERSONA,
     VERIFICATION_PROTOCOL,
 )
-from dual_lobe_crewai.tools import LiveBState, ProxyToolTrace
+from dual_lobe_crewai.live_b import LiveBMonitor
+from dual_lobe_crewai.tools import LobeConsultTool, LiveBState, ProxyToolEvent, ProxyToolTrace
 
 
 def test_compatibility_alias_points_to_current_engine():
@@ -113,6 +114,62 @@ def test_live_b_state_streams_intervention_once_to_a():
     assert "CRITICAL" in first
     assert "API supports writes" in first
     assert second == ""
+
+
+
+
+def test_nonblocking_consultation_posts_for_existing_live_b_loop():
+    state = LiveBState()
+    trace = ProxyToolTrace()
+    tool = LobeConsultTool(live_b_state=state, trace=trace)
+
+    out = tool._run(
+        blocker="same API failure twice",
+        what_i_tried="retried same endpoint",
+        what_i_need="different frame",
+        current_hypothesis="wrong endpoint shape",
+    )
+
+    assert "CONSULTATION_POSTED_NONBLOCKING" in out
+    pending = state.drain_consultations_for_b()
+    assert len(pending) == 1
+    assert pending[0]["blocker"] == "same API failure twice"
+    assert trace.snapshot_from(0)[0].provenance == "a_to_b_consultation"
+
+
+def test_deterministic_stuck_detector_fires_without_model_call(tmp_path):
+    state = LiveBState()
+    trace = ProxyToolTrace()
+    monitor = LiveBMonitor(
+        task="fix it",
+        b_memory=JsonlMemoryStore(str(tmp_path / "b.jsonl")),
+        trace=trace,
+        state=state,
+    )
+    repeated = ProxyToolEvent(
+        name="tool_x",
+        input_text="same",
+        output_text="ERROR: timeout contacting endpoint",
+        provenance="tool",
+    )
+
+    monitor._detect_stuck([repeated])
+    assert state.drain_for_a() == ""
+    monitor._detect_stuck([repeated])
+    intervention = state.drain_for_a()
+
+    assert "Repeated failure detected" in intervention
+    assert any(e.name == "b_stuck_detector" for e in trace.snapshot_from(0))
+
+
+def test_split_experience_memory_can_be_retrieved_as_strategy_prior(tmp_path):
+    store = JsonlMemoryStore(str(tmp_path / "a.jsonl"))
+    store.record_split_experience(
+        "Task: inspect API integration\nOutcome verdict: GREEN\n"
+        "Strategy: inspect schema before retrying endpoint"
+    )
+    got = store.split_experience_slice("API endpoint integration")
+    assert "inspect schema before retrying endpoint" in got
 
 
 def test_b_has_independent_default_memory(tmp_path):
