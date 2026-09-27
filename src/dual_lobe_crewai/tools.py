@@ -68,8 +68,11 @@ class LiveBState:
 
     interventions: list[LiveBIntervention] = field(default_factory=list)
     state_notes: list[str] = field(default_factory=list)
+    consultation_requests: list[dict[str, str | int]] = field(default_factory=list)
     _next_seq: int = 1
+    _next_consult_seq: int = 1
     _a_cursor: int = 0
+    _b_consult_cursor: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def add_intervention(self, message: str, *, severity: str = "warning") -> None:
@@ -93,6 +96,40 @@ class LiveBState:
                 self.state_notes.append(note)
                 if len(self.state_notes) > 30:
                     del self.state_notes[:-30]
+
+    def post_consultation(
+        self,
+        *,
+        blocker: str,
+        what_i_tried: str = "",
+        what_i_need: str = "",
+        current_hypothesis: str = "",
+    ) -> int:
+        """Post a non-blocking A->B consultation for B's existing live loop."""
+        with self.lock:
+            seq = self._next_consult_seq
+            self._next_consult_seq += 1
+            self.consultation_requests.append(
+                {
+                    "seq": seq,
+                    "blocker": (blocker or "").strip(),
+                    "what_i_tried": (what_i_tried or "").strip(),
+                    "what_i_need": (what_i_need or "").strip(),
+                    "current_hypothesis": (current_hypothesis or "").strip(),
+                }
+            )
+            return seq
+
+    def drain_consultations_for_b(self) -> list[dict[str, str | int]]:
+        with self.lock:
+            fresh = [
+                dict(x)
+                for x in self.consultation_requests
+                if int(x.get("seq", 0)) > self._b_consult_cursor
+            ]
+            if fresh:
+                self._b_consult_cursor = max(int(x["seq"]) for x in fresh)
+        return fresh
 
     def drain_for_a(self) -> str:
         with self.lock:
@@ -368,6 +405,57 @@ class DelegateStatusTool(BaseTool):
         return result
 
 
+class LobeConsultInput(BaseModel):
+    blocker: str = Field(..., min_length=1, description="The exact blocker, uncertainty, or decision A wants B to attack.")
+    what_i_tried: str = Field("", description="Relevant attempts already made; keep concise.")
+    what_i_need: str = Field("", description="The kind of second-lobe input needed: alternate frame, missing fact, failure mode, etc.")
+    current_hypothesis: str = Field("", description="A's current working hypothesis, if any.")
+
+
+class LobeConsultTool(BaseTool):
+    name: str = "consult_other_lobe"
+    description: str = (
+        "Post a NON-BLOCKING consultation to the already-running Lobe B. "
+        "Use when genuinely stuck, repeating a failed approach, uncertain about framing, or before an irreversible choice. "
+        "This tool returns immediately; continue useful work and read B's response later via b_live_check or another tool result."
+    )
+    args_schema: Type[BaseModel] = LobeConsultInput
+    live_b_state: LiveBState
+    trace: ProxyToolTrace
+
+    def _run(
+        self,
+        blocker: str,
+        what_i_tried: str = "",
+        what_i_need: str = "",
+        current_hypothesis: str = "",
+    ) -> str:
+        seq = self.live_b_state.post_consultation(
+            blocker=blocker,
+            what_i_tried=what_i_tried,
+            what_i_need=what_i_need,
+            current_hypothesis=current_hypothesis,
+        )
+        packet = (
+            f"consultation_id={seq}\n"
+            f"blocker={blocker}\n"
+            f"what_i_tried={what_i_tried}\n"
+            f"what_i_need={what_i_need}\n"
+            f"current_hypothesis={current_hypothesis}"
+        )
+        result = (
+            f"CONSULTATION_POSTED_NONBLOCKING: {seq}. "
+            "Do not wait. Continue useful work; B will answer through the live intervention channel."
+        )
+        self.trace.add(
+            self.name,
+            input_text=packet,
+            output_text=result,
+            provenance="a_to_b_consultation",
+        )
+        return result
+
+
 class LiveBCheckInput(BaseModel):
     pass
 
@@ -416,7 +504,14 @@ def make_a_tools(
         ),
         DelegateCollectTool(trace=trace, run_state=run_state, live_b_state=live_b_state),
         DelegateStatusTool(run_state=run_state, live_b_state=live_b_state),
-        *([LiveBCheckTool(live_b_state=live_b_state)] if live_b_state is not None else []),
+        *(
+            [
+                LobeConsultTool(live_b_state=live_b_state, trace=trace),
+                LiveBCheckTool(live_b_state=live_b_state),
+            ]
+            if live_b_state is not None
+            else []
+        ),
     ]
 
 
