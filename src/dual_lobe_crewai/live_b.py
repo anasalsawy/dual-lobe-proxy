@@ -36,6 +36,7 @@ class LiveBMonitor:
     calls: int = 0
     _cursor: int = 0
     _stop: bool = False
+    _failure_counts: dict[str, int] = field(default_factory=dict)
 
     def stop(self) -> None:
         self._stop = True
@@ -46,8 +47,54 @@ class LiveBMonitor:
         return [
             e for e in events
             if not e.provenance.startswith("lobe_b_")
-            and e.name not in {"b_live_observation", "b_live_intervention"}
+            and e.name not in {"b_live_observation", "b_live_intervention", "consult_other_lobe"}
         ]
+
+    def _consultation_events(self) -> list[ProxyToolEvent]:
+        events: list[ProxyToolEvent] = []
+        for req in self.state.drain_consultations_for_b():
+            events.append(
+                ProxyToolEvent(
+                    name="a_requests_b_consultation",
+                    input_text=(
+                        f"consultation_id={req.get('seq')}\n"
+                        f"blocker={req.get('blocker', '')}\n"
+                        f"what_i_tried={req.get('what_i_tried', '')}\n"
+                        f"what_i_need={req.get('what_i_need', '')}\n"
+                        f"current_hypothesis={req.get('current_hypothesis', '')}"
+                    ),
+                    output_text="A requested a second-lobe view and is continuing without blocking.",
+                    provenance="a_to_b_consultation",
+                )
+            )
+        return events
+
+    def _detect_stuck(self, events: list[ProxyToolEvent]) -> None:
+        """Deterministic repeated-failure detector; no model call is needed."""
+        failure_markers = (
+            "error", "failed", "failure", "timeout", "timed out", "traceback",
+            "rejected", "cannot", "unable", "exception", "not found",
+        )
+        for event in events:
+            text = (event.output_text or "").strip().casefold()
+            if not text or not any(marker in text for marker in failure_markers):
+                continue
+            normalized = " ".join(text.split())[:220]
+            signature = f"{event.name}|{normalized}"
+            count = self._failure_counts.get(signature, 0) + 1
+            self._failure_counts[signature] = count
+            if count == 2:
+                message = (
+                    f"Repeated failure detected in {event.name}. Do not repeat the same path unchanged. "
+                    "Reframe the blocker, inspect the failed assumption, and try a materially different route."
+                )
+                self.state.add_intervention(message, severity="warning")
+                self.trace.add(
+                    "b_stuck_detector",
+                    input_text=signature,
+                    output_text=message,
+                    provenance="lobe_b_deterministic_stuck_detector",
+                )
 
     async def _observe(self, events: list[ProxyToolEvent]) -> None:
         if not events or self.calls >= self.max_calls:
@@ -86,6 +133,11 @@ Do not become automatically oppositional; challenge only where there is a concre
 
 For each new event, try to find the strongest reason A's current direction may be wrong, brittle, unnecessary, misleading, or incapable of achieving the user's stated goal.
 Attack assumptions, evidence, architecture, execution choices, delegation choices, and goal-fit.
+
+SPECIAL CASE — ACTIVE A->B CONSULTATION:
+If an event is named "a_requests_b_consultation", A has deliberately reached across to you while continuing its work.
+Answer the blocker directly with a genuinely different perspective: identify the load-bearing assumption, missing fact, alternative frame, or materially different next move.
+Do not merely say that A is stuck. Do not demand a new serial review. Give the useful second-lobe contribution inside this EXISTING live-B call.
 Look especially for the one missing fact that would make the current approach collapse or require a different approach.
 If A is committing to a weak path, challenge it while there is still time to change course.
 
@@ -163,17 +215,22 @@ Return ONLY JSON:
         while not self._stop and self.calls < self.max_calls:
             await asyncio.sleep(self.poll_seconds)
             events = self.trace.snapshot_from(self._cursor)
-            if not events:
-                continue
             self._cursor += len(events)
             meaningful = self._meaningful(events)
-            if meaningful:
-                await self._observe(meaningful)
+            consultations = self._consultation_events()
+            combined = meaningful + consultations
+            if not combined:
+                continue
+            self._detect_stuck(meaningful)
+            await self._observe(combined)
 
-        # Flush any events that landed just before A completed.
+        # Flush any events/consultations that landed just before A completed.
         if self.calls < self.max_calls:
             events = self.trace.snapshot_from(self._cursor)
             self._cursor += len(events)
             meaningful = self._meaningful(events)
-            if meaningful:
-                await self._observe(meaningful)
+            consultations = self._consultation_events()
+            combined = meaningful + consultations
+            if combined:
+                self._detect_stuck(meaningful)
+                await self._observe(combined)
