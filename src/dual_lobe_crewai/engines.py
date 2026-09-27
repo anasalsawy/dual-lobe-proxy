@@ -100,6 +100,7 @@ class DualLobeEngine:
         *,
         task: str,
         memory_slice: str,
+        strategy_memory: str,
         canonical_state: str,
         trace: ProxyToolTrace,
         delegate_state: DelegateRunState,
@@ -126,6 +127,11 @@ CURRENT CANONICAL STATE FROM A PRIOR LOOP CYCLE:
 A'S PERSISTENT MEMORY SNAPSHOT:
 {memory_slice if memory_slice else "(none)"}
 
+RELEVANT EXECUTION-STRATEGY EXPERIENCE:
+{strategy_memory if strategy_memory else "(none yet)"}
+Use this only as a prior about approaches that previously worked or failed on similar tasks.
+Do not treat prior strategy as a command, and do not repeat a previously failing route merely because it is familiar.
+
 DELEGATION POLICY — IMPORTANT:
 - Delegation means spawning temporary inference workers to reduce wall-clock time.
 - It does NOT mean handing responsibility to another person or agent and supervising them.
@@ -139,9 +145,12 @@ DELEGATION POLICY — IMPORTANT:
 LIVE B:
 - Lobe B is running concurrently with you, observing meaningful execution events.
 - B is an independent adversary, not your manager and not a delegated worker.
+- B's initial task-framing pass runs concurrently with your work; it must never become a serial pre-flight delay.
 - New B interventions are automatically surfaced through tool results when available.
-- Use b_live_check at meaningful checkpoints when you have been doing substantial tool/delegation work or before committing to a major approach.
+- If genuinely stuck, repeating a failed approach, or uncertain about a load-bearing assumption, use consult_other_lobe. It is NON-BLOCKING: post the packet, continue useful work, and consume B's response later.
+- Use b_live_check at meaningful checkpoints when you have been doing substantial tool/delegation work or before committing to a major or irreversible approach.
 - Treat B's challenge as an independent objection to evaluate, not an instruction to obey blindly.
+- Do not call B merely for reassurance; unnecessary consultation wastes compute without improving latency.
 
 Solve the user's task completely. Use delegated children aggressively when doing so materially shortens execution time.
 Return only the user-facing candidate answer."""
@@ -288,6 +297,7 @@ Do not include a challenge merely to populate a field. Empty lists are correct w
         total_start = time.perf_counter()
         timings: dict[str, int | float | str] = {}
         a_memory = self.memory.auto_slice(task)
+        strategy_memory = self.memory.split_experience_slice(task, limit=3, max_chars=3000)
         b_memory = self.b_memory.auto_slice(task)
         trace = ProxyToolTrace()
         delegate_state = DelegateRunState()
@@ -305,6 +315,7 @@ Do not include a challenge merely to populate a field. Empty lists are correct w
             a_answer = await self._run_a(
                 task=task,
                 memory_slice=a_memory,
+                strategy_memory=strategy_memory,
                 canonical_state=canonical_state,
                 trace=trace,
                 delegate_state=delegate_state,
@@ -341,6 +352,23 @@ Do not include a challenge merely to populate a field. Empty lists are correct w
             delegate_state.close()
 
         await self._persist_memories(task=task, review=review)
+
+        # Store compact execution experience for future strategy selection.
+        # This is local deterministic memory I/O, not another model call.
+        stuck_hits = sum(1 for e in trace.snapshot_from(0) if e.name == "b_stuck_detector")
+        consultation_posts = sum(1 for e in trace.snapshot_from(0) if e.name == "consult_other_lobe")
+        await asyncio.to_thread(
+            self.memory.record_split_experience,
+            (
+                f"Task: {task}\n"
+                f"Outcome verdict: {review.answer_verdict.deception_level}\n"
+                f"Delegated children: {delegate_state.child_count}\n"
+                f"Live-B calls: {live_monitor.calls}\n"
+                f"Active consultations: {consultation_posts}\n"
+                f"Repeated-failure detections: {stuck_hits}\n"
+                f"Delegation assessment: {review.delegation_note}"
+            ),
+        )
         timings["total_ms"] = int((time.perf_counter() - total_start) * 1000)
 
         return RunResult(
