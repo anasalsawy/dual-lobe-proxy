@@ -2,11 +2,56 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 
 from crewai import Crew, Process, Task
 
 from .llm_factory import make_llm, resolve_role_specs
 from .provider_control import RATE_CONTROLLER
+
+
+_RR_LOCK = threading.Lock()
+_RR_POOL: list = []
+_RR_NEXT = 0
+
+
+def _rr_reset() -> None:
+    global _RR_NEXT
+    with _RR_LOCK:
+        _RR_POOL.clear()
+        _RR_NEXT = 0
+
+
+def _spec_id(spec):
+    # Same model at the same host under different API keys counts as a separate slot.
+    if hasattr(spec, "model"):
+        return (spec.model, spec.base_url, spec.api_key)
+    return spec.label
+
+
+def _round_robin_specs(role_key: str, specs):
+    """Rotate one shared provider cycle across all calls (1,2,3,1,2,3...), regardless of role.
+
+    A role that lacks the next provider in the cycle starts on the next one it has.
+    """
+    global _RR_NEXT
+    specs = list(specs)
+    if len(specs) <= 1:
+        return specs
+    ids = [_spec_id(s) for s in specs]
+    with _RR_LOCK:
+        for sid in ids:
+            if sid not in _RR_POOL:
+                _RR_POOL.append(sid)
+        n = len(_RR_POOL)
+        start = 0
+        for step in range(n):
+            target = _RR_POOL[(_RR_NEXT + step) % n]
+            if target in ids:
+                start = ids.index(target)
+                _RR_NEXT = (_RR_NEXT + step + 1) % n
+                break
+    return specs[start:] + specs[:start]
 
 
 def _infer_role_key(agent) -> str:
@@ -35,36 +80,30 @@ async def _single_call(agent, description: str, expected_output: str) -> str:
 
 async def run_one(agent, description: str, expected_output: str, *, role_key: str | None = None) -> str:
     role_key = (role_key or _infer_role_key(agent)).upper()
-    specs = resolve_role_specs(role_key)
-    max_rounds = max(1, int(os.getenv("DUAL_LOBE_RETRY_ROUNDS", "3")))
-    failover = os.getenv("DUAL_LOBE_FAILOVER_ON_RATE_LIMIT", "true").lower() in {"1", "true", "yes", "on"}
-    last_exc = None
+    specs = _round_robin_specs(role_key, resolve_role_specs(role_key))
+    if not specs:
+        raise RuntimeError("No LLM providers configured")
 
-    for round_no in range(1, max_rounds + 1):
-        candidates = specs if (round_no == 1 or failover) else specs[:1]
-        for idx, original_spec in enumerate(candidates):
+    # Each call starts on the next provider in the shared cycle. If that provider
+    # errors (including while being set up), try the next one in the same order.
+    last_exc = None
+    for original_spec in specs:
+        spec = original_spec
+        try:
             input_est = RATE_CONTROLLER.estimate_input_tokens(description + "\n" + expected_output)
             spec = RATE_CONTROLLER.fit_output_budget(original_spec, input_est)
             estimated_total = input_est + spec.max_tokens
             await RATE_CONTROLLER.acquire(spec, estimated_total)
             _set_llm(agent, make_llm(role_key, spec=spec))
-            try:
-                out = await _single_call(agent, description, expected_output)
-                if out is None or not str(out).strip():
-                    raise ValueError("Invalid response from LLM call - None or empty.")
-                return str(out)
-            except Exception as exc:
-                last_exc = exc
-                kind = RATE_CONTROLLER.classify_error(exc)
-                RATE_CONTROLLER.learn_from_error(spec, exc)
-                if idx + 1 < len(candidates) and kind in {"rate_limit", "transient", "auth"}:
-                    continue
-                if kind not in {"rate_limit", "transient"}:
-                    break
-
-        if round_no < max_rounds and last_exc is not None:
-            await asyncio.sleep(RATE_CONTROLLER.retry_delay(specs[0], round_no))
+            out = await _single_call(agent, description, expected_output)
+            if out is None or not str(out).strip():
+                raise ValueError("Invalid response from LLM call - None or empty.")
+            return str(out)
+        except Exception as exc:
+            RATE_CONTROLLER.learn_from_error(spec, exc)
+            last_exc = exc
+            continue
 
     if last_exc is not None:
         raise last_exc
-    raise RuntimeError("No LLM candidates available")
+    raise RuntimeError("No LLM providers available")
