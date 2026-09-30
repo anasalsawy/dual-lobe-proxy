@@ -21,6 +21,7 @@ from ..provider import calltrace
 from ..proxy.tools import (CONSULT, DELEGATE, MEMORY_SEARCH, execute_proxy_call,
                            is_proxy_tool, proxy_tool_schemas)
 from ..state.memory import inject_shared_memory
+from .routing import routing_requested
 
 LOG = logging.getLogger("dual_lobe.bidirectional")
 
@@ -94,7 +95,11 @@ def select_speaker(messages: list[dict[str, Any]]) -> str:
             return resolved[0]
 
     text = latest_user_text(messages).lstrip()
-    match = re.match(r"(?i)^(?:(?:hey|hi|hello|yo)\s+(?:lobe\s+)?([ab])\b|(?:lobe\s+)?([ab])\s*[,!:])", text)
+    match = re.match(
+        r"(?i)^(?:(?:hey|hi|hello|yo)\s+(?:lobe\s+)?([ab])\b|"
+        r"(?:lobe\s+)?([ab])\s*(?:[,!:]|\b(?:ask|please|what|help|answer|respond)\b))",
+        text,
+    )
     return next((group.upper() for group in match.groups() if group), "A") if match else "A"
 
 
@@ -236,13 +241,14 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
     consultation_note = ""
     if explicit_peer:
         advice = await _consult(speaker, latest, dialogue, payload)
-        consultation_note = f"Lobe {explicit_peer}'s view: {advice}"
+        consultation_note = f"I asked Lobe {explicit_peer}, and it said: {advice}"
         dialogue.append({"role": "user", "name": f"lobe_{explicit_peer.lower()}_private_input",
                          "content": consultation_note})
         consulted = True
 
     can_route = not consulted and not tool_continuation and payload.get("tool_choice") in (None, "auto")
-    exposed_tools = tools + proxy_tool_schemas() + ([_CONSULT_TOOL, _HANDOFF_TOOL] if can_route else [])
+    exposed_tools = tools + (proxy_tool_schemas() if not tool_continuation else []) \
+        + ([_CONSULT_TOOL, _HANDOFF_TOOL] if can_route else [])
     message = await _call(_ROLES[speaker], dialogue, payload, tools=exposed_tools or None,
                           tool_choice="auto" if can_route else payload.get("tool_choice"))
 
@@ -295,7 +301,8 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
         except (json.JSONDecodeError, AttributeError, TypeError):
             pass
         advice = await _consult(speaker, question, dialogue, payload)
-        consultation_note = f"Lobe {'B' if speaker == 'A' else 'A'}'s view: {advice}"
+        peer = 'B' if speaker == 'A' else 'A'
+        consultation_note = f"I asked Lobe {peer}, and it said: {advice}"
         consult_id = str(consult_calls[0].get("id") or "consult")
         dialogue.extend([
             {"role": "assistant", "content": None, "tool_calls": consult_calls},
@@ -317,6 +324,10 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
     answer = _content_text(message.get("content")).strip()
     if not answer:
         raise ValueError(f"Lobe {speaker} returned neither an answer nor a client tool call")
+    if consultation_note:
+        # Keep the peer's actual contribution visible to the user, not merely
+        # hidden in the speaker's context where it could be paraphrased away.
+        answer += "\n\n" + consultation_note
 
     evidence = "\n".join(
         f"[{m.get('role')}] {_content_text(m.get('content'))[:1200]}"

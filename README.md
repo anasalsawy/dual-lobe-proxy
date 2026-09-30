@@ -56,9 +56,16 @@ security boundary. Read [the research and design](docs/RESEARCH_AND_DESIGN.md) a
 
 ## Bidirectional speaker variant
 
-Select `sawii/dl-bidirectional` to let either lobe own the user-facing turn. A is
-the default speaker; opening with `Hey B, ...` addresses B directly. An instruction
+In the default `gated` service mode, the bidirectional speaker flow is available
+on every public chat model. A is the default speaker; opening with `Hey B, ...`
+addresses B directly. An instruction
 such as `A, ask B what it thinks` makes B contribute privately before A answers.
+The dedicated `sawii/dl-bidirectional` alias opts into this flow on every turn;
+other aliases enter it only when the latest user message explicitly addresses a
+lobe or asks one lobe to consult the other. That opt-in check is local and adds
+no model call to ordinary turns. The `clinical` service mode retains its
+privacy-preserving planner and local B executor; it does not enter this general
+speaker path.
 The other lobe then verifies the exact final answer, and the response includes a
 `Dual-Lobe meter`. If the speaker calls a client tool, the proxy returns that tool
 call and resumes the same lobe when its result arrives; verification happens after
@@ -70,8 +77,8 @@ and delegation tools execute inline against the peer lobe. Every model call uses
 the configured provider hub, and `dual_lobe.calls` plus `dual_lobe.provider_hub`
 report call providers/models and non-secret slot state.
 
-This route is separate from `sawii/dl-gated` and is exposed in `/v1/models` after
-deployment. It supports buffered and SSE Chat Completions responses.
+The route is exposed in `/v1/models` as `sawii/dl-bidirectional` and supports
+buffered and SSE Chat Completions responses.
 
 ## What happens on a call
 

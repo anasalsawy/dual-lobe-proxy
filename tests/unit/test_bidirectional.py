@@ -16,6 +16,22 @@ def test_speaker_routing_honors_direct_address_and_defaults_to_a():
     assert handler.requested_consultee("B, ask A what we should do.", "B") == "A"
 
 
+@pytest.mark.parametrize("text, expected_speaker, routed", [
+    ("What is 2 + 2?", "A", False),
+    ("Hey A, what happens next?", "A", True),
+    ("Hey B, what do you think?", "B", True),
+    ("A, ask B what we should do.", "A", True),
+    ("B, ask A what we should do.", "B", True),
+    ("B ask A what we should do.", "B", True),
+    ("Ask B what he thinks.", "A", True),
+    ("Please ask A for an opinion.", "A", True),
+])
+def test_explicit_routing_is_local_and_default_turns_do_not_opt_in(text, expected_speaker, routed):
+    messages = [{"role": "user", "content": text}]
+    assert handler.select_speaker(messages) == expected_speaker
+    assert handler.routing_requested(messages) is routed
+
+
 def test_tool_continuation_resumes_the_lobe_that_requested_the_tool():
     messages = [
         {"role": "user", "content": "Hey B, check this."},
@@ -88,6 +104,7 @@ async def test_a_can_consult_b_privately_then_b_verifies(monkeypatch):
     })
     body = json.loads(response.body)
     assert "A's final answer." in body["choices"][0]["message"]["content"]
+    assert "I asked Lobe B, and it said: B's independent input." in body["choices"][0]["message"]["content"]
     assert body["dual_lobe"]["speaker"] == "A"
     assert body["dual_lobe"]["verifier"] == "B"
     assert body["dual_lobe"]["consulted"] is True
@@ -128,3 +145,84 @@ async def test_tool_call_from_b_is_returned_and_continuation_keeps_b_as_speaker(
     assert "B's researched answer." in second_body["choices"][0]["message"]["content"]
     assert second_body["dual_lobe"]["speaker"] == "B"
     assert second_body["dual_lobe"]["verifier"] == "A"
+
+
+@pytest.mark.parametrize("from_lobe, to_lobe", [("A", "B"), ("B", "A")])
+@pytest.mark.asyncio
+async def test_handoff_changes_user_facing_lobe_and_gives_new_speaker_tools(monkeypatch, from_lobe, to_lobe):
+    client_tool = {"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}
+    handoff = {"content": None, "tool_calls": [{"id": "handoff1", "type": "function",
+        "function": {"name": "handoff_to_other_lobe", "arguments": '{"context":"Please answer this."}'}}]}
+    verdict = {"content": '{"deception_level":"GREEN","rationale":"Independently checked."}'}
+    scripted = {"A": [], "B": []}
+    scripted[from_lobe].append(handoff)
+    scripted[to_lobe].append({"content": f"{to_lobe} took the turn."})
+    scripted[from_lobe].append(verdict)
+    registry = FakeRegistry(scripted["A"], scripted["B"])
+    monkeypatch.setattr(handler, "get_registry", lambda: registry)
+    response = await handler.bidirectional_response({
+        "model": "sawii/dl-gated", "tools": [client_tool],
+        "messages": [{"role": "user", "content": f"Hey {from_lobe}, please hand this to the other lobe."}],
+    })
+    body = json.loads(response.body)
+    assert body["dual_lobe"]["speaker"] == to_lobe
+    assert body["dual_lobe"]["verifier"] == from_lobe
+    assert f"{to_lobe} took the turn." in body["choices"][0]["message"]["content"]
+    new_speaker_request = registry.adapters[f"lobe-{to_lobe.lower()}"].requests[0]
+    assert any(tool["function"]["name"] == "lookup" for tool in new_speaker_request.tools)
+    verifier_request = registry.adapters[f"lobe-{from_lobe.lower()}"].requests[-1]
+    assert verifier_request.tool_choice == "none"
+
+
+@pytest.mark.asyncio
+async def test_a_consults_b_privately_and_b_consults_a_privately(monkeypatch):
+    for speaker, peer in (("A", "B"), ("B", "A")):
+        registry = FakeRegistry(
+            a_messages=[{"content": "A final."},
+                        {"content": '{"deception_level":"GREEN","rationale":"Checked."}'}],
+            b_messages=[{"content": "B final."},
+                        {"content": '{"deception_level":"GREEN","rationale":"Checked."}'}],
+        )
+        monkeypatch.setattr(handler, "get_registry", lambda registry=registry: registry)
+        response = await handler.bidirectional_response({
+            "model": "sawii/dl-gated",
+            "messages": [{"role": "user", "content": f"{speaker}, ask {peer} what it thinks."}],
+        })
+        body = json.loads(response.body)
+        assert body["dual_lobe"]["speaker"] == speaker
+        assert body["dual_lobe"]["verifier"] == peer
+        assert f"I asked Lobe {peer}, and it said: {peer} final." in body["choices"][0]["message"]["content"]
+        speaker_request = registry.adapters[f"lobe-{speaker.lower()}"].requests[0]
+        assert "I asked Lobe " + peer in speaker_request.messages[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_a_client_tool_continuation_exposes_client_tools_only(monkeypatch):
+    search = {"type": "function", "function": {"name": "search_web", "parameters": {"type": "object"}}}
+    registry = FakeRegistry(
+        a_messages=[
+            {"content": None, "tool_calls": [{"id": "call_a", "type": "function",
+                "function": {"name": "search_web", "arguments": "{}"}}]},
+            {"content": "A found an answer."},
+        ],
+        b_messages=[{"content": '{"deception_level":"GREEN","rationale":"Checked."}'}],
+    )
+    monkeypatch.setattr(handler, "get_registry", lambda: registry)
+    first = await handler.bidirectional_response({
+        "model": "sawii/dl-gated", "tools": [search],
+        "messages": [{"role": "user", "content": "Hey A, search for this."}],
+    })
+    first_body = json.loads(first.body)
+    call_id = first_body["choices"][0]["message"]["tool_calls"][0]["id"]
+    second = await handler.bidirectional_response({
+        "model": "sawii/dl-gated", "tools": [search],
+        "messages": [
+            {"role": "user", "content": "Hey A, search for this."},
+            first_body["choices"][0]["message"],
+            {"role": "tool", "tool_call_id": call_id, "content": "Found a source."},
+        ],
+    })
+    second_body = json.loads(second.body)
+    assert "A found an answer." in second_body["choices"][0]["message"]["content"]
+    continuation_tools = registry.adapters["lobe-a"].requests[1].tools
+    assert [x["function"]["name"] for x in continuation_tools] == ["search_web"]
