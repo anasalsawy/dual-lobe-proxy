@@ -38,6 +38,7 @@ def env_targets() -> dict[str, ProviderTarget]:
     moderator = ProviderTarget(alias="sawii/dl-dialogue2", **base_fields)
     worker = ProviderTarget(alias="sawii/dl-dialogue3", **base_fields)
     gated = ProviderTarget(alias="sawii/dl-gated", **base_fields)
+    bidirectional = ProviderTarget(alias="sawii/dl-bidirectional", **base_fields)
     dual_lobe = ProviderTarget(alias="sawii/dual-lobe", **base_fields)
     # Internal aliases for B-lobe shadow cycles and director mode.
     # Not exposed in /v1/models (filtered out by user_facing_models set).
@@ -77,6 +78,7 @@ def env_targets() -> dict[str, ProviderTarget]:
         "sawii/dl-dialogue2": moderator,
         "sawii/dl-dialogue3": worker,
         "sawii/dl-gated": gated,
+        "sawii/dl-bidirectional": bidirectional,
         "lobe-a": lobe_a,
         "lobe-b": lobe_b,
     }
@@ -105,6 +107,7 @@ async def load_db_targets(session: AsyncSession) -> dict[str, ProviderTarget]:
 _HUB_ROLES = {alias: "a" for alias in (
     "sawii/dual-lobe-old", "sawii/dual-lobe", "sawii/dialogue", "sawii/dl-dialogue",
     "sawii/dl-dialogue1", "sawii/dl-dialogue2", "sawii/dl-dialogue3", "sawii/dl-gated", "lobe-a")}
+_HUB_ROLES["sawii/dl-bidirectional"] = "a"
 _HUB_ROLES["lobe-b"] = "b"
 
 
@@ -146,6 +149,7 @@ class Registry:
             "sawii/dl-dialogue2",
             "sawii/dl-dialogue3",
             "sawii/dl-gated",
+            "sawii/dl-bidirectional",
         }
         result = [
             {

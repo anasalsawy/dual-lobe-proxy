@@ -54,6 +54,21 @@ statement. This is an advisory development implementation, not a verified produc
 security boundary. Read [the research and design](docs/RESEARCH_AND_DESIGN.md) and
 [the validation record](docs/VALIDATION.md).
 
+## Bidirectional speaker variant
+
+Select `sawii/dl-bidirectional` to let either lobe own the user-facing turn. A is
+the default speaker; opening with `Hey B, ...` addresses B directly. An instruction
+such as `A, ask B what it thinks` makes B contribute privately before A answers.
+The other lobe then verifies the exact final answer, and the response includes a
+`Dual-Lobe meter`. If the speaker calls a client tool, the proxy returns that tool
+call and resumes the same lobe when its result arrives; verification happens after
+the speaker finishes. Both lobes receive the request's client tool schemas when
+they speak. The verifier reviews the supplied conversation and tool results without
+calling client tools itself.
+
+This route is separate from `sawii/dl-gated` and is exposed in `/v1/models` after
+deployment. It supports buffered and SSE Chat Completions responses.
+
 ## What happens on a call
 
 | Step | Input | Operation | Output / checks |

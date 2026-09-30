@@ -778,6 +778,37 @@ async def chat_completions(
         return JSONResponse(data, status_code=200, headers=gate_headers,
                             background=gate_background)
 
+    if alias == "sawii/dl-bidirectional":
+        from ..bidirectional.handler import bidirectional_response
+        shared_text, shared_entries = None, 0
+        if memory_space:
+            try:
+                shared = await load_memory(principal.tenant_id, memory_space, messages)
+                shared_text, shared_entries = shared.text, len(shared.entry_ids)
+            except Exception:
+                LOG.warning("shared memory load failed run=%s (fail-open)", run_id)
+        result = await bidirectional_response(payload, run_id, principal.tenant_id, shared_text)
+        data = json.loads(result.body)
+        data["dual_lobe"] = {**(data.get("dual_lobe") or {}), "memory_space": memory_space or "off",
+                             "shared_entries": shared_entries}
+        background = _record_background(principal.tenant_id, memory_space, run_id, messages, data)
+        headers = _headers(dict(result.headers))
+        headers["X-Dual-Lobe-Memory-Space"] = memory_space or "off"
+        headers["X-Dual-Lobe-Shared-Entries"] = str(shared_entries)
+        if payload.get("stream", False):
+            async def _bidirectional_stream():
+                chunk = dict(data)
+                chunk["object"] = "chat.completion.chunk"
+                for choice in chunk.get("choices", []):
+                    choice["delta"] = choice.pop("message", {})
+                    choice["finish_reason"] = choice.get("finish_reason") or "stop"
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+            return StreamingResponse(_bidirectional_stream(), media_type="text/event-stream",
+                                     headers={**headers, "Cache-Control": "no-cache",
+                                               "X-Accel-Buffering": "no"}, background=background)
+        return JSONResponse(data, status_code=200, headers=headers, background=background)
+
     # Pre-emptive routing check: if routing is enabled for this alias, ask the
     # router LLM (lobe-b) whether this agent should respond BEFORE calling the
     # upstream model. If the rules say "don't respond", return a suppressed
