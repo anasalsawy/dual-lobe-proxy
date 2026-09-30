@@ -395,6 +395,12 @@ async def chat_completions(
         run_id = str(run.id)
         await session.commit()
 
+    # Per-service engine (model 1 "split", model 2 "clinical"); "gated" continues below.
+    if s.engine != "gated":
+        from ..engines.respond import engine_response
+
+        return await engine_response(s.engine, payload)
+
     # Dual-lobe mode: pre-final A/B collaboration. For streaming requests,
     # bridge the handler's event sink into the HTTP response so the client can
     # watch A/B turns as they complete rather than waiting for finalization.

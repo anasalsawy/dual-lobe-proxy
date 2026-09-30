@@ -57,7 +57,18 @@ def env_targets() -> dict[str, ProviderTarget]:
         kind=s.b_dialect,
         capabilities={"stream": False, "tools": False, "responses": False},
     )
+    # Clinical B (model 2): patient data goes only to this configured endpoint,
+    # never through the round-robin hub.
+    lobe_b_clinical = ProviderTarget(
+        alias="lobe-b-clinical",
+        base_url=s.clinical_b_base_url or s.resolved_b_base_url,
+        api_key=s.clinical_b_api_key if s.clinical_b_api_key is not None else s.resolved_b_api_key,
+        model=s.clinical_b_model or s.resolved_b_model,
+        kind=s.b_dialect,
+        capabilities={"stream": False, "tools": True, "responses": False},
+    )
     return {
+        "lobe-b-clinical": lobe_b_clinical,
         "sawii/dual-lobe-old": base,
         "sawii/dual-lobe": dual_lobe,
         "sawii/dialogue": dialogue,
