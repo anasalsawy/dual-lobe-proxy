@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -112,6 +113,31 @@ def _mark(identity: tuple, ok: bool, cool: float = 0.0, reason: str = "") -> Non
     health["reason"] = reason
 
 
+_DAILY = re.compile(r"per[-_ ]?day|daily|PerDay|free-models-per-day", re.I)
+_RESET = re.compile(r'X-RateLimit-Reset"?\s*:\s*"?(\d{10,13})', re.I)
+
+
+def _body(response: httpx.Response) -> str:
+    try:
+        return response.text
+    except Exception:  # noqa: BLE001  (streamed body not read)
+        return ""
+
+
+def _daily_cool(response: httpx.Response) -> float | None:
+    """Seconds until a daily quota resets, if this 429 is a daily-quota 429."""
+    body = _body(response)
+    if not _DAILY.search(body):
+        return None
+    match = _RESET.search(body) or _RESET.search(json.dumps(dict(response.headers)))
+    if match:
+        stamp = int(match.group(1))
+        stamp = stamp / 1000 if stamp > 1e12 else stamp
+        if stamp > time.time():
+            return stamp - time.time()
+    return 86400 - (time.time() % 86400)  # next UTC midnight
+
+
 def _classify(exc: BaseException) -> tuple[float, str]:
     """Return (cool-down seconds, reason). 0 cool-down = request-level, slot stays healthy."""
     if isinstance(exc, ratelimit.UpstreamRateLimited):
@@ -119,6 +145,9 @@ def _classify(exc: BaseException) -> tuple[float, str]:
     if isinstance(exc, httpx.HTTPStatusError):
         code = exc.response.status_code
         if code == 429:
+            daily = _daily_cool(exc.response)
+            if daily is not None:
+                return daily, "429 daily quota used up"
             return 0.0, "429"  # the slot's gate already parked itself for Retry-After
         if code in (401, 403, 404):
             return COOL_AUTH, f"http {code}"

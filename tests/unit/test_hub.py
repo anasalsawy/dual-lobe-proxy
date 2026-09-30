@@ -136,3 +136,34 @@ def test_registry_wraps_env_aliases_only_when_slots_configured(monkeypatch):
     r.register(_target("one.example"))
     assert isinstance(r.adapter("lobe-a"), hub.HubAdapter)
     hub.reset_for_tests()
+
+
+async def test_daily_quota_429_sidelines_slot_until_reset(served, monkeypatch):
+    calls, _ = served
+    import time as _time
+
+    reset_ms = int((_time.time() + 3600) * 1000)
+    orig = adapters._client._transport.handler
+
+    def handle(request):
+        if request.url.host == "two.example":
+            calls.append("two.example")
+            return httpx.Response(429, json={"error": {"message": "Rate limit exceeded: free-models-per-day",
+                                                       "metadata": {"headers": {"X-RateLimit-Reset": str(reset_ms)}}}})
+        return orig(request)
+
+    adapters._client._transport.handler = handle
+    a = hub.HubAdapter(_target("one.example"), "a", hub.configured_slots())
+    for _ in range(8):
+        await a.buffered(_req())
+    assert calls.count("two.example") == 1
+    row = next(r for r in hub.snapshot() if r["label"] == "s2")
+    assert 3500 < row["cooling_seconds"] <= 3600
+    assert row["last_error"] == "429 daily quota used up"
+
+
+def test_b_sees_full_long_answer():
+    from dual_lobe.gated.handler import _for_b
+
+    text = "step " * 2000  # 10k chars, past the old 4000 cut
+    assert _for_b(text) == text

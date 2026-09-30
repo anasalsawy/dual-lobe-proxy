@@ -111,6 +111,16 @@ def _extract_tool_evidence(messages: list[dict]) -> str:
     return "\n".join(lines) if lines else "  (no tool calls or results in conversation)"
 
 
+def _for_b(text: Any) -> str:
+    """A's full output for B to verify; if it must be cut, B is told so, so a cut is not read as A truncating."""
+    text = str(text or "")
+    limit = get_settings().max_shadow_input_chars
+    if len(text) <= limit:
+        return text
+    return (text[:limit] + f"\n[... proxy cut A's output here for length; A's full output is {len(text)} "
+            "characters and continues past this point. Do not treat this cut as truncation by A.]")
+
+
 def _messages_to_text(messages: list[dict]) -> str:
     """Flatten messages to a text summary for B's prompt."""
     lines = []
@@ -599,7 +609,7 @@ async def gated_response(
     downstream_prompt = (
         f"CONVERSATION MESSAGES:\n{_messages_to_text(messages)}\n\n"
         f"TOOL EVIDENCE IN CONVERSATION:\n{_extract_tool_evidence(messages)}\n\n"
-        f"A's OUTPUT TO VERIFY:\n{str(a_content or '')[:4000]}\n\n"
+        f"A's OUTPUT TO VERIFY:\n{_for_b(a_content)}\n\n"
     )
     a_tool_calls = a_message.get("tool_calls") or []
     if a_tool_calls:
@@ -714,7 +724,7 @@ async def gated_response(
                 recheck_prompt = (
                     f"CONVERSATION MESSAGES:\n{_messages_to_text(messages)}\n\n"
                     f"TOOL EVIDENCE:\n{_extract_tool_evidence(messages)}\n\n"
-                    f"A's REVISED OUTPUT:\n{a_content2[:4000]}\n\n"
+                    f"A's REVISED OUTPUT:\n{_for_b(a_content2)}\n\n"
                 )
                 b_recheck = await asyncio.wait_for(
                     _call_b_json(b_system, recheck_prompt, b_contract),
