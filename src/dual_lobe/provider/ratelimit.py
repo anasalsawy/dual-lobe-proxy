@@ -291,6 +291,24 @@ class RateGate:
                 await asyncio.sleep(wait)
             raise UpstreamRateLimited(self.provider, 1.0, detail="pacing loop did not converge")
 
+    def estimate_wait(self, tokens: int) -> float:
+        """Seconds ``acquire`` would wait right now; read-only, never blocks."""
+        from ..core.settings import get_settings
+
+        if not get_settings().upstream_rate_enabled:
+            return 0.0
+        now = time.monotonic()
+        self._prune(now)
+        self._roll_day()
+        wait = max(0.0, self._pause_until - now)
+        if self._rpm and len(self._reqs) + 1 > self._rpm:
+            wait = max(wait, self._reqs[0] + WINDOW - now)
+        if self._tpm and self._tok_total + max(1, int(tokens)) > self._tpm and self._toks:
+            wait = max(wait, self._toks[0][0] + WINDOW - now)
+        if self._rpd and self._day_used + 1 > self._rpd:
+            wait = max(wait, self._day_end())
+        return wait
+
     def _why(self, wait: float) -> str:
         now = time.monotonic()
         if self._pause_until > now:

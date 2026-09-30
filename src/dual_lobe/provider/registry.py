@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.models import ProviderRegistry
+from . import hub
 from .adapters import ProviderTarget, make_adapter
 
 
@@ -88,6 +89,14 @@ async def load_db_targets(session: AsyncSession) -> dict[str, ProviderTarget]:
     return out
 
 
+# Env-configured aliases go through the round-robin hub when hub slots exist;
+# lobe-b rotates over B's slots, every other env alias is lobe A.
+_HUB_ROLES = {alias: "a" for alias in (
+    "sawii/dual-lobe-old", "sawii/dual-lobe", "sawii/dialogue", "sawii/dl-dialogue",
+    "sawii/dl-dialogue1", "sawii/dl-dialogue2", "sawii/dl-dialogue3", "sawii/dl-gated", "lobe-a")}
+_HUB_ROLES["lobe-b"] = "b"
+
+
 class Registry:
     def __init__(self) -> None:
         self._targets: dict[str, ProviderTarget] = {}
@@ -95,7 +104,12 @@ class Registry:
 
     def register(self, target: ProviderTarget) -> None:
         self._targets[target.alias] = target
-        self._adapters[target.alias] = make_adapter(target)
+        role = _HUB_ROLES.get(target.alias) if target.api_key else None
+        slots = hub.configured_slots() if role else []
+        if role and slots and target.kind == "chat_completions":
+            self._adapters[target.alias] = hub.HubAdapter(target, role, slots)
+        else:
+            self._adapters[target.alias] = make_adapter(target)
 
     def refresh(self, targets: dict[str, ProviderTarget]) -> None:
         self._targets = {}

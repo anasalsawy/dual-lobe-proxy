@@ -52,9 +52,9 @@ async def upstream_rates(
     The numbers come from the provider's own ``X-RateLimit-*`` headers plus the
     local pacing state, so this is the same view the pacer acts on.
     """
-    from ..provider import ratelimit
+    from ..provider import hub, ratelimit
 
-    return {"object": "upstream_rate_limits", "data": ratelimit.snapshot()}
+    return {"object": "upstream_rate_limits", "data": ratelimit.snapshot(), "hub": hub.snapshot()}
 
 
 @router.post("/v1/verify")
