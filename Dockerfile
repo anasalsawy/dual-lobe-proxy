@@ -6,6 +6,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
+    postgresql \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy package files
@@ -13,6 +14,7 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 COPY alembic ./alembic
 COPY alembic.ini ./alembic.ini
+COPY start.sh ./start.sh
 
 # Install the package
 RUN pip install --no-cache-dir -e "."
@@ -21,4 +23,4 @@ RUN pip install --no-cache-dir -e "."
 ENV PORT=8000
 EXPOSE 8000
 
-CMD ["sh", "-c", "alembic upgrade head && python -m dual_lobe.core.bootstrap && (python -m dual_lobe.b.worker & uvicorn dual_lobe.api.app:app --host 0.0.0.0 --port ${PORT})"]
+CMD ["sh", "/app/start.sh"]

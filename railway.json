@@ -5,9 +5,9 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "startCommand": "alembic upgrade head && python -m dual_lobe.core.bootstrap && (python -m dual_lobe.b.worker & uvicorn dual_lobe.api.app:app --host 0.0.0.0 --port ${PORT})",
+    "startCommand": "sh /app/start.sh",
     "healthcheckPath": "/healthz",
-    "healthcheckTimeout": 30,
+    "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 3
   }
