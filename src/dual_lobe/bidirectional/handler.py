@@ -18,6 +18,8 @@ from ..core.settings import get_settings
 from ..provider.adapters import NormalizedRequest, response_dict
 from ..provider.registry import get_registry
 from ..provider import calltrace
+from ..proxy.tools import (CONSULT, DELEGATE, MEMORY_SEARCH, execute_proxy_call,
+                           is_proxy_tool, proxy_tool_schemas)
 from ..state.memory import inject_shared_memory
 
 LOG = logging.getLogger("dual_lobe.bidirectional")
@@ -153,7 +155,8 @@ async def _call(alias: str, messages: list[dict[str, Any]], payload: dict[str, A
         frequency_penalty=payload.get("frequency_penalty"),
         presence_penalty=payload.get("presence_penalty"),
     )
-    raw = await adapter.buffered(request)
+    with calltrace.stage((f"{speaker}-verify" if verify else f"{speaker or alias}-generate")):
+        raw = await adapter.buffered(request)
     data = response_dict(raw)
     choices = data.get("choices") or []
     if not choices:
@@ -174,7 +177,8 @@ async def _consult(speaker: str, question: str, messages: list[dict[str, Any]],
         "Do not address the user or claim tool use."
     )
     try:
-        message = await _call(_ROLES[peer], [{"role": "user", "content": prompt}], payload, tools=None)
+        with calltrace.stage(f"{speaker}-consult-{peer}"):
+            message = await _call(_ROLES[peer], [{"role": "user", "content": prompt}], payload, tools=None)
         return _content_text(message.get("content"))[:5000] or "The other lobe returned no text."
     except Exception as exc:  # noqa: BLE001
         LOG.warning("private lobe consultation failed speaker=%s peer=%s error=%s",
@@ -211,7 +215,7 @@ def _tag_tool_calls(calls: list[dict[str, Any]], speaker: str) -> list[dict[str,
 
 
 async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
-               shared_text: str | None = None) -> tuple[str | None, list[dict[str, Any]], dict[str, Any]]:
+               shared_text: str | None = None, shared_space: str | None = None) -> tuple[str | None, list[dict[str, Any]], dict[str, Any]]:
     from ..gated.handler import OBSERVATION_DISCLAIMER, _get_meter, _set_meter
     messages = list(payload.get("messages") or [])
     messages = inject_shared_memory(messages, shared_text)
@@ -238,11 +242,30 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
         consulted = True
 
     can_route = not consulted and not tool_continuation and payload.get("tool_choice") in (None, "auto")
-    exposed_tools = tools + ([_CONSULT_TOOL, _HANDOFF_TOOL] if can_route else [])
+    exposed_tools = tools + proxy_tool_schemas() + ([_CONSULT_TOOL, _HANDOFF_TOOL] if can_route else [])
     message = await _call(_ROLES[speaker], dialogue, payload, tools=exposed_tools or None,
                           tool_choice="auto" if can_route else payload.get("tool_choice"))
 
     calls = message.get("tool_calls") or []
+
+    # Proxy-owned memory/delegation/advisory tools run server-side, then the
+    # selected speaker gets one continuation with caller tools only.
+    proxy_calls = [c for c in calls if is_proxy_tool((c.get("function") or {}).get("name"))]
+    if proxy_calls and not tool_continuation:
+        settings = get_settings()
+        used: dict[str, int] = {}
+        caps = {MEMORY_SEARCH: settings.proxy_memory_search_cap,
+                DELEGATE: settings.proxy_delegate_cap, CONSULT: settings.proxy_consult_cap}
+        results = [await execute_proxy_call(c, tenant_id=tenant_id, space=shared_space, messages=dialogue,
+                                            used=used, caps=caps, source_lobe=speaker)
+                   for c in proxy_calls]
+        dialogue.extend([{"role": "assistant", "content": None, "tool_calls": proxy_calls}])
+        dialogue.extend({"role": "tool", "tool_call_id": str(c.get("id") or f"proxy-{i}"),
+                         "name": (c.get("function") or {}).get("name"), "content": results[i]}
+                        for i, c in enumerate(proxy_calls))
+        message = await _call(_ROLES[speaker], dialogue, payload, tools=tools or None,
+                              tool_choice=payload.get("tool_choice"))
+        calls = message.get("tool_calls") or []
     handoff_calls = [c for c in calls if ((c.get("function") or {}).get("name") == "handoff_to_other_lobe")]
     if handoff_calls and not tool_continuation:
         previous_speaker = speaker
@@ -330,10 +353,10 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
 
 
 async def bidirectional_response(payload: dict[str, Any], run_id: str = "", tenant_id: int = 0,
-                                 shared_text: str | None = None):
+                                 shared_text: str | None = None, shared_space: str | None = None):
     started = time.time()
     answer, tool_calls, extra = await _run(payload, run_id=run_id, tenant_id=tenant_id,
-                                           shared_text=shared_text)
+                                           shared_text=shared_text, shared_space=shared_space)
     if tool_calls:
         message: dict[str, Any] = {"role": "assistant", "content": None, "tool_calls": tool_calls}
     else:
@@ -344,6 +367,8 @@ async def bidirectional_response(payload: dict[str, Any], run_id: str = "", tena
         extra["elapsed_ms"] = round((time.time() - started) * 1000, 2)
     extra["calls"] = calltrace.snapshot()
     extra["server_ms"] = calltrace.now_ms()
+    from ..provider.hub import snapshot as hub_snapshot
+    extra["provider_hub"] = hub_snapshot()
     data = {
         "id": f"chatcmpl-bidir-{uuid.uuid4().hex[:20]}", "object": "chat.completion",
         "created": int(started), "model": payload.get("model") or "sawii/dl-bidirectional",

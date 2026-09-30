@@ -158,10 +158,10 @@ def _transcript(messages: list[dict[str, Any]], max_chars: int = 6000) -> str:
     return out[:half] + "\n...[middle omitted]...\n" + out[-half:]
 
 
-async def _call_b_text(system: str, user: str, max_tokens: int) -> str:
+async def _call_b_text(system: str, user: str, max_tokens: int, alias: str = "lobe-b") -> str:
     """Plain-text lobe-b call (no JSON contract). Returns stripped content."""
     s = get_settings()
-    adapter = get_registry().adapter("lobe-b")
+    adapter = get_registry().adapter(alias)
     req = NormalizedRequest(
         messages=[
             {"role": "system", "content": system},
@@ -186,6 +186,7 @@ async def execute_proxy_call(
     messages: list[dict[str, Any]],
     used: dict[str, int],
     caps: dict[str, int],
+    source_lobe: str = "A",
 ) -> str:
     """Run one proxy tool call inline. Never raises; returns tool result text.
 
@@ -217,22 +218,28 @@ async def execute_proxy_call(
                                        limit=MEMORY_SEARCH_LIMIT,
                                        budget=MEMORY_SEARCH_BUDGET)
             return hits or "No matching stored history."
+        peer_alias = "lobe-b" if source_lobe.upper() == "A" else "lobe-a"
+        peer = "B" if source_lobe.upper() == "A" else "A"
         if name == DELEGATE:
             task = str(args.get("task") or "").strip()
             if not task:
                 return "proxy_delegate: empty task; continue without it."
             user = (f"CONVERSATION CONTEXT:\n{_transcript(messages)}\n\n"
                     f"DELEGATED TASK:\n{task[:3000]}")
-            return await _call_b_text(DELEGATE_SYSTEM, user, DELEGATE_MAX_TOKENS) \
-                or "Lobe B returned no deliverable; continue without it."
+            system = DELEGATE_SYSTEM.replace("Lobe B", f"Lobe {peer}").replace(
+                "A has delegated", f"Lobe {source_lobe.upper()} has delegated")
+            return await _call_b_text(system, user, DELEGATE_MAX_TOKENS, peer_alias) \
+                or f"Lobe {peer} returned no deliverable; continue without it."
         if name == CONSULT:
             question = str(args.get("question") or "").strip()
             if not question:
                 return "proxy_consult: empty question; continue without it."
             user = (f"CONVERSATION CONTEXT:\n{_transcript(messages)}\n\n"
-                    f"QUESTION FROM LOBE A:\n{question[:2000]}")
-            return await _call_b_text(CONSULT_SYSTEM, user, CONSULT_MAX_TOKENS) \
-                or "Lobe B had no advice; continue without it."
+                    f"QUESTION FROM LOBE {source_lobe.upper()}:\n{question[:2000]}")
+            system = CONSULT_SYSTEM.replace("Lobe B", f"Lobe {peer}").replace(
+                "Lobe A", f"Lobe {source_lobe.upper()}")
+            return await _call_b_text(system, user, CONSULT_MAX_TOKENS, peer_alias) \
+                or f"Lobe {peer} had no advice; continue without it."
         return f"Unknown proxy tool: {name}"
     except Exception as exc:
         LOG.warning("proxy tool %s failed: %s", name, type(exc).__name__)

@@ -787,7 +787,8 @@ async def chat_completions(
                 shared_text, shared_entries = shared.text, len(shared.entry_ids)
             except Exception:
                 LOG.warning("shared memory load failed run=%s (fail-open)", run_id)
-        result = await bidirectional_response(payload, run_id, principal.tenant_id, shared_text)
+        result = await bidirectional_response(payload, run_id, principal.tenant_id, shared_text,
+                                              shared_space=memory_space)
         data = json.loads(result.body)
         data["dual_lobe"] = {**(data.get("dual_lobe") or {}), "memory_space": memory_space or "off",
                              "shared_entries": shared_entries}

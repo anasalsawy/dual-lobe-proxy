@@ -64,7 +64,11 @@ The other lobe then verifies the exact final answer, and the response includes a
 call and resumes the same lobe when its result arrives; verification happens after
 the speaker finishes. Both lobes receive the request's client tool schemas when
 they speak. The verifier reviews the supplied conversation and tool results without
-calling client tools itself.
+calling client tools itself. The speaker also receives the observer instructions,
+selected shared-memory context, and prior-turn meter; proxy memory search, consult,
+and delegation tools execute inline against the peer lobe. Every model call uses
+the configured provider hub, and `dual_lobe.calls` plus `dual_lobe.provider_hub`
+report call providers/models and non-secret slot state.
 
 This route is separate from `sawii/dl-gated` and is exposed in `/v1/models` after
 deployment. It supports buffered and SSE Chat Completions responses.
