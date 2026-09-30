@@ -1,4 +1,5 @@
 """Ported engines: split (model 1) and clinical (model 2) logic, with scripted A/B replies."""
+import asyncio
 import json
 
 import pytest
@@ -72,12 +73,16 @@ async def test_split_a_delegates_live_b_runs_and_b_verdict_is_hardened(scripted,
     assert result.verdict.deception_level == "YELLOW"        # GREEN hardened: unverified claim remains
     assert "Dual-Lobe meter: [YELLOW]" in result.visible_text()
     aliases = [c[0] for c in fake.calls]
-    assert aliases.count("lobe-b") >= 2                       # live B + final adversarial B
+    # Final adversarial B always runs; live B is stopped as soon as A is done, so a
+    # fast A may finish before live B's first call.
+    assert aliases[-1] == "lobe-b" and aliases.count("lobe-b") == 1 + result.timings_ms["b_live_calls"]
     assert any("YOUR DELEGATED SUBTASK" in c[1][1]["content"] for c in fake.calls)
     first_a = next(c for c in fake.calls if c[0] == "lobe-a")
     a_tools = {t["function"]["name"] for t in first_a[2]}
     assert {"delegate", "delegate_collect", "consult_other_lobe", "b_live_check", "memory_search"} <= a_tools
     assert result.logical_model_calls == 2 + 1 + result.timings_ms["b_live_calls"]
+    from dual_lobe.engines.split import engine as split_engine
+    await asyncio.gather(*list(split_engine._BACKGROUND))   # memory is written after the response
     assert (tmp_path / "m.jsonl").exists() and (tmp_path / "m.b.jsonl").exists()
 
 
@@ -164,7 +169,7 @@ async def test_clinical_b_consult_revises_plan_contract(scripted):
         return _msg(json.dumps({"plan_revision": 1, "steps": [{"id": "S1", "status": "completed"}]}))
 
     scripted(handler)
-    result = await ClinicalDualLobeEngine().run_clinical(query="q", patient_context="")
+    result = await ClinicalDualLobeEngine().run_clinical(query="q", patient_context="K+ 6.8")
     assert result.plan_revision == 1
     assert result.logical_model_calls == 4
 
@@ -177,4 +182,48 @@ async def test_clinical_report_outside_plan_is_rejected(scripted):
 
     scripted(handler)
     with pytest.raises(RuntimeError, match="outside the current plan"):
-        await ClinicalDualLobeEngine().run_clinical(query="q", patient_context="")
+        await ClinicalDualLobeEngine().run_clinical(query="q", patient_context="K+ 6.8")
+
+
+async def test_clinical_fast_path_without_patient_data_is_one_a_call(scripted):
+    fake = scripted(lambda alias, req: _msg("Canberra."))
+    result = await ClinicalDualLobeEngine().run_clinical(query="capital of Australia?", patient_context="")
+    assert result.answer == "Canberra." and result.logical_model_calls == 1
+    assert [c[0] for c in fake.calls] == ["lobe-a"]
+
+
+class Streaming(Scripted):
+    def adapter(self, alias):
+        outer = self
+        base = super().adapter(alias)
+
+        class A:
+            async def buffered(self, req):
+                return await base.buffered(req)
+
+            async def stream(self, req):
+                outer.calls.append((alias, req.messages, req.tools))
+                for piece in ("Hold ", "spironolactone."):
+                    yield {"choices": [{"delta": {"content": piece}}]}
+        return A()
+
+
+async def test_clinical_stream_sends_final_answer_as_it_is_generated(monkeypatch):
+    from dual_lobe.engines import respond
+
+    def handler(alias, req):
+        if alias == "lobe-a":
+            return _msg(json.dumps(PLAN))
+        return _msg(json.dumps({"plan_revision": 0, "steps": [{"id": "S1", "status": "completed"}]}))
+
+    fake = Streaming(handler)
+    monkeypatch.setattr(common, "get_registry", lambda: fake)
+    monkeypatch.setattr(respond, "_assert_clinical_b_local", lambda: None)
+    resp = await respond.engine_response("clinical", {"model": "m", "stream": True, "messages": [
+        {"role": "system", "content": "K+ 6.8"}, {"role": "user", "content": "increase?"}]})
+    body = "".join([c if isinstance(c, str) else c.decode() async for c in resp.body_iterator])
+    deltas = [json.loads(l[6:])["choices"][0]["delta"].get("content") for l in body.splitlines()
+              if l.startswith("data: {")]
+    assert [d for d in deltas if d] == ["Hold ", "spironolactone."]      # live pieces, not one blob
+    last = [json.loads(l[6:]) for l in body.splitlines() if l.startswith("data: {")][-1]
+    assert last["dual_lobe"]["mode"] == "clinical" and last["choices"][0]["finish_reason"] == "stop"

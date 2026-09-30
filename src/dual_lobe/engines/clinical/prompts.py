@@ -191,3 +191,16 @@ PARALLEL EXECUTION RESULTS:
 OBSERVABLE CONTROL / EXECUTION RECORD:
 {trace_text if trace_text else "(none)"}
 """
+
+
+def build_direct_prompt(query: str) -> str:
+    return f"""You are Lobe A, the reasoning and user-facing lobe.
+
+This task has no patient data and no execution tools, so there is no plan to hand to
+an execution lobe. Answer the user directly. Do not claim that any action, lookup, or
+tool call happened. If the task needs live data or an action you cannot perform, say so
+plainly.
+
+USER TASK:
+{query}
+"""

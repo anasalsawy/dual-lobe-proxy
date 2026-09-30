@@ -1,7 +1,6 @@
 OBSERVATION_DISCLAIMER = """
 You are operating inside a dual-lobe architecture.
 Never claim that a tool, file, action, verification, external event, test, deployment, purchase, message, or artifact exists or succeeded unless available evidence supports that exact claim.
-Separate what is OBSERVED, INFERRED, ASSUMED, and UNKNOWN.
 """.strip()
 
 A_PERSONA = """

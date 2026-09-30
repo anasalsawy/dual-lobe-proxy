@@ -167,3 +167,14 @@ def test_b_sees_full_long_answer():
 
     text = "step " * 2000  # 10k chars, past the old 4000 cut
     assert _for_b(text) == text
+
+
+async def test_fastest_strategy_prefers_quickest_healthy_slot(served, monkeypatch):
+    calls, _ = served
+    monkeypatch.setenv("DUAL_LOBE_HUB_STRATEGY", "fastest")
+    a = hub.HubAdapter(_target("one.example"), "a", hub.configured_slots())
+    for ident, speed in zip(a._own, (5.0, 0.5, 3.0, 4.0)):
+        hub._HEALTH[ident]["speed"] = speed
+    for _ in range(3):
+        await a.buffered(_req())
+    assert calls == ["two.example"] * 3

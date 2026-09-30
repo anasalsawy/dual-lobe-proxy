@@ -15,10 +15,10 @@ from dataclasses import dataclass, field, replace
 from typing import Callable
 
 from ...core.settings import get_settings
-from ..common import ProxyToolTrace, Tool, run_agent
+from ..common import ProxyToolTrace, Tool, run_agent, stream_text
 from .models import ExecutionReport, Plan, PlanContract
 from .privacy import PrivacyGuard, PrivacyReceipt, ProviderPrivacyPolicy
-from .prompts import build_execution_prompt, build_final_review_prompt, build_plan_prompt, build_revision_prompt
+from .prompts import build_direct_prompt, build_execution_prompt, build_final_review_prompt, build_plan_prompt, build_revision_prompt
 from .tools import (
     B_EXECUTOR_SYSTEM,
     CLINICAL_B_ALIAS,
@@ -75,9 +75,11 @@ class ClinicalDualLobeEngine:
         return int(os.getenv("DUAL_LOBE_A_MAX_TOKENS", "8000"))
 
     async def _make_plan(self, *, query: str, patient_context: str) -> Plan:
+        # Plans are compact JSON; a small budget keeps A's first call fast.
         raw = await self._call(alias="lobe-a", system=PLANNER_AGENT_SYSTEM,
-                               prompt=build_plan_prompt(query=query, patient_context=patient_context),
-                               max_tokens=self._a_tokens())
+                               prompt=build_plan_prompt(query=query, patient_context=patient_context)
+                               + "\nKeep the plan compact: the fewest steps that achieve the goal, short actions.",
+                               max_tokens=int(os.getenv("DUAL_LOBE_CLINICAL_PLAN_MAX_TOKENS", "1500")))
         return Plan.from_text(raw)
 
     async def _revise_plan(self, *, query: str, patient_context: str, contract: PlanContract, concern: str,
@@ -96,15 +98,28 @@ class ClinicalDualLobeEngine:
             query=raw_query, patient_context=raw_patient_context, current_plan_json=contract.current_json(),
             revision=contract.revision), max_tokens=clinical_b_tokens(), tools=tools)
 
+    async def _answer(self, prompt: str, on_delta) -> str:
+        """A's user-facing call; streamed to the client when on_delta is given."""
+        if on_delta is None:
+            return await self._call(alias="lobe-a", system=PLANNER_AGENT_SYSTEM, prompt=prompt,
+                                    max_tokens=self._a_tokens())
+        text = (await stream_text(alias="lobe-a", system=PLANNER_AGENT_SYSTEM, prompt=prompt,
+                                  max_tokens=self._a_tokens(), timeout=get_settings().a_timeout,
+                                  on_delta=on_delta)).strip()
+        if not text:
+            raise RuntimeError("lobe-a returned an empty response")
+        return text
+
     async def _final_review(self, *, query: str, patient_context: str, contract: PlanContract,
-                            execution_report: str, delegated_results: str, trace_text: str) -> str:
-        return await self._call(alias="lobe-a", system=PLANNER_AGENT_SYSTEM, prompt=build_final_review_prompt(
+                            execution_report: str, delegated_results: str, trace_text: str, on_delta=None) -> str:
+        return await self._answer(build_final_review_prompt(
             query=query, patient_context=patient_context, final_plan_json=contract.current_json(),
             plan_revision=contract.revision, execution_report=execution_report,
-            delegated_results=delegated_results, trace_text=trace_text), max_tokens=self._a_tokens())
+            delegated_results=delegated_results, trace_text=trace_text), on_delta)
 
     async def run_clinical(self, *, query: str, patient_context: str,
-                           local_delivery: Callable[[str], None] | None = None) -> ClinicalRunResult:
+                           local_delivery: Callable[[str], None] | None = None,
+                           on_delta=None) -> ClinicalRunResult:
         started = time.perf_counter()
         timings: dict[str, int | float] = {}
         vault = self.privacy_guard.new_vault()
@@ -112,6 +127,27 @@ class ClinicalDualLobeEngine:
             query=query, patient_context=patient_context, vault=vault)
         trace = ProxyToolTrace()
         delegate_state = ExecutionDelegateState()
+
+        if not patient_context.strip() and not self.execution_tools:
+            # Fast path: no patient data and no execution tools, so there is nothing
+            # for B to execute. A answers directly (still from the sanitized query).
+            try:
+                t = time.perf_counter()
+                answer = await self._answer(build_direct_prompt(sanitized_query), on_delta)
+                timings["a_answer_ms"] = int((time.perf_counter() - t) * 1000)
+                if local_delivery is not None:
+                    local_delivery(vault.rehydrate_text(answer))
+                plan = Plan(goal=sanitized_query[:200] or "answer", steps=[{"id": "S1", "action": "answer directly"}],
+                            success_condition="user question answered")
+                result = ClinicalRunResult(
+                    sanitized_query=sanitized_query, sanitized_patient_context=sanitized_context, plan=plan,
+                    plan_revision=0, plan_sha256="", execution_report="", delegated_results="", answer=answer,
+                    timings_ms=timings, logical_model_calls=1, privacy_receipt=receipt)
+            finally:
+                vault.destroy_key()
+            result.privacy_receipt = self.privacy_guard.finalized_receipt(receipt, vault)
+            result.timings_ms["total_ms"] = int((time.perf_counter() - started) * 1000)
+            return result
 
         try:
             t = time.perf_counter()
@@ -144,7 +180,8 @@ class ClinicalDualLobeEngine:
             t = time.perf_counter()
             final_answer = await self._final_review(
                 query=sanitized_query, patient_context=sanitized_context, contract=contract,
-                execution_report=safe_report, delegated_results=safe_delegated, trace_text=safe_trace)
+                execution_report=safe_report, delegated_results=safe_delegated, trace_text=safe_trace,
+                on_delta=on_delta)
             timings["a_review_ms"] = int((time.perf_counter() - t) * 1000)
 
             if local_delivery is not None:

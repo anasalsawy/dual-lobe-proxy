@@ -279,20 +279,20 @@ async def test_gated_branch_streams_with_record_background(request_path, monkeyp
 
     monkeypatch.setattr(chat, "record_memory", record)
 
-    async def fake_gated(payload, run_id, tenant_id, alias, *,
-                         shared_text=None, shared_space=None):
-        return ({"id": "g", "choices": [{"message": {"role": "assistant", "content": "answer"},
-                                          "finish_reason": "stop"}]}, {})
+    async def fake_stream(payload, run_id, tenant_id, alias, *,
+                          shared_text=None, shared_space=None, on_done=None):
+        yield 'data: {"choices": [{"delta": {"content": "answer"}}]}\n\n'
+        yield "data: [DONE]\n\n"
+        await on_done({"id": "g", "choices": [{"message": {"role": "assistant", "content": "answer"},
+                                                "finish_reason": "stop"}]})
 
-    monkeypatch.setattr("dual_lobe.gated.handler.gated_response", fake_gated)
+    monkeypatch.setattr("dual_lobe.gated.handler.gated_stream", fake_stream)
     response = await chat.chat_completions(
         ChatCompletionRequest(messages=[{"role": "user", "content": "task"}],
                               model="sawii/dl-gated", stream=True), request, principal)
-    assert response.background is not None
     body = "".join([chunk async for chunk in response.body_iterator])
     assert "[DONE]" in body
-    await response.background()
-    assert recorded
+    assert recorded    # memory is recorded once the live stream has finished
 
 
 async def test_coauthor_injects_shared_memory_without_mutating_canonical(monkeypatch):

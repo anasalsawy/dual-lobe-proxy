@@ -201,5 +201,29 @@ async def run_agent(
     return str(message.get("content") or "")
 
 
+async def stream_text(
+    *,
+    alias: str,
+    system: str,
+    prompt: str,
+    max_tokens: int,
+    timeout: float,
+    on_delta: Callable[[str], Awaitable[None]],
+) -> str:
+    """One tool-less model call whose text is passed to ``on_delta`` as it arrives."""
+    adapter = get_registry().adapter(alias)
+    req = NormalizedRequest(messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                            max_tokens=max_tokens, timeout=timeout, stream=True)
+    parts: list[str] = []
+    async with asyncio.timeout(timeout):
+        async for chunk in adapter.stream(req):
+            for choice in chunk.get("choices") or []:
+                text = (choice.get("delta") or {}).get("content")
+                if text:
+                    parts.append(text)
+                    await on_delta(text)
+    return "".join(parts)
+
+
 def spawn(coro: Awaitable[Any]) -> asyncio.Task:
     return asyncio.ensure_future(coro)

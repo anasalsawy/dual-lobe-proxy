@@ -31,9 +31,9 @@ class LiveBMonitor:
     b_memory: JsonlMemoryStore
     trace: ProxyToolTrace
     state: LiveBState
-    max_calls: int = field(default_factory=lambda: max(1, int(os.getenv("DUAL_LOBE_B_LIVE_MAX_CALLS", "6"))))
+    max_calls: int = field(default_factory=lambda: max(1, int(os.getenv("DUAL_LOBE_B_LIVE_MAX_CALLS", "2"))))
     poll_seconds: float = field(
-        default_factory=lambda: max(0.02, float(os.getenv("DUAL_LOBE_B_LIVE_POLL_SECONDS", "0.08"))))
+        default_factory=lambda: max(0.02, float(os.getenv("DUAL_LOBE_B_LIVE_POLL_SECONDS", "1.0"))))
     context_block: str = ""
 
     calls: int = 0

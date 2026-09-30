@@ -519,19 +519,9 @@ def _build_meter_warning(meter: dict[str, Any]) -> str:
     )
 
 
-async def gated_response(
-    payload: dict[str, Any],
-    run_id: str,
-    tenant_id: int,
-    public_model: str,
-    *,
-    shared_text: str | None = None,
-    shared_space: str | None = None,
-) -> tuple[dict[str, Any], dict[str, str]]:
-    """Handle a gated inference request.
-
-    Returns (response_data, headers) to be sent back to Hermes.
-    """
+def _prepare(payload: dict[str, Any], run_id: str, public_model: str,
+             shared_text: str | None) -> tuple[list[dict[str, Any]], Any, NormalizedRequest, bool]:
+    """Steps 1-2 setup: A's enriched messages, adapter and request."""
     s = get_settings()
     messages = payload["messages"]
 
@@ -576,6 +566,24 @@ async def gated_response(
         stream=False,
         timeout=s.a_timeout,
     )
+    return enriched_messages, a_adapter, a_req, proxy_on
+
+
+async def gated_response(
+    payload: dict[str, Any],
+    run_id: str,
+    tenant_id: int,
+    public_model: str,
+    *,
+    shared_text: str | None = None,
+    shared_space: str | None = None,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Handle a gated inference request.
+
+    Returns (response_data, headers) to be sent back to Hermes.
+    """
+    s = get_settings()
+    enriched_messages, a_adapter, a_req, proxy_on = _prepare(payload, run_id, public_model, shared_text)
 
     try:
         a_response = await asyncio.wait_for(
@@ -598,6 +606,134 @@ async def gated_response(
             tenant_id=tenant_id, space=shared_space, run_id=run_id,
             a_adapter=a_adapter, s=s)
 
+    return await _complete(a_data, payload=payload, run_id=run_id, tenant_id=tenant_id,
+                           public_model=public_model, shared_space=shared_space,
+                           enriched_messages=enriched_messages, a_adapter=a_adapter,
+                           proxy_used=proxy_used)
+
+
+def _assemble_stream(chunks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Rebuild one chat.completion from streamed chunks (content + tool_call fragments)."""
+    content: list[str] = []
+    calls: dict[int, dict[str, Any]] = {}
+    finish = None
+    base: dict[str, Any] = {}
+    for chunk in chunks:
+        base = base or {k: chunk.get(k) for k in ("id", "created", "model") if chunk.get(k) is not None}
+        for choice in chunk.get("choices") or []:
+            delta = choice.get("delta") or {}
+            if delta.get("content"):
+                content.append(delta["content"])
+            for tc in delta.get("tool_calls") or []:
+                slot = calls.setdefault(int(tc.get("index", len(calls))),
+                                        {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                fn = tc.get("function") or {}
+                slot["function"]["name"] += fn.get("name") or ""
+                slot["function"]["arguments"] += fn.get("arguments") or ""
+            finish = choice.get("finish_reason") or finish
+    message: dict[str, Any] = {"role": "assistant", "content": "".join(content)}
+    if calls:
+        message["tool_calls"] = [calls[i] for i in sorted(calls)]
+    return {**base, "object": "chat.completion",
+            "choices": [{"index": 0, "message": message, "finish_reason": finish or "stop"}]}
+
+
+async def gated_stream(
+    payload: dict[str, Any],
+    run_id: str,
+    tenant_id: int,
+    public_model: str,
+    *,
+    shared_text: str | None = None,
+    shared_space: str | None = None,
+    on_done=None,
+):
+    """Streaming gated request: A's text reaches the client as it is generated;
+    B checks the finished answer and the meter arrives as the last chunk.
+
+    Yields SSE strings. ``on_done(data)`` receives the final assembled response.
+    """
+    s = get_settings()
+    enriched_messages, a_adapter, a_req, proxy_on = _prepare(payload, run_id, public_model, shared_text)
+    a_req.stream = True
+    cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+    created = int(time.time())
+
+    def sse(delta: dict[str, Any], finish: str | None = None, **extra) -> str:
+        chunk = {"id": cid, "object": "chat.completion.chunk", "created": created, "model": public_model,
+                 "choices": [{"index": 0, "delta": delta, "finish_reason": finish}], **extra}
+        return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+    yield sse({"role": "assistant", "content": ""})
+    chunks: list[dict[str, Any]] = []
+    try:
+        async with asyncio.timeout(s.a_timeout):
+            async for chunk in a_adapter.stream(a_req):
+                chunks.append(chunk)
+                for choice in chunk.get("choices") or []:
+                    text = (choice.get("delta") or {}).get("content")
+                    if text:
+                        yield sse({"content": text})
+    except Exception as exc:  # noqa: BLE001
+        LOG.error("gated A stream failed run=%s: %s", run_id, exc)
+        if not chunks:
+            yield sse({"content": "Upstream request failed."}, "stop")
+            yield "data: [DONE]\n\n"
+            return
+    a_data = _assemble_stream(chunks)
+    streamed_text = a_data["choices"][0]["message"].get("content") or ""
+
+    proxy_used: dict[str, int] = {}
+    if proxy_on:
+        a_data, proxy_used = await _resolve_proxy_tools(
+            a_data=a_data, enriched_messages=enriched_messages, payload=payload,
+            tenant_id=tenant_id, space=shared_space, run_id=run_id,
+            a_adapter=a_adapter, s=s)
+        if proxy_used:
+            # The continuation replaced A's message; send whatever it added.
+            cont_text = (a_data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+            if cont_text:
+                yield sse({"content": ("\n\n" if streamed_text else "") + cont_text})
+                streamed_text = (streamed_text + "\n\n" if streamed_text else "") + cont_text
+                a_data["choices"][0]["message"]["content"] = streamed_text
+
+    final, headers = await _complete(a_data, payload=payload, run_id=run_id, tenant_id=tenant_id,
+                                     public_model=public_model, shared_space=shared_space,
+                                     enriched_messages=enriched_messages, a_adapter=a_adapter,
+                                     proxy_used=proxy_used)
+    message = (final.get("choices") or [{}])[0].get("message", {})
+    full = message.get("content") or ""
+    suffix = full[len(streamed_text):] if full.startswith(streamed_text) else ""
+    if suffix:
+        yield sse({"content": suffix})
+    if message.get("tool_calls"):
+        yield sse({"tool_calls": [{"index": i, **tc} for i, tc in enumerate(message["tool_calls"])]})
+    finish = "tool_calls" if message.get("tool_calls") else "stop"
+    meter = {k[len("X-Dual-Lobe-"):].lower().replace("-", "_"): v for k, v in headers.items()
+             if k.startswith("X-Dual-Lobe-")}
+    yield sse({}, finish, dual_lobe=meter)
+    yield "data: [DONE]\n\n"
+    if on_done is not None:
+        await on_done(final)
+
+
+async def _complete(
+    a_data: dict[str, Any],
+    *,
+    payload: dict[str, Any],
+    run_id: str,
+    tenant_id: int,
+    public_model: str,
+    shared_space: str | None,
+    enriched_messages: list[dict[str, Any]],
+    a_adapter: Any,
+    proxy_used: dict[str, int],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Steps 3-5: B rates A's finished response; meter, handoff, optional flip-back."""
+    s = get_settings()
+    messages = payload["messages"]
     a_message = (a_data.get("choices") or [{}])[0].get("message", {})
     a_content = a_message.get("content", "")
 

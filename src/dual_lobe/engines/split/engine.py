@@ -9,6 +9,7 @@ persistent memories.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from dataclasses import dataclass, field
@@ -27,6 +28,36 @@ from .tools import (
     make_a_tools,
     make_worker_tools,
 )
+
+LOG = logging.getLogger("dual_lobe.engines.split")
+_BACKGROUND: set[asyncio.Future] = set()
+# B's final review reads a bounded view: the latest trace events, each capped,
+# and capped memory slices. Keeps the review prompt (and B's latency) small.
+REVIEW_MEMORY_CHARS = int(os.getenv("DUAL_LOBE_REVIEW_MEMORY_CHARS", "3000"))
+REVIEW_TRACE_EVENTS = int(os.getenv("DUAL_LOBE_REVIEW_TRACE_EVENTS", "40"))
+REVIEW_TRACE_EVENT_CHARS = int(os.getenv("DUAL_LOBE_REVIEW_TRACE_EVENT_CHARS", "1500"))
+
+
+def _trace_for_review(trace: ProxyToolTrace) -> str:
+    events = trace.snapshot_from(0)
+    skipped = max(0, len(events) - REVIEW_TRACE_EVENTS)
+    view = ProxyToolTrace()
+    for e in events[skipped:]:
+        view.add(e.name, input_text=e.input_text[:REVIEW_TRACE_EVENT_CHARS], output_text=e.output_text,
+                 provenance=e.provenance)
+    body = view.render(max_chars_per_event=REVIEW_TRACE_EVENT_CHARS)
+    return (f"[{skipped} earlier trace events omitted]\n\n" if skipped else "") + body
+
+
+async def _cancel(monitor: LiveBMonitor, task: asyncio.Future) -> None:
+    monitor.stop()
+    if not task.done():
+        task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+
 
 A_SYSTEM = (
     "Role: Lobe A — Primary Worker and Delegator\n"
@@ -151,10 +182,10 @@ A'S CANDIDATE ANSWER:
 {a_answer}
 
 A'S MEMORY SNAPSHOT:
-{a_memory if a_memory else "(none)"}
+{a_memory[:REVIEW_MEMORY_CHARS] if a_memory else "(none)"}
 
 B'S OWN INDEPENDENT MEMORY SNAPSHOT:
-{b_memory if b_memory else "(none)"}
+{b_memory[:REVIEW_MEMORY_CHARS] if b_memory else "(none)"}
 
 DELEGATED CHILD COUNT:
 {child_count}
@@ -163,7 +194,7 @@ DELEGATED CHILD RESULTS:
 {delegated_results if delegated_results else "(none)"}
 
 A/CHILD EXECUTION AND PROVENANCE TRACE:
-{trace.render() if trace.events else "(no runtime tool trace)"}
+{_trace_for_review(trace) if trace.events else "(no runtime tool trace)"}
 
 {ADVERSARIAL_PROTOCOL}
 
@@ -251,10 +282,10 @@ Do not include a challenge merely to populate a field. Empty lists are correct w
             delegated_results = await collect_all_delegate_results(delegate_state, trace)
             timings["delegate_join_ms"] = int((time.perf_counter() - collect_start) * 1000)
 
-            # Stop B's live loop only after A and delegated work have produced their
-            # execution events. B flushes the last event batch.
-            live_monitor.stop()
-            await live_task
+            # A and its children are done: stop live B now instead of waiting for its
+            # in-flight call. Everything it would have seen is in the trace the final
+            # review reads.
+            await _cancel(live_monitor, live_task)
             timings["b_live_calls"] = live_monitor.calls
 
             b_start = time.perf_counter()
@@ -264,22 +295,27 @@ Do not include a challenge merely to populate a field. Empty lists are correct w
                 child_count=delegate_state.child_count)
             timings["b_adversary_verify_ms"] = int((time.perf_counter() - b_start) * 1000)
         finally:
-            live_monitor.stop()
-            if not live_task.done():
-                await live_task
+            await _cancel(live_monitor, live_task)
             delegate_state.close()
 
-        await self._persist_memories(task=task, review=review)
-
-        # Compact execution experience for future strategy selection (local memory I/O, no model call).
+        # Memory writes are local file I/O; they run after the response is sent.
         stuck_hits = sum(1 for e in trace.snapshot_from(0) if e.name == "b_stuck_detector")
         consultation_posts = sum(1 for e in trace.snapshot_from(0) if e.name == "consult_other_lobe")
-        await asyncio.to_thread(
-            self.memory.record_split_experience,
-            (f"Task: {task}\nOutcome verdict: {review.answer_verdict.deception_level}\n"
-             f"Delegated children: {delegate_state.child_count}\nLive-B calls: {live_monitor.calls}\n"
-             f"Active consultations: {consultation_posts}\nRepeated-failure detections: {stuck_hits}\n"
-             f"Delegation assessment: {review.delegation_note}"))
+        experience = (f"Task: {task}\nOutcome verdict: {review.answer_verdict.deception_level}\n"
+                      f"Delegated children: {delegate_state.child_count}\nLive-B calls: {live_monitor.calls}\n"
+                      f"Active consultations: {consultation_posts}\nRepeated-failure detections: {stuck_hits}\n"
+                      f"Delegation assessment: {review.delegation_note}")
+
+        async def persist() -> None:
+            try:
+                await self._persist_memories(task=task, review=review)
+                # Compact execution experience for future strategy selection.
+                await asyncio.to_thread(self.memory.record_split_experience, experience)
+            except Exception:  # noqa: BLE001
+                LOG.warning("split engine memory write failed", exc_info=True)
+
+        _BACKGROUND.add(task_ref := asyncio.ensure_future(persist()))
+        task_ref.add_done_callback(_BACKGROUND.discard)
         timings["total_ms"] = int((time.perf_counter() - total_start) * 1000)
 
         return RunResult(

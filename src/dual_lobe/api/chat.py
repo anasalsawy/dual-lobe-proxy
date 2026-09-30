@@ -721,7 +721,7 @@ async def chat_completions(
 
     # Gated mode: B sits inline.  Completely separate code path.
     if alias in ("sawii/dl-gated", "sawii/dl-dialogue", "sawii/dual-lobe-old"):
-        from ..gated.handler import gated_response
+        from ..gated.handler import gated_response, gated_stream
         shared_text, shared_entries = None, 0
         if memory_space:
             try:
@@ -729,6 +729,21 @@ async def chat_completions(
                 shared_text, shared_entries = shared.text, len(shared.entry_ids)
             except Exception:
                 LOG.warning("shared memory load failed run=%s (fail-open)", run_id)
+        if payload.get("stream", False):
+            # A's text streams as it is generated; B's meter arrives as the last chunk.
+            async def _record(final):
+                responses = [c.get("message") for c in (final.get("choices") or []) if c.get("message")]
+                await _record_memory_now(principal.tenant_id, memory_space, run_id, messages, responses)
+
+            return StreamingResponse(
+                gated_stream(payload, run_id, principal.tenant_id, alias, shared_text=shared_text,
+                             shared_space=memory_space, on_done=_record),
+                media_type="text/event-stream",
+                headers=_headers({"X-Dual-Lobe-Gated": "on", "X-Dual-Lobe-Streaming": "live",
+                                  "X-Dual-Lobe-Memory-Space": memory_space or "off",
+                                  "X-Dual-Lobe-Shared-Entries": shared_entries,
+                                  "Cache-Control": "no-cache", "X-Accel-Buffering": "no"}),
+            )
         data, gate_headers = await gated_response(
             payload, run_id, principal.tenant_id, alias,
             shared_text=shared_text, shared_space=memory_space,

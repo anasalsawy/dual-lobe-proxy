@@ -138,6 +138,22 @@ def _daily_cool(response: httpx.Response) -> float | None:
     return 86400 - (time.time() % 86400)  # next UTC midnight
 
 
+def _strategy() -> str:
+    """DUAL_LOBE_HUB_STRATEGY: round_robin (1,2,3,4,1...) or fastest (fastest healthy slot first)."""
+    return (os.getenv("DUAL_LOBE_HUB_STRATEGY") or "round_robin").strip().lower()
+
+
+def _record_speed(ident: tuple, seconds: float, data: Any) -> None:
+    """Moving average of seconds per call, normalised by answer length."""
+    try:
+        out_tokens = int(((data or {}).get("usage") or {}).get("completion_tokens") or 0)
+    except (TypeError, ValueError, AttributeError):
+        out_tokens = 0
+    sample = seconds / (1.0 + out_tokens / 1000.0)
+    prev = _HEALTH[ident].get("speed")
+    _HEALTH[ident]["speed"] = sample if prev is None else 0.7 * prev + 0.3 * sample
+
+
 def _classify(exc: BaseException) -> tuple[float, str]:
     """Return (cool-down seconds, reason). 0 cool-down = request-level, slot stays healthy."""
     if isinstance(exc, ratelimit.UpstreamRateLimited):
@@ -194,12 +210,17 @@ class HubAdapter:
             wait = max(_cooling(ident), ratelimit.gate_for(self._adapters[ident].target).estimate_wait(tokens))
             (ready if wait <= 0 else later).append((wait, ident))
         later.sort(key=lambda item: item[0])
+        if _strategy() == "fastest":
+            # Fastest healthy slot first (measured speed, rotation order breaks ties;
+            # unmeasured slots count as fast so each gets tried).
+            ready.sort(key=lambda item: _HEALTH[item[1]].get("speed") or 0.0)
         return [ident for _, ident in ready] + [ident for _, ident in later]
 
     async def buffered(self, req: Any):
         last: BaseException | None = None
         for ident in self._order(req):
             adapter = self._adapters[ident]
+            started = time.monotonic()
             try:
                 data = await adapter.buffered(req)
             except asyncio.CancelledError:
@@ -211,6 +232,7 @@ class HubAdapter:
                 last = exc
                 continue
             _mark(ident, True)
+            _record_speed(ident, time.monotonic() - started, data)
             return data
         assert last is not None
         raise last
@@ -253,6 +275,7 @@ def snapshot() -> list[dict[str, Any]]:
     return [{"slot": i + 1, "label": _HEALTH[ident]["label"], "model": ident[0], "base_url": ident[1],
              "next": i == nxt, "cooling_seconds": round(max(0.0, _HEALTH[ident]["cool_until"] - now), 1),
              "last_error": _HEALTH[ident]["reason"], "ok": _HEALTH[ident]["ok"],
+             "seconds_per_call": round(_HEALTH[ident].get("speed") or 0.0, 2),
              "failed": _HEALTH[ident]["failed"]} for i, ident in enumerate(pool)]
 
 
