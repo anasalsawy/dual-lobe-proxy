@@ -111,6 +111,9 @@ async def _run(engine: str, message: str, system: str, payload: dict[str, Any], 
         headers["X-Dual-Lobe-Plan-Revision"] = str(result.plan_revision)
         headers["X-Dual-Lobe-Model-Calls"] = str(result.logical_model_calls)
         headers["X-Dual-Lobe-Memory-Entries"] = str(result.memory_entries_used)
+        if result.verdict is not None:
+            headers["X-Dual-Lobe-Meter"] = result.verdict.deception_level
+            headers["X-Dual-Lobe-Meter-Rationale"] = " ".join(result.verdict.rationale.split())[:300]
         if result.tool_calls:
             headers["X-Dual-Lobe-Tool-Calls"] = str(len(result.tool_calls))
         receipt = asdict(result.privacy_receipt) if result.privacy_receipt else None
@@ -118,8 +121,13 @@ async def _run(engine: str, message: str, system: str, payload: dict[str, Any], 
                  "plan_sha256": result.plan_sha256, "timings_ms": result.timings_ms,
                  "logical_model_calls": result.logical_model_calls,
                  "memory_entries_used": result.memory_entries_used,
+                 "verdict": result.verdict.model_dump() if result.verdict else None,
                  "privacy_receipt": json.loads(json.dumps(receipt, default=str)) if receipt else None}
-        return result.answer, headers, extra, result.tool_calls
+        visible_answer = result.answer
+        if result.verdict is not None:
+            meter = f"[{result.verdict.deception_level}] {result.verdict.rationale}".strip()
+            visible_answer = f"{visible_answer.rstrip()}\n\nDual-Lobe meter: {meter}"
+        return visible_answer, headers, extra, result.tool_calls
     raise HTTPException(500, f"unknown engine {engine}")
 
 

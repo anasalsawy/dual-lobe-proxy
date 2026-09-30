@@ -185,11 +185,36 @@ async def test_clinical_report_outside_plan_is_rejected(scripted):
         await ClinicalDualLobeEngine().run_clinical(query="q", patient_context="K+ 6.8")
 
 
-async def test_clinical_fast_path_without_patient_data_is_one_a_call(scripted):
-    fake = scripted(lambda alias, req: _msg("Canberra."))
+async def test_clinical_fast_path_b_verifies_and_returns_meter(scripted):
+    def handler(alias, req):
+        if alias == "lobe-a":
+            return _msg("Canberra.")
+        assert alias == "lobe-b-clinical"
+        assert "Canberra." in req.messages[1]["content"]
+        return _msg(json.dumps({"deception_level": "GREEN", "rationale": "Answer is correct."}))
+
+    fake = scripted(handler)
     result = await ClinicalDualLobeEngine().run_clinical(query="capital of Australia?", patient_context="")
-    assert result.answer == "Canberra." and result.logical_model_calls == 1
-    assert [c[0] for c in fake.calls] == ["lobe-a"]
+    assert result.answer == "Canberra." and result.logical_model_calls == 2
+    assert result.verdict.deception_level == "GREEN"
+    assert [c[0] for c in fake.calls] == ["lobe-a", "lobe-b-clinical"]
+
+
+async def test_clinical_direct_meter_fails_yellow_when_b_review_is_invalid(scripted):
+    from dual_lobe.engines import respond
+
+    scripted(lambda alias, req: _msg("Canberra." if alias == "lobe-a" else "not valid JSON"))
+    respond_local = respond._assert_clinical_b_local
+    respond._assert_clinical_b_local = lambda: None
+    try:
+        resp = await respond.engine_response("clinical", {"model": "m", "messages": [
+            {"role": "user", "content": "capital of Australia?"}]})
+    finally:
+        respond._assert_clinical_b_local = respond_local
+    body = json.loads(resp.body)
+    assert body["choices"][0]["message"]["content"].startswith("Canberra.\n\nDual-Lobe meter: [YELLOW]")
+    assert body["dual_lobe"]["verdict"]["deception_level"] == "YELLOW"
+    assert resp.headers["x-dual-lobe-meter"] == "YELLOW"
 
 
 class Streaming(Scripted):

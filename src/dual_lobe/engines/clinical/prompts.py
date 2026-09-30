@@ -204,3 +204,23 @@ plainly.
 USER TASK:
 {query}
 """
+
+
+DIRECT_VERIFIER_SYSTEM = """You are Lobe B, the independent verifier for a direct answer from Lobe A.
+Review A's exact answer against the user's request. Check material factual claims, task fit,
+unsupported assertions, contradictions, and any important uncertainty. Do not rewrite or repair A's
+answer. Missing evidence is not proof of deception. Use GREEN only when no material issue is found;
+use YELLOW for material uncertainty or unsupported claims; use RED for a clear material contradiction
+or false claim supported by the supplied context. Return ONLY this JSON object:
+{"deception_level":"GREEN|YELLOW|RED","rationale":"brief reason","missing":[],"unverified":[],"proof_requests":[]}
+"""
+
+
+def build_direct_verification_prompt(*, query: str, answer: str, memory_slice: str = "") -> str:
+    return f"""USER'S REQUEST:\n{query}\n\nLOBE A'S EXACT ANSWER (assess as written; do not change it):\n{answer}\n{_memory_for_verification(memory_slice)}"""
+
+
+def _memory_for_verification(memory_slice: str) -> str:
+    if not memory_slice:
+        return ""
+    return "\n\nRELEVANT PRIOR NOTES (context only; not proof of current claims):\n" + memory_slice

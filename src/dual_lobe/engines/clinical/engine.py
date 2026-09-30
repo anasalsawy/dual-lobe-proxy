@@ -31,12 +31,14 @@ from typing import Any, Callable
 
 from ...core.settings import get_settings
 from ...provider import calltrace
-from ..common import AgentPause, ProxyToolTrace, Tool, client_tool_names, run_agent, stream_text
+from ..common import AgentPause, ProxyToolTrace, Tool, client_tool_names, extract_json_object, run_agent, stream_text
 from ..split.memory import JsonlMemoryStore
 from ..split.tools import memory_search_tool
+from ..split.models import Verdict, Handoff
 from .models import ExecutionReport, Plan, PlanContract
 from .privacy import EphemeralTokenVault, PrivacyGuard, PrivacyReceipt, ProviderPrivacyPolicy
-from .prompts import build_direct_prompt, build_execution_prompt, build_final_review_prompt, build_plan_prompt, build_revision_prompt
+from .prompts import (DIRECT_VERIFIER_SYSTEM, build_direct_prompt, build_direct_verification_prompt,
+                      build_execution_prompt, build_final_review_prompt, build_plan_prompt, build_revision_prompt)
 from .tools import (
     B_EXECUTOR_SYSTEM,
     CLINICAL_B_ALIAS,
@@ -89,6 +91,7 @@ class ClinicalRunResult:
     execution_report: str
     delegated_results: str
     answer: str
+    verdict: Verdict | None = None
     trace_event_count: int = 0
     trace_sha256: str = ""
     timings_ms: dict[str, int | float] = field(default_factory=dict)
@@ -219,6 +222,27 @@ class ClinicalDualLobeEngine:
     def _server_tools(self, trace: ProxyToolTrace) -> list[Tool]:
         return [*self.execution_tools, memory_search_tool(self.memory, trace)]
 
+    async def _verify_direct_answer(self, *, query: str, answer: str, memory_slice: str) -> Verdict:
+        """Have B assess A's unchanged direct answer; missing/invalid B output is never GREEN."""
+        fallback = Verdict(deception_level="YELLOW",
+                           rationale="B verification failed or returned an invalid review; answer remains unverified.",
+                           handoff=Handoff(unverified=["A's direct answer could not be independently verified"]))
+        try:
+            with calltrace.stage("B-verify"):
+                raw = await self._call(alias=CLINICAL_B_ALIAS, system=DIRECT_VERIFIER_SYSTEM,
+                                       prompt=build_direct_verification_prompt(query=query, answer=answer,
+                                                                               memory_slice=memory_slice),
+                                       max_tokens=min(clinical_b_tokens(), 1200))
+            parsed = extract_json_object(raw)
+            return Verdict(deception_level=parsed.get("deception_level"),
+                           rationale=str(parsed.get("rationale") or "B returned no rationale."),
+                           handoff=Handoff(missing=parsed.get("missing") or [],
+                                           unverified=parsed.get("unverified") or [],
+                                           proof_requests=parsed.get("proof_requests") or []))
+        except Exception:  # noqa: BLE001
+            LOG.warning("clinical direct-answer verification failed", exc_info=True)
+            return fallback
+
     def _remember(self, *, sanitized_query: str, plan: Plan, summary: str, answer: str,
                   vault: EphemeralTokenVault) -> None:
         """Write one sanitized long-term memory entry after the response (never raw patient data)."""
@@ -250,14 +274,24 @@ class ClinicalDualLobeEngine:
         memory_slice = "\n\n".join(f"- {x}" for x in memory_hits)[:4000]
 
         if not patient_context.strip() and not self.execution_tools and not client_tools:
-            # Fast path: no patient data and no tools, so there is nothing for B to
-            # execute. A answers directly (still from the sanitized query).
+            # Direct-answer path: A answers without a plan; B still independently verifies it.
             try:
                 t = time.perf_counter()
                 with calltrace.stage("A-direct"):
                     answer = await self._answer(build_direct_prompt(sanitized_query) + _memory_block(memory_slice),
                                             on_delta)
                 timings["a_answer_ms"] = int((time.perf_counter() - t) * 1000)
+                t = time.perf_counter()
+                verdict = await self._verify_direct_answer(query=sanitized_query, answer=answer,
+                                                           memory_slice=memory_slice)
+                if verdict.deception_level == "GREEN" and (verdict.handoff.missing or verdict.handoff.unverified
+                                                            or verdict.handoff.proof_requests):
+                    verdict = verdict.model_copy(update={
+                        "deception_level": "YELLOW",
+                        "rationale": ("Material evidence gaps remain unresolved; GREEN is not allowed. "
+                                      + verdict.rationale)[:1600],
+                    })
+                timings["b_verify_ms"] = int((time.perf_counter() - t) * 1000)
                 if local_delivery is not None:
                     local_delivery(vault.rehydrate_text(answer))
                 plan = Plan(goal=sanitized_query[:200] or "answer", steps=[{"id": "S1", "action": "answer directly"}],
@@ -266,7 +300,7 @@ class ClinicalDualLobeEngine:
                 result = ClinicalRunResult(
                     sanitized_query=sanitized_query, sanitized_patient_context=sanitized_context, plan=plan,
                     plan_revision=0, plan_sha256="", execution_report="", delegated_results="", answer=answer,
-                    timings_ms=timings, logical_model_calls=1, privacy_receipt=receipt,
+                    timings_ms=timings, logical_model_calls=2, privacy_receipt=receipt, verdict=verdict,
                     memory_entries_used=len(memory_hits))
             finally:
                 vault.destroy_key()
