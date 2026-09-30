@@ -86,6 +86,8 @@ async def engine_response(engine: str, payload: dict[str, Any]):
     else:
         raise HTTPException(500, f"unknown engine {engine}")
 
+    # HTTP header values must be latin-1; B's rationale often is not (dashes, curly quotes).
+    headers = {k: str(v).encode("latin-1", "replace").decode("latin-1") for k, v in headers.items()}
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
     model = payload.get("model") or engine

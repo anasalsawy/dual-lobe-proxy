@@ -81,6 +81,27 @@ async def test_split_a_delegates_live_b_runs_and_b_verdict_is_hardened(scripted,
     assert (tmp_path / "m.jsonl").exists() and (tmp_path / "m.b.jsonl").exists()
 
 
+async def test_non_latin1_rationale_does_not_break_headers(scripted, tmp_path, monkeypatch):
+    from dual_lobe.engines import respond
+
+    monkeypatch.setenv("DUAL_LOBE_MEMORY_PATH", str(tmp_path / "m.jsonl"))
+
+    def handler(alias, req):
+        if alias == "lobe-a":
+            return _msg("Einstein won for the photoelectric effect.")
+        if "running CONTINUOUSLY" in req.messages[1]["content"]:
+            return _msg(json.dumps({"intervene": False, "state_note": ""}))
+        return _msg(json.dumps({"final_answer": "Einstein won for the photoelectric effect.",
+                                "answer_verdict": {"deception_level": "GREEN",
+                                                   "rationale": "Correct — premise “relativity” fixed"}}))
+
+    scripted(handler)
+    resp = await respond.engine_response("split", {"model": "m", "messages": [{"role": "user", "content": "q"}]})
+    assert resp.status_code == 200
+    assert resp.headers["x-dual-lobe-meter"] == "GREEN"
+    assert "Correct ? premise ?relativity? fixed" == resp.headers["x-dual-lobe-meter-rationale"]
+
+
 async def test_split_b_failure_is_yellow_never_green(scripted, tmp_path):
     def handler(alias, req):
         if alias == "lobe-a":
