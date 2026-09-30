@@ -122,6 +122,10 @@ PLAN = {"goal": "g", "constraints": [], "steps": [{"id": "S1", "action": "check 
                                                     "depends_on": []}], "success_condition": "done"}
 
 
+def _plan_call(plan, call_id="plan1"):
+    return [_call("create_execution_plan", plan, call_id)]
+
+
 async def test_clinical_a_plans_on_sanitized_data_b_executes_raw_a_reviews(scripted):
     seen = {}
 
@@ -132,7 +136,7 @@ async def test_clinical_a_plans_on_sanitized_data_b_executes_raw_a_reviews(scrip
             return _msg("Final: hold spironolactone.")
         if alias == "lobe-a":
             seen["plan"] = user
-            return _msg(json.dumps(PLAN))
+            return _msg(tool_calls=_plan_call(PLAN))
         assert alias == "lobe-b-clinical"
         seen["exec"] = user
         return _msg(json.dumps({"plan_revision": 0, "steps": [{"id": "S1", "status": "completed",
@@ -147,7 +151,8 @@ async def test_clinical_a_plans_on_sanitized_data_b_executes_raw_a_reviews(scrip
     assert "jane@x.org" in seen["exec"]                                            # local B sees raw data
     assert "jane@x.org" not in seen["review"]                                      # B's report sanitized for A
     assert [c[0] for c in fake.calls] == ["lobe-a", "lobe-b-clinical", "lobe-a"]
-    assert all(not c[2] for c in fake.calls if c[0] == "lobe-a")                   # A has no tools
+    assert all([t["function"]["name"] for t in c[2]] == ["create_execution_plan"]
+               for c in fake.calls if c[0] == "lobe-a")  # A can create a plan; B owns execution tools
     assert result.logical_model_calls == 3
     assert result.privacy_receipt.vault_key_destroyed
 
@@ -162,7 +167,7 @@ async def test_clinical_b_consult_revises_plan_contract(scripted):
         if alias == "lobe-a" and "B EXECUTION REPORT" in user:
             return _msg("done")
         if alias == "lobe-a":
-            return _msg(json.dumps(PLAN))
+            return _msg(tool_calls=_plan_call(PLAN))
         if len(req.messages) == 2:
             return _msg(tool_calls=[_call("consult_planner", {"concern": "K too high", "evidence": "6.8"})])
         assert "PLAN_REVISED revision=1" in req.messages[-1]["content"]
@@ -177,24 +182,27 @@ async def test_clinical_b_consult_revises_plan_contract(scripted):
 async def test_clinical_report_outside_plan_is_rejected(scripted):
     def handler(alias, req):
         if alias == "lobe-a":
-            return _msg(json.dumps(PLAN))
+            return _msg(tool_calls=_plan_call(PLAN))
         return _msg(json.dumps({"plan_revision": 0, "steps": [{"id": "S9", "status": "completed"}]}))
 
     scripted(handler)
     with pytest.raises(RuntimeError, match="outside the current plan"):
-        await ClinicalDualLobeEngine().run_clinical(query="q", patient_context="K+ 6.8")
+        # A can choose execution even when the system has no context/tools to infer from.
+        await ClinicalDualLobeEngine().run_clinical(query="q", patient_context="")
 
 
-async def test_clinical_fast_path_b_verifies_and_returns_meter(scripted):
+async def test_clinical_a_chooses_direct_answer_then_b_verifies(scripted):
     def handler(alias, req):
         if alias == "lobe-a":
+            assert "answer the user naturally" in req.messages[1]["content"]
             return _msg("Canberra.")
         assert alias == "lobe-b-clinical"
         assert "Canberra." in req.messages[1]["content"]
         return _msg(json.dumps({"deception_level": "GREEN", "rationale": "Answer is correct."}))
 
     fake = scripted(handler)
-    result = await ClinicalDualLobeEngine().run_clinical(query="capital of Australia?", patient_context="")
+    result = await ClinicalDualLobeEngine(execution_tools=[common.Tool("available_tool", "tool", {}, lambda: "ok")]).run_clinical(
+        query="capital of Australia?", patient_context="")
     assert result.answer == "Canberra." and result.logical_model_calls == 2
     assert result.verdict.deception_level == "GREEN"
     assert [c[0] for c in fake.calls] == ["lobe-a", "lobe-b-clinical"]
@@ -238,7 +246,7 @@ async def test_clinical_stream_sends_final_answer_as_it_is_generated(monkeypatch
 
     def handler(alias, req):
         if alias == "lobe-a":
-            return _msg(json.dumps(PLAN))
+            return _msg(tool_calls=_plan_call(PLAN))
         return _msg(json.dumps({"plan_revision": 0, "steps": [{"id": "S1", "status": "completed"}]}))
 
     fake = Streaming(handler)
@@ -273,7 +281,7 @@ def _tool_handler(seen):
             return _msg("It is 18C and sunny in Paris.")
         if alias == "lobe-a":
             seen["plan"] = user
-            return _msg(json.dumps(PLAN_TOOL))
+            return _msg(tool_calls=_plan_call(PLAN_TOOL))
         seen.setdefault("b_tools", [t["function"]["name"] for t in (req.tools or [])])
         if req.messages[-1]["role"] == "tool" and req.messages[-1]["tool_call_id"] == "w1":
             seen["b_saw_result"] = req.messages[-1]["content"]
@@ -344,7 +352,7 @@ async def test_clinical_long_term_memory_is_sanitized_and_read_back(scripted, tm
             return _msg("Hold spironolactone for <PHI:EMAIL:X>.")
         if alias == "lobe-a":
             seen.append(user)
-            return _msg(json.dumps(PLAN))
+            return _msg(tool_calls=_plan_call(PLAN))
         return _msg(json.dumps({"plan_revision": 0, "steps": [{"id": "S1", "status": "completed"}],
                                 "summary": "K 6.8 checked for jane@x.org"}))
 
@@ -387,7 +395,7 @@ async def test_clinical_b_is_sent_back_when_it_skips_planned_tools(scripted):
         if alias == "lobe-a" and "B EXECUTION REPORT" in user:
             return _msg("18C in Paris.")
         if alias == "lobe-a":
-            return _msg(json.dumps(PLAN_TOOL))
+            return _msg(tool_calls=_plan_call(PLAN_TOOL))
         b_turns.append(req.messages[-1])
         if req.messages[-1]["role"] == "user" and "did not call them" in req.messages[-1]["content"]:
             return _msg(tool_calls=[_call("get_weather", {"city": "Paris"}, "w9")])

@@ -31,14 +31,16 @@ from typing import Any, Callable
 
 from ...core.settings import get_settings
 from ...provider import calltrace
+from ...provider.adapters import NormalizedRequest, response_dict
+from .. import common
 from ..common import AgentPause, ProxyToolTrace, Tool, client_tool_names, extract_json_object, run_agent, stream_text
 from ..split.memory import JsonlMemoryStore
 from ..split.tools import memory_search_tool
 from ..split.models import Verdict, Handoff
 from .models import ExecutionReport, Plan, PlanContract
 from .privacy import EphemeralTokenVault, PrivacyGuard, PrivacyReceipt, ProviderPrivacyPolicy
-from .prompts import (DIRECT_VERIFIER_SYSTEM, build_direct_prompt, build_direct_verification_prompt,
-                      build_execution_prompt, build_final_review_prompt, build_plan_prompt, build_revision_prompt)
+from .prompts import (DIRECT_VERIFIER_SYSTEM, build_direct_verification_prompt, build_execution_prompt,
+                      build_final_review_prompt, build_revision_prompt, build_a_work_prompt)
 from .tools import (
     B_EXECUTOR_SYSTEM,
     CLINICAL_B_ALIAS,
@@ -51,11 +53,10 @@ from .tools import (
 LOG = logging.getLogger("dual_lobe.engines.clinical")
 
 PLANNER_AGENT_SYSTEM = (
-    "Role: Lobe A — Planner and User-Facing Intelligence\n"
-    "Goal: Understand the user's goal, create or revise the complete plan, and judge whether execution actually "
-    "fulfilled it.\n\n"
-    "You are the reasoning lobe. You do not own execution tools. You think, plan, revise when challenged by the "
-    "execution lobe, and communicate the final result to the user."
+    "Role: Lobe A — Reasoning and User-Facing Intelligence\n"
+    "Work normally: answer directly when execution is unnecessary, or use the create_execution_plan function "
+    "to hand B a complete plan when execution is needed. After B executes, review B's report and communicate "
+    "the verified result to the user. You own reasoning, planning, and final review; B owns execution."
 )
 
 CLIENT_TOOLS_NOTE = (
@@ -185,19 +186,49 @@ class ClinicalDualLobeEngine:
     def _a_tokens() -> int:
         return int(os.getenv("DUAL_LOBE_A_MAX_TOKENS", "8000"))
 
-    async def _make_plan(self, *, query: str, patient_context: str, memory_slice: str,
-                         client_tools: list[dict[str, Any]]) -> Plan:
-        # Plans are compact JSON; a small budget keeps A's first call fast.
-        tool_names = ", ".join(sorted({(t.get("function") or {}).get("name", "") for t in client_tools}))
-        with calltrace.stage("A-plan"):
-            raw = await self._call(alias="lobe-a", system=PLANNER_AGENT_SYSTEM,
-                               prompt=build_plan_prompt(query=query, patient_context=patient_context)
-                               + _memory_block(memory_slice)
-                               + (f"\n\nTOOLS B CAN USE DURING EXECUTION: {tool_names}. Plan steps that use them "
-                                  "where they provide the needed data." if tool_names else "")
-                               + "\nKeep the plan compact: the fewest steps that achieve the goal, short actions.",
-                               max_tokens=int(os.getenv("DUAL_LOBE_CLINICAL_PLAN_MAX_TOKENS", "1500")))
-        return Plan.from_text(raw)
+    async def _a_work(self, *, query: str, patient_context: str, memory_slice: str,
+                      client_tools: list[dict[str, Any]]) -> tuple[str | None, Plan | None]:
+        """A answers normally, or signals B handoff by calling create_execution_plan."""
+        tool_descriptions = []
+        for item in client_tools:
+            fn = item.get("function") or {}
+            if fn.get("name"):
+                tool_descriptions.append(f"{fn['name']}: {fn.get('description') or 'No description supplied.'}")
+        tool_descriptions.extend(f"{tool.name}: {tool.description}" for tool in self.execution_tools)
+        prompt = build_a_work_prompt(query=query, patient_context=patient_context,
+                                     available_tools=tool_descriptions, memory_slice=memory_slice)
+        plan_tool = {"type": "function", "function": {
+            "name": "create_execution_plan",
+            "description": "Hand a complete execution plan to Lobe B. Call only when this task needs execution.",
+            "parameters": {"type": "object", "properties": {
+                "goal": {"type": "string"},
+                "constraints": {"type": "array", "items": {"type": "string"}},
+                "steps": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
+                    "id": {"type": "string"}, "action": {"type": "string"},
+                    "parallelizable": {"type": "boolean"},
+                    "depends_on": {"type": "array", "items": {"type": "string"}},
+                }, "required": ["id", "action"]}},
+                "success_condition": {"type": "string"},
+            }, "required": ["goal", "steps", "success_condition"]}}
+        }
+        with calltrace.stage("A-work"):
+            response = await common.get_registry().adapter("lobe-a").buffered(NormalizedRequest(
+                messages=[{"role": "system", "content": PLANNER_AGENT_SYSTEM}, {"role": "user", "content": prompt}],
+                max_tokens=self._a_tokens(),
+                timeout=get_settings().a_timeout, tools=[plan_tool], tool_choice="auto"))
+        data = response_dict(response)
+        message = ((data.get("choices") or [{}])[0].get("message") or {})
+        calls = message.get("tool_calls") or []
+        if not calls:
+            answer = str(message.get("content") or "").strip()
+            if not answer:
+                raise RuntimeError("lobe-a returned neither a direct answer nor an execution plan")
+            return answer, None
+        if len(calls) != 1 or ((calls[0].get("function") or {}).get("name") != "create_execution_plan"):
+            raise RuntimeError("lobe-a returned an unexpected tool call instead of answering or creating a plan")
+        args = (calls[0].get("function") or {}).get("arguments") or "{}"
+        plan_data = args if isinstance(args, dict) else extract_json_object(str(args))
+        return None, Plan.model_validate(plan_data)
 
     async def _revise_plan(self, *, query: str, patient_context: str, contract: PlanContract, concern: str,
                            evidence: str) -> Plan:
@@ -273,14 +304,24 @@ class ClinicalDualLobeEngine:
         memory_hits = await asyncio.to_thread(self.memory.search, sanitized_query, 4, include_split_experience=False)
         memory_slice = "\n\n".join(f"- {x}" for x in memory_hits)[:4000]
 
-        if not patient_context.strip() and not self.execution_tools and not client_tools:
-            # Direct-answer path: A answers without a plan; B still independently verifies it.
+        trace = ProxyToolTrace()
+        delegate_state = ExecutionDelegateState()
+        try:
+            t = time.perf_counter()
+            direct_answer, plan = await self._a_work(query=sanitized_query, patient_context=sanitized_context,
+                                                    memory_slice=memory_slice, client_tools=client_tools)
+            timings["a_work_ms"] = int((time.perf_counter() - t) * 1000)
+        except BaseException:
+            delegate_state.close()
+            vault.destroy_key()
+            raise
+
+        if plan is None:
+            # A answered normally without a plan; B independently verifies that exact answer.
             try:
-                t = time.perf_counter()
-                with calltrace.stage("A-direct"):
-                    answer = await self._answer(build_direct_prompt(sanitized_query) + _memory_block(memory_slice),
-                                            on_delta)
-                timings["a_answer_ms"] = int((time.perf_counter() - t) * 1000)
+                answer = str(direct_answer or "").strip()
+                if on_delta is not None:
+                    await on_delta(answer)
                 t = time.perf_counter()
                 verdict = await self._verify_direct_answer(query=sanitized_query, answer=answer,
                                                            memory_slice=memory_slice)
@@ -308,17 +349,10 @@ class ClinicalDualLobeEngine:
             result.timings_ms["total_ms"] = int((time.perf_counter() - started) * 1000)
             return result
 
-        trace = ProxyToolTrace()
-        delegate_state = ExecutionDelegateState()
-        try:
-            t = time.perf_counter()
-            plan = await self._make_plan(query=sanitized_query, patient_context=sanitized_context,
-                                         memory_slice=memory_slice, client_tools=client_tools)
-            timings["a_plan_ms"] = int((time.perf_counter() - t) * 1000)
-        except BaseException:
+        if plan is None:  # Defensive runtime guard.
             delegate_state.close()
             vault.destroy_key()
-            raise
+            raise RuntimeError("lobe-a selected execution without a plan")
         contract = PlanContract(plan)
         trace.add("plan_frozen", input_text=f"revision={contract.revision}", output_text=contract.current_json(),
                   provenance="deterministic_plan_contract")
