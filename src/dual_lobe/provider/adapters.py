@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field, fields
 from typing import Any, AsyncIterator
 
 import httpx
 
-from . import ratelimit
+from . import calltrace, ratelimit
 
 CHAT_COMPLETIONS = "chat_completions"
 RESPONSES = "responses"
@@ -94,27 +95,59 @@ class ChatCompletionsAdapter:
         return {"Authorization": f"Bearer {self.target.api_key}"}
 
     async def buffered(self, req: NormalizedRequest):
-        gate = ratelimit.gate_for(self.target)
-        await gate.acquire(ratelimit.estimate_request_tokens(req))
-        response = await get_http_client().post(
-            self._endpoint(), headers=self._headers(),
-            json={**self._base_kwargs(req), "stream": False}, timeout=req.timeout,
-        )
-        gate.observe(response.headers, response.status_code,
-                     body=response.text if response.status_code == 429 else "")
-        response.raise_for_status()
-        data = response.json()
-        if isinstance(data, dict):
-            gate.record_usage(data.get("usage"))
-        return data
+        started = time.perf_counter()
+        gate_wait, status, usage, error = 0.0, None, None, ""
+        try:
+            gate = ratelimit.gate_for(self.target)
+            await gate.acquire(ratelimit.estimate_request_tokens(req))
+            gate_wait = time.perf_counter() - started
+            response = await get_http_client().post(
+                self._endpoint(), headers=self._headers(),
+                json={**self._base_kwargs(req), "stream": False}, timeout=req.timeout,
+            )
+            status = response.status_code
+            gate.observe(response.headers, response.status_code,
+                         body=response.text if response.status_code == 429 else "")
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, dict):
+                usage = data.get("usage")
+                gate.record_usage(usage)
+            return data
+        except BaseException as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            calltrace.record_call(target=self.target, started=started, gate_wait=gate_wait, status=status,
+                                  usage=usage, error=error)
 
     async def stream(self, req: NormalizedRequest) -> AsyncIterator[dict[str, Any]]:
+        started = time.perf_counter()
+        trace = {"gate_wait": 0.0, "status": None, "usage": None, "first": None, "error": ""}
+        try:
+            async for chunk in self._stream(req, started, trace):
+                if trace["first"] is None and any(
+                        (c.get("delta") or {}).get("content") or (c.get("delta") or {}).get("tool_calls")
+                        for c in chunk.get("choices") or []):
+                    trace["first"] = time.perf_counter()
+                yield chunk
+        except BaseException as exc:
+            trace["error"] = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            calltrace.record_call(target=self.target, started=started, gate_wait=trace["gate_wait"],
+                                  status=trace["status"], usage=trace["usage"], error=trace["error"],
+                                  first_token=trace["first"], stream=True)
+
+    async def _stream(self, req: NormalizedRequest, started: float, trace: dict) -> AsyncIterator[dict[str, Any]]:
         gate = ratelimit.gate_for(self.target)
         await gate.acquire(ratelimit.estimate_request_tokens(req))
+        trace["gate_wait"] = time.perf_counter() - started
         async with get_http_client().stream(
             "POST", self._endpoint(), headers=self._headers(),
             json={**self._base_kwargs(req), "stream": True}, timeout=req.timeout,
         ) as response:
+            trace["status"] = response.status_code
             if response.status_code == 429:
                 try:
                     body = (await response.aread()).decode("utf-8", "replace")
@@ -142,6 +175,7 @@ class ChatCompletionsAdapter:
                     if not isinstance(chunk, dict) or "error" in chunk:
                         raise ValueError("invalid upstream SSE chunk")
                     if chunk.get("usage"):
+                        trace["usage"] = chunk["usage"]
                         gate.record_usage(chunk["usage"])
                     # Forward every choice/tool fragment without reconstruction.
                     yield chunk

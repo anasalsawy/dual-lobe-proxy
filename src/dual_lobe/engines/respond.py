@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..core.settings import get_settings
+from ..provider import calltrace
 
 
 def _text(content: Any) -> str:
@@ -122,6 +123,13 @@ async def _run(engine: str, message: str, system: str, payload: dict[str, Any], 
     raise HTTPException(500, f"unknown engine {engine}")
 
 
+async def _run_traced(*args, **kwargs):
+    content, headers, extra, tool_calls = await _run(*args, **kwargs)
+    # Per-call latency log for this request (every upstream model call and tool run).
+    extra = {**extra, "calls": calltrace.snapshot(), "server_ms": calltrace.now_ms()}
+    return content, headers, extra, tool_calls
+
+
 async def engine_response(engine: str, payload: dict[str, Any]):
     message, system, tool_results = _split_request(payload["messages"],
                                                    allow_tool_results=engine == "clinical")
@@ -130,7 +138,7 @@ async def engine_response(engine: str, payload: dict[str, Any]):
     model = payload.get("model") or engine
 
     if not payload.get("stream"):
-        content, headers, extra, tool_calls = await _run(engine, message, system, payload, tool_results)
+        content, headers, extra, tool_calls = await _run_traced(engine, message, system, payload, tool_results)
         msg: dict[str, Any] = {"role": "assistant", "content": content or None}
         if tool_calls:
             msg["tool_calls"] = tool_calls
@@ -155,7 +163,7 @@ async def engine_response(engine: str, payload: dict[str, Any]):
         async def on_delta(text: str) -> None:
             await queue.put(text)
 
-        job = asyncio.ensure_future(_run(engine, message, system, payload, tool_results, on_delta=on_delta))
+        job = asyncio.ensure_future(_run_traced(engine, message, system, payload, tool_results, on_delta=on_delta))
         streamed: list[str] = []
         yield sse({"role": "assistant", "content": ""})
         while not job.done() or not queue.empty():

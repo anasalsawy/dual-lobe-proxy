@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass, field
 
 from ...core.settings import get_settings
+from ...provider import calltrace
 from ..common import ProxyToolEvent, ProxyToolTrace, extract_json_object, run_agent
 from .memory import JsonlMemoryStore
 from .prompts import ADVERSARIAL_PROTOCOL, OBSERVATION_DISCLAIMER
@@ -146,7 +147,8 @@ Return ONLY JSON:
   "state_note": "the independent adversarial position B is preserving"
 }}"""
         try:
-            raw = await run_agent(alias="lobe-b", system=B_SYSTEM_HEADER + B_ADVERSARY_PERSONA, prompt=prompt,
+            with calltrace.stage("live-B"):
+                raw = await run_agent(alias="lobe-b", system=B_SYSTEM_HEADER + B_ADVERSARY_PERSONA, prompt=prompt,
                                   max_tokens=b_tokens(), timeout=get_settings().b_timeout)
             data = extract_json_object(raw) or {}
         except Exception as exc:  # noqa: BLE001

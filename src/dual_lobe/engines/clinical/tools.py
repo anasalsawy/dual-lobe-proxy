@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
 from ...core.settings import get_settings
+from ...provider import calltrace
 from ..common import ProxyToolTrace, Tool, obj, run_agent
 from .models import Plan, PlanContract
 
@@ -87,7 +88,8 @@ YOUR ASSIGNED STEP:
 
 Execute only this step. Do not rewrite the plan and do not speak to the user.
 Return the actual result and any tool evidence or failure."""
-        return await run_agent(alias=CLINICAL_B_ALIAS, system=B_EXECUTOR_SYSTEM, prompt=prompt,
+        with calltrace.stage(f"B-parallel-{step.id}"):
+            return await run_agent(alias=CLINICAL_B_ALIAS, system=B_EXECUTOR_SYSTEM, prompt=prompt,
                                max_tokens=clinical_b_tokens(), timeout=get_settings().a_timeout,
                                tools=list(execution_tools))
 

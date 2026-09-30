@@ -26,6 +26,7 @@ import uuid
 from typing import Any
 
 from ..core.settings import get_settings
+from ..provider import calltrace
 from ..provider.adapters import NormalizedRequest, response_dict
 from ..provider.registry import get_registry
 from ..proxy.tools import (
@@ -586,10 +587,11 @@ async def gated_response(
     enriched_messages, a_adapter, a_req, proxy_on = _prepare(payload, run_id, public_model, shared_text)
 
     try:
-        a_response = await asyncio.wait_for(
-            a_adapter.buffered(a_req),
-            timeout=s.a_timeout,
-        )
+        with calltrace.stage("A"):
+            a_response = await asyncio.wait_for(
+                a_adapter.buffered(a_req),
+                timeout=s.a_timeout,
+            )
         a_data = response_dict(a_response)
     except Exception as exc:
         LOG.error("gated A call failed run=%s: %s", run_id, exc)
@@ -601,6 +603,7 @@ async def gated_response(
     # ── 2b. Proxy tools: inline execution + ONE same-turn continuation ──
     proxy_used: dict[str, int] = {}
     if proxy_on:
+      with calltrace.stage("A-proxy-tools"):
         a_data, proxy_used = await _resolve_proxy_tools(
             a_data=a_data, enriched_messages=enriched_messages, payload=payload,
             tenant_id=tenant_id, space=shared_space, run_id=run_id,
@@ -669,7 +672,8 @@ async def gated_stream(
     yield sse({"role": "assistant", "content": ""})
     chunks: list[dict[str, Any]] = []
     try:
-        async with asyncio.timeout(s.a_timeout):
+        with calltrace.stage("A"):
+          async with asyncio.timeout(s.a_timeout):
             async for chunk in a_adapter.stream(a_req):
                 chunks.append(chunk)
                 for choice in chunk.get("choices") or []:
@@ -687,6 +691,7 @@ async def gated_stream(
 
     proxy_used: dict[str, int] = {}
     if proxy_on:
+      with calltrace.stage("A-proxy-tools"):
         a_data, proxy_used = await _resolve_proxy_tools(
             a_data=a_data, enriched_messages=enriched_messages, payload=payload,
             tenant_id=tenant_id, space=shared_space, run_id=run_id,
@@ -713,6 +718,8 @@ async def gated_stream(
     finish = "tool_calls" if message.get("tool_calls") else "stop"
     meter = {k[len("X-Dual-Lobe-"):].lower().replace("-", "_"): v for k, v in headers.items()
              if k.startswith("X-Dual-Lobe-")}
+    meter["calls"] = calltrace.snapshot()
+    meter["server_ms"] = calltrace.now_ms()
     yield sse({}, finish, dual_lobe=meter)
     yield "data: [DONE]\n\n"
     if on_done is not None:
@@ -765,10 +772,11 @@ async def _complete(
     handoff: dict[str, Any] = {}
     b_tool_calls: list[dict[str, Any]] = []
     try:
-        b_downstream = await asyncio.wait_for(
-            _call_b_json(b_system, downstream_prompt, b_contract),
-            timeout=s.b_timeout,
-        )
+        with calltrace.stage("B-verify"):
+            b_downstream = await asyncio.wait_for(
+                _call_b_json(b_system, downstream_prompt, b_contract),
+                timeout=s.b_timeout,
+            )
         deception_level = b_downstream.get("deception_level", "GREEN").upper()
         meter_rationale = b_downstream.get("meter_rationale", "No deception detected.")
         concerns = b_downstream.get("concerns", [])
@@ -849,7 +857,8 @@ async def _complete(
             timeout=s.a_timeout,
         )
         try:
-            a_response2 = await asyncio.wait_for(
+            with calltrace.stage("A-flipback"):
+              a_response2 = await asyncio.wait_for(
                 a_adapter.buffered(a_req2),
                 timeout=s.a_timeout,
             )
@@ -862,7 +871,8 @@ async def _complete(
                     f"TOOL EVIDENCE:\n{_extract_tool_evidence(messages)}\n\n"
                     f"A's REVISED OUTPUT:\n{_for_b(a_content2)}\n\n"
                 )
-                b_recheck = await asyncio.wait_for(
+                with calltrace.stage("B-recheck"):
+                  b_recheck = await asyncio.wait_for(
                     _call_b_json(b_system, recheck_prompt, b_contract),
                     timeout=s.b_timeout,
                 )

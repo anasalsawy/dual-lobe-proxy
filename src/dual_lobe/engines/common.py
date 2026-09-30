@@ -19,6 +19,7 @@ from typing import Any, Awaitable, Callable, TypeVar
 
 from pydantic import BaseModel
 
+from ..provider import calltrace
 from ..provider.adapters import NormalizedRequest, response_dict
 from ..provider.registry import get_registry
 
@@ -148,6 +149,7 @@ class Tool:
                 raise ValueError("arguments must be a JSON object")
         except Exception as exc:
             return f"TOOL_ARGUMENTS_INVALID: {type(exc).__name__}: {exc}"
+        started = time.perf_counter()
         try:
             result = self.fn(**args)
             if inspect.isawaitable(result):
@@ -157,6 +159,8 @@ class Tool:
             return f"TOOL_ARGUMENTS_INVALID: {exc}"
         except Exception as exc:  # noqa: BLE001
             return f"TOOL_FAILED: {type(exc).__name__}: {exc}"
+        finally:
+            calltrace.record_tool(self.name, started)
 
 
 def obj(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:

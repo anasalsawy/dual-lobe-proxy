@@ -22,6 +22,7 @@ from ..core import stage as stage_mod
 from ..core.engine import tenant_session
 from ..core.redact import redact_payload
 from ..core.settings import get_settings
+from ..provider import calltrace
 from ..provider.adapters import resolve_request, response_dict
 from ..provider.registry import get_registry
 from ..roles import get_role_persona
@@ -325,6 +326,7 @@ async def chat_completions(
     principal: auth.Principal = Depends(auth.require_scope(auth.SCOPE_INFERENCE_INVOKE)),
 ):
     s = get_settings()
+    calltrace.begin()
     payload = body.model_dump(exclude_none=True)
     messages = payload["messages"]
     if not messages:
@@ -748,6 +750,9 @@ async def chat_completions(
             payload, run_id, principal.tenant_id, alias,
             shared_text=shared_text, shared_space=memory_space,
         )
+        if isinstance(data, dict):
+            data["dual_lobe"] = {**(data.get("dual_lobe") or {}), "calls": calltrace.snapshot(),
+                                 "server_ms": calltrace.now_ms()}
         gate_headers = _headers(gate_headers)
         gate_headers["X-Dual-Lobe-Memory-Space"] = memory_space or "off"
         gate_headers["X-Dual-Lobe-Shared-Entries"] = str(shared_entries)

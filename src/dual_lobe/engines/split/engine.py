@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ...core.settings import get_settings
+from ...provider import calltrace
 from ..common import ProxyToolTrace, parse_model, run_agent
 from .live_b import B_SYSTEM_HEADER, LiveBMonitor, b_tokens
 from .memory import JsonlMemoryStore
@@ -161,7 +162,8 @@ LIVE B:
 
 Solve the user's task completely. Use delegated children aggressively when doing so materially shortens execution time.
 Return only the user-facing candidate answer."""
-        return await self._safe_run(
+        with calltrace.stage("A"):
+            return await self._safe_run(
             fallback_text="PRIMARY_A_CALL_FAILED_OR_EMPTY", alias="lobe-a", system=A_SYSTEM, prompt=prompt,
             max_tokens=int(os.getenv("DUAL_LOBE_A_MAX_TOKENS", "8000")), timeout=get_settings().a_timeout,
             tools=tools)
@@ -233,7 +235,8 @@ Return ONLY JSON:
 }}
 
 Do not include a challenge merely to populate a field. Empty lists are correct when nothing material is found."""
-        raw = await self._safe_run(
+        with calltrace.stage("B-review"):
+            raw = await self._safe_run(
             fallback_text="B_ADVERSARIAL_REVIEW_FAILED_OR_EMPTY", alias="lobe-b",
             system=B_SYSTEM_HEADER + B_ADVERSARY_PERSONA, prompt=prompt, max_tokens=b_tokens(),
             timeout=get_settings().a_timeout, tools=make_worker_tools(self.b_memory, trace=b_trace))

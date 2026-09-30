@@ -350,3 +350,55 @@ async def test_clinical_stream_returns_tool_calls_chunk(scripted):
     tc = [c["choices"][0]["delta"]["tool_calls"] for c in chunks if c["choices"][0]["delta"].get("tool_calls")]
     assert tc and tc[0][0]["function"]["name"] == "get_weather" and tc[0][0]["index"] == 0
     assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
+
+
+async def test_clinical_b_is_sent_back_when_it_skips_planned_tools(scripted):
+    from dual_lobe.engines import respond
+
+    b_turns = []
+
+    def handler(alias, req):
+        user = req.messages[1]["content"]
+        if alias == "lobe-a" and "B EXECUTION REPORT" in user:
+            return _msg("18C in Paris.")
+        if alias == "lobe-a":
+            return _msg(json.dumps(PLAN_TOOL))
+        b_turns.append(req.messages[-1])
+        if req.messages[-1]["role"] == "user" and "did not call them" in req.messages[-1]["content"]:
+            return _msg(tool_calls=[_call("get_weather", {"city": "Paris"}, "w9")])
+        return _msg(json.dumps({"plan_revision": 0, "steps": [{"id": "S1", "status": "completed",
+                                                               "result": "sunny (guessed)"}]}))
+
+    scripted(handler)
+    respond_local = respond._assert_clinical_b_local
+    respond._assert_clinical_b_local = lambda: None
+    try:
+        resp = await respond.engine_response("clinical", {"model": "m", "tools": WEATHER, "messages": [
+            {"role": "user", "content": "Weather in Paris?"}]})
+    finally:
+        respond._assert_clinical_b_local = respond_local
+    body = json.loads(resp.body)
+    assert body["choices"][0]["finish_reason"] == "tool_calls"          # B was made to call the tool
+    assert body["choices"][0]["message"]["tool_calls"][0]["id"] == "w9"
+    assert len(b_turns) == 2
+
+
+async def test_response_carries_per_call_latency_log(scripted):
+    from dual_lobe.engines import respond
+    from dual_lobe.provider import calltrace
+    from dual_lobe.provider.adapters import ProviderTarget
+
+    calltrace.begin()
+    target = ProviderTarget(alias="lobe-a", base_url="https://x.example/v1", api_key="k", model="m1")
+    calltrace.record_call(target=target, started=__import__("time").perf_counter(), gate_wait=0.0,
+                          status=200, usage={"prompt_tokens": 5, "completion_tokens": 2})
+    scripted(lambda alias, req: _msg("Canberra."))
+    # Use split engine (no local-only guard) — the calltrace entries travel with any engine.
+    resp = await respond.engine_response("split", {"model": "m", "messages": [{"role": "user", "content": "q"}]})
+    body = json.loads(resp.body)
+    calls = body["dual_lobe"]["calls"]
+    # The manually-recorded entry must be present plus engine's own entries.
+    manual = [c for c in calls if c.get("lobe") == "lobe-a"]
+    assert len(manual) >= 1
+    assert manual[0]["provider"] == "x.example" and manual[0]["prompt_tokens"] == 5
+    assert body["dual_lobe"]["server_ms"] > 0

@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field
 
 from ...core.settings import get_settings
+from ...provider import calltrace
 from ..common import ProxyToolTrace, Tool, obj, run_agent
 from .memory import JsonlMemoryStore
 from .prompts import CHILD_PERSONA
@@ -162,7 +163,8 @@ You are a temporary compute worker, not Lobe B.
 Do not speak directly to the user.
 Return a self-contained result, relevant evidence, uncertainty, and any failure conditions."""
         try:
-            result = await run_agent(
+            with calltrace.stage(f"A-{job_id}"):
+                result = await run_agent(
                 alias="lobe-a",
                 system=("Role: Temporary Delegated Inference Worker\n"
                         "Goal: Execute the assigned independent subtask quickly and return a self-contained result to Lobe A.\n\n"

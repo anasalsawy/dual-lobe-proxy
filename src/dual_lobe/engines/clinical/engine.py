@@ -30,7 +30,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ...core.settings import get_settings
-from ..common import AgentPause, ProxyToolTrace, Tool, run_agent, stream_text
+from ...provider import calltrace
+from ..common import AgentPause, ProxyToolTrace, Tool, client_tool_names, run_agent, stream_text
 from ..split.memory import JsonlMemoryStore
 from ..split.tools import memory_search_tool
 from .models import ExecutionReport, Plan, PlanContract
@@ -119,6 +120,7 @@ class _RunState:
     b_messages: list[dict[str, Any]] | None = None
     pending_ids: list[str] = field(default_factory=list)
     b_rounds: int = 0
+    tool_nudged: bool = False
     expires: float = 0.0
 
 
@@ -184,7 +186,8 @@ class ClinicalDualLobeEngine:
                          client_tools: list[dict[str, Any]]) -> Plan:
         # Plans are compact JSON; a small budget keeps A's first call fast.
         tool_names = ", ".join(sorted({(t.get("function") or {}).get("name", "") for t in client_tools}))
-        raw = await self._call(alias="lobe-a", system=PLANNER_AGENT_SYSTEM,
+        with calltrace.stage("A-plan"):
+            raw = await self._call(alias="lobe-a", system=PLANNER_AGENT_SYSTEM,
                                prompt=build_plan_prompt(query=query, patient_context=patient_context)
                                + _memory_block(memory_slice)
                                + (f"\n\nTOOLS B CAN USE DURING EXECUTION: {tool_names}. Plan steps that use them "
@@ -195,7 +198,8 @@ class ClinicalDualLobeEngine:
 
     async def _revise_plan(self, *, query: str, patient_context: str, contract: PlanContract, concern: str,
                            evidence: str) -> Plan:
-        raw = await self._call(alias="lobe-a", system=PLANNER_AGENT_SYSTEM, prompt=build_revision_prompt(
+        with calltrace.stage("A-revise"):
+            raw = await self._call(alias="lobe-a", system=PLANNER_AGENT_SYSTEM, prompt=build_revision_prompt(
             query=query, patient_context=patient_context, current_plan_json=contract.current_json(),
             concern=concern, evidence=evidence), max_tokens=self._a_tokens())
         return Plan.from_text(raw)
@@ -250,7 +254,8 @@ class ClinicalDualLobeEngine:
             # execute. A answers directly (still from the sanitized query).
             try:
                 t = time.perf_counter()
-                answer = await self._answer(build_direct_prompt(sanitized_query) + _memory_block(memory_slice),
+                with calltrace.stage("A-direct"):
+                    answer = await self._answer(build_direct_prompt(sanitized_query) + _memory_block(memory_slice),
                                             on_delta)
                 timings["a_answer_ms"] = int((time.perf_counter() - t) * 1000)
                 if local_delivery is not None:
@@ -302,6 +307,14 @@ class ClinicalDualLobeEngine:
         state.b_messages = messages
         return await self._continue(state, on_delta=on_delta, local_delivery=local_delivery)
 
+    @staticmethod
+    def _planned_tools_not_called(state: _RunState) -> list[str]:
+        """Client tools the plan names that B has not called in this run."""
+        plan_text = state.contract.current_json()
+        named = [n for n in client_tool_names(state.client_tools) if n and n in plan_text]
+        called = {e.input_text.split(" ", 1)[0] for e in state.trace.snapshot_from(0) if e.name == "client_tool_call"}
+        return sorted(n for n in named if n not in called)
+
     async def _continue(self, state: _RunState, *, on_delta, local_delivery) -> ClinicalRunResult:
         """Run (or resume) B's execution; pause again for client tools or finish with A's review."""
         contract, trace = state.contract, state.trace
@@ -319,13 +332,33 @@ class ClinicalDualLobeEngine:
             prompt = (build_execution_prompt(query=state.query, patient_context=state.patient_context,
                                              current_plan_json=contract.current_json(), revision=contract.revision)
                       + _memory_block(state.memory_slice))
-            t = time.perf_counter()
-            outcome = await run_agent(
-                alias=CLINICAL_B_ALIAS, system=B_EXECUTOR_SYSTEM + (CLIENT_TOOLS_NOTE if state.client_tools else ""),
-                prompt=prompt, max_tokens=clinical_b_tokens(), timeout=get_settings().a_timeout, tools=tools,
-                client_tools=state.client_tools, history=state.b_messages)
-            state.b_rounds += 1
-            state.timings["b_execute_ms"] = state.timings.get("b_execute_ms", 0) + int((time.perf_counter() - t) * 1000)
+            system_b = B_EXECUTOR_SYSTEM + (CLIENT_TOOLS_NOTE if state.client_tools else "")
+            history = state.b_messages
+            while True:
+                t = time.perf_counter()
+                with calltrace.stage("B-execute"):
+                    outcome = await run_agent(
+                        alias=CLINICAL_B_ALIAS, system=system_b, prompt=prompt, max_tokens=clinical_b_tokens(),
+                        timeout=get_settings().a_timeout, tools=tools, client_tools=state.client_tools,
+                        history=history)
+                state.b_rounds += 1
+                state.timings["b_execute_ms"] = (state.timings.get("b_execute_ms", 0)
+                                                 + int((time.perf_counter() - t) * 1000))
+                if isinstance(outcome, AgentPause):
+                    break
+                missing = self._planned_tools_not_called(state)
+                if not missing or state.tool_nudged:
+                    break
+                # Code-enforced: the plan needs client tools B never called. Send B back once.
+                state.tool_nudged = True
+                nudge = (f"The current plan requires these tools, but you did not call them: {', '.join(missing)}. "
+                         "Call them now to get the real data. Do not report steps as completed without the "
+                         "tool results.")
+                trace.add("tool_use_enforced", input_text=", ".join(missing), output_text=nudge,
+                          provenance="deterministic_plan_contract")
+                base = history or [{"role": "system", "content": system_b}, {"role": "user", "content": prompt}]
+                history = base + [{"role": "assistant", "content": str(outcome or "")},
+                                  {"role": "user", "content": nudge}]
 
             if isinstance(outcome, AgentPause):
                 state.b_messages = outcome.messages
@@ -357,7 +390,8 @@ class ClinicalDualLobeEngine:
                 set(state.receipt.direct_identifier_types) | set(trace_phi_types))), token_count=vault.token_count)
 
             t = time.perf_counter()
-            final_answer = await self._answer(build_final_review_prompt(
+            with calltrace.stage("A-review"):
+                final_answer = await self._answer(build_final_review_prompt(
                 query=state.sanitized_query, patient_context=state.sanitized_context,
                 final_plan_json=contract.current_json(), plan_revision=contract.revision,
                 execution_report=safe_report, delegated_results=safe_delegated, trace_text=safe_trace)
