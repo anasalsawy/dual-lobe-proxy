@@ -82,7 +82,7 @@ async def test_split_a_delegates_live_b_runs_and_b_verdict_is_hardened(scripted,
     assert {"delegate", "delegate_collect", "consult_other_lobe", "b_live_check", "memory_search"} <= a_tools
     assert result.logical_model_calls == 2 + 1 + result.timings_ms["b_live_calls"]
     from dual_lobe.engines.split import engine as split_engine
-    await asyncio.gather(*list(split_engine._BACKGROUND))   # memory is written after the response
+    await asyncio.gather(*[f for f in split_engine._BACKGROUND if f.get_loop() is asyncio.get_running_loop()])   # memory is written after the response
     assert (tmp_path / "m.jsonl").exists() and (tmp_path / "m.b.jsonl").exists()
 
 
@@ -227,3 +227,126 @@ async def test_clinical_stream_sends_final_answer_as_it_is_generated(monkeypatch
     assert [d for d in deltas if d] == ["Hold ", "spironolactone."]      # live pieces, not one blob
     last = [json.loads(l[6:]) for l in body.splitlines() if l.startswith("data: {")][-1]
     assert last["dual_lobe"]["mode"] == "clinical" and last["choices"][0]["finish_reason"] == "stop"
+
+
+@pytest.fixture(autouse=True)
+def _clinical_memory(tmp_path, monkeypatch):
+    monkeypatch.setenv("DUAL_LOBE_CLINICAL_MEMORY_PATH", str(tmp_path / "clinical.jsonl"))
+
+
+WEATHER = [{"type": "function", "function": {"name": "get_weather", "description": "weather",
+                                              "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}]
+PLAN_TOOL = {"goal": "weather", "constraints": [], "steps": [{"id": "S1", "action": "call get_weather for Paris"}],
+             "success_condition": "weather reported"}
+
+
+def _tool_handler(seen):
+    def handler(alias, req):
+        user = req.messages[1]["content"]
+        if alias == "lobe-a" and "B EXECUTION REPORT" in user:
+            seen["review"] = user
+            return _msg("It is 18C and sunny in Paris.")
+        if alias == "lobe-a":
+            seen["plan"] = user
+            return _msg(json.dumps(PLAN_TOOL))
+        seen.setdefault("b_tools", [t["function"]["name"] for t in (req.tools or [])])
+        if req.messages[-1]["role"] == "tool" and req.messages[-1]["tool_call_id"] == "w1":
+            seen["b_saw_result"] = req.messages[-1]["content"]
+            return _msg(json.dumps({"plan_revision": 0, "steps": [
+                {"id": "S1", "status": "completed", "result": "18C sunny", "evidence": "get_weather"}]}))
+        return _msg(tool_calls=[_call("get_weather", {"city": "Paris"}, "w1")])
+    return handler
+
+
+async def test_clinical_b_calls_client_tool_then_resumes_with_result(scripted):
+    from dual_lobe.engines import respond
+
+    seen = {}
+    fake = scripted(_tool_handler(seen))
+    respond_local = respond._assert_clinical_b_local
+    respond._assert_clinical_b_local = lambda: None
+    try:
+        first = await respond.engine_response("clinical", {"model": "m", "tools": WEATHER, "messages": [
+            {"role": "user", "content": "Weather in Paris?"}]})
+        body = json.loads(first.body)
+        choice = body["choices"][0]
+        assert choice["finish_reason"] == "tool_calls"
+        assert choice["message"]["tool_calls"][0]["function"]["name"] == "get_weather"
+        assert "get_weather" in seen["b_tools"] and "memory_search" in seen["b_tools"]
+        assert "get_weather" in seen["plan"]                      # A plans with the tools in view
+        calls_before = len(fake.calls)
+
+        second = await respond.engine_response("clinical", {"model": "m", "tools": WEATHER, "messages": [
+            {"role": "user", "content": "Weather in Paris?"},
+            {"role": "assistant", "content": None, "tool_calls": choice["message"]["tool_calls"]},
+            {"role": "tool", "tool_call_id": "w1", "content": "18C, sunny"}]})
+        body2 = json.loads(second.body)
+        assert second.headers["x-dual-lobe-resumed"] == "true"
+        assert body2["choices"][0]["message"]["content"] == "It is 18C and sunny in Paris."
+        assert seen["b_saw_result"] == "18C, sunny"
+        assert "18C, sunny" in seen["review"]                   # A reviews against the real tool result
+        # Resume did not re-plan: only B (1 call) and A's review (1 call) ran.
+        assert [c[0] for c in fake.calls[calls_before:]] == ["lobe-b-clinical", "lobe-a"]
+    finally:
+        respond._assert_clinical_b_local = respond_local
+
+
+async def test_clinical_tool_results_without_paused_run_start_fresh(scripted):
+    from dual_lobe.engines import respond
+
+    seen = {}
+    scripted(_tool_handler(seen))
+    respond_local = respond._assert_clinical_b_local
+    respond._assert_clinical_b_local = lambda: None
+    try:
+        resp = await respond.engine_response("clinical", {"model": "m", "tools": WEATHER, "messages": [
+            {"role": "user", "content": "Weather in Paris?"},
+            {"role": "assistant", "content": None, "tool_calls": [_call("get_weather", {"city": "Paris"}, "zz")]},
+            {"role": "tool", "tool_call_id": "zz", "content": "18C, sunny"}]})
+        assert resp.headers["x-dual-lobe-resumed"] == "fresh-run"
+    finally:
+        respond._assert_clinical_b_local = respond_local
+
+
+async def test_clinical_long_term_memory_is_sanitized_and_read_back(scripted, tmp_path):
+    from dual_lobe.engines.clinical import engine as clinical_engine
+
+    seen = []
+
+    def handler(alias, req):
+        user = req.messages[1]["content"]
+        if alias == "lobe-a" and "B EXECUTION REPORT" in user:
+            return _msg("Hold spironolactone for <PHI:EMAIL:X>.")
+        if alias == "lobe-a":
+            seen.append(user)
+            return _msg(json.dumps(PLAN))
+        return _msg(json.dumps({"plan_revision": 0, "steps": [{"id": "S1", "status": "completed"}],
+                                "summary": "K 6.8 checked for jane@x.org"}))
+
+    scripted(handler)
+    eng = ClinicalDualLobeEngine()
+    await eng.run_clinical(query="Increase spironolactone?", patient_context="email jane@x.org, K+ 6.8")
+    await asyncio.gather(*[f for f in clinical_engine._BACKGROUND if f.get_loop() is asyncio.get_running_loop()])
+    stored = (tmp_path / "clinical.jsonl").read_text()
+    assert "spironolactone" in stored and "jane@x.org" not in stored        # remembered, no raw PHI
+    result = await ClinicalDualLobeEngine().run_clinical(query="spironolactone again?", patient_context="K+ 6.1")
+    assert result.memory_entries_used == 1
+    assert "LONG-TERM MEMORY" in seen[-1] and "Hold spironolactone" in seen[-1]  # A plans with the memory
+
+
+async def test_clinical_stream_returns_tool_calls_chunk(scripted):
+    from dual_lobe.engines import respond
+
+    scripted(_tool_handler({}))
+    respond_local = respond._assert_clinical_b_local
+    respond._assert_clinical_b_local = lambda: None
+    try:
+        resp = await respond.engine_response("clinical", {"model": "m", "stream": True, "tools": WEATHER,
+                                                          "messages": [{"role": "user", "content": "Weather?"}]})
+        body = "".join([c if isinstance(c, str) else c.decode() async for c in resp.body_iterator])
+    finally:
+        respond._assert_clinical_b_local = respond_local
+    chunks = [json.loads(l[6:]) for l in body.splitlines() if l.startswith("data: {")]
+    tc = [c["choices"][0]["delta"]["tool_calls"] for c in chunks if c["choices"][0]["delta"].get("tool_calls")]
+    assert tc and tc[0][0]["function"]["name"] == "get_weather" and tc[0][0]["index"] == 0
+    assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"

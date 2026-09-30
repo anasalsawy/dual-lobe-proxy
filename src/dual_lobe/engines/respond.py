@@ -40,14 +40,26 @@ def _assert_clinical_b_local() -> None:
                                  "DUAL_LOBE_TESTING_MODE=true and DUAL_LOBE_CLINICAL_B_LOCAL_ONLY=false.")
 
 
-def _split_request(messages: list[dict]) -> tuple[str, str]:
+def _split_request(messages: list[dict], *, allow_tool_results: bool = False) -> tuple[str, str, dict[str, str]]:
+    """Return (latest user message, system text, trailing tool results by tool_call_id)."""
     turns = [m for m in messages if m.get("role") not in {"system", "developer"}]
-    if not turns or turns[-1].get("role") != "user":
-        raise HTTPException(400, "The last message must have role 'user'. "
-                                 "Tool-result messages are not supported by this engine.")
+    tool_results: dict[str, str] = {}
+    if allow_tool_results:
+        while turns and turns[-1].get("role") == "tool":
+            m = turns.pop()
+            tool_results[str(m.get("tool_call_id") or "")] = _text(m.get("content"))
+        if tool_results:
+            # Drop the assistant tool_calls message these results answer.
+            while turns and turns[-1].get("role") == "assistant":
+                turns.pop()
+    users = [m for m in turns if m.get("role") == "user"]
+    if not users or (not tool_results and turns[-1].get("role") != "user"):
+        raise HTTPException(400, "The last message must have role 'user'"
+                                 + ("" if allow_tool_results else
+                                    ". Tool-result messages are not supported by this engine."))
     system = "\n\n".join(_text(m.get("content")) for m in messages
                          if m.get("role") in {"system", "developer"}).strip()
-    return _text(turns[-1].get("content")), system
+    return _text(users[-1].get("content")), system, tool_results
 
 
 def _latin1(headers: dict[str, Any]) -> dict[str, str]:
@@ -55,8 +67,9 @@ def _latin1(headers: dict[str, Any]) -> dict[str, str]:
     return {k: str(v).encode("latin-1", "replace").decode("latin-1") for k, v in headers.items()}
 
 
-async def _run(engine: str, message: str, system: str, on_delta=None) -> tuple[str, dict[str, str], dict]:
-    """Run one engine; return (content, headers, dual_lobe extra)."""
+async def _run(engine: str, message: str, system: str, payload: dict[str, Any], tool_results: dict[str, str],
+               on_delta=None) -> tuple[str, dict[str, str], dict, list | None]:
+    """Run one engine; return (content, headers, dual_lobe extra, tool_calls for the client)."""
     headers: dict[str, str] = {"X-Dual-Lobe-Engine": engine}
     if engine == "split":
         from .split.engine import DualLobeEngine
@@ -72,36 +85,58 @@ async def _run(engine: str, message: str, system: str, on_delta=None) -> tuple[s
                  "intent_risks": result.intent_risks, "overlooked_context": result.overlooked_context,
                  "delegation_note": result.delegation_note, "timings_ms": result.timings_ms,
                  "logical_model_calls": result.logical_model_calls}
-        return result.visible_text(), headers, extra
+        return result.visible_text(), headers, extra, None
     if engine == "clinical":
-        from .clinical.engine import ClinicalDualLobeEngine
+        from .clinical.engine import ClinicalDualLobeEngine, take_pending
 
         _assert_clinical_b_local()
-        # The clinical engine takes the patient record as its own input; the system message carries it.
-        result = await ClinicalDualLobeEngine().run_clinical(query=message, patient_context=system,
-                                                             on_delta=on_delta)
+        engine_obj = ClinicalDualLobeEngine()
+        client_tools = payload.get("tools") or []
+        state = take_pending(list(tool_results)) if tool_results else None
+        if state is not None:
+            headers["X-Dual-Lobe-Resumed"] = "true"
+            result = await engine_obj.resume_clinical(state, tool_results, on_delta=on_delta)
+        else:
+            patient_context = system
+            if tool_results:
+                # The paused run is gone (expired or restarted): start over with the
+                # results the client already has, given to local B as data.
+                headers["X-Dual-Lobe-Resumed"] = "fresh-run"
+                patient_context += ("\n\nRESULTS OF TOOLS CALLED EARLIER IN THIS CONVERSATION:\n"
+                                    + "\n".join(f"[{cid}] {text}" for cid, text in tool_results.items()))
+            # The clinical engine takes the patient record as its own input; the system message carries it.
+            result = await engine_obj.run_clinical(query=message, patient_context=patient_context,
+                                                   on_delta=on_delta, client_tools=client_tools)
         headers["X-Dual-Lobe-Plan-Revision"] = str(result.plan_revision)
         headers["X-Dual-Lobe-Model-Calls"] = str(result.logical_model_calls)
+        headers["X-Dual-Lobe-Memory-Entries"] = str(result.memory_entries_used)
+        if result.tool_calls:
+            headers["X-Dual-Lobe-Tool-Calls"] = str(len(result.tool_calls))
         receipt = asdict(result.privacy_receipt) if result.privacy_receipt else None
         extra = {"mode": "clinical", "plan": result.plan.model_dump(), "plan_revision": result.plan_revision,
                  "plan_sha256": result.plan_sha256, "timings_ms": result.timings_ms,
                  "logical_model_calls": result.logical_model_calls,
+                 "memory_entries_used": result.memory_entries_used,
                  "privacy_receipt": json.loads(json.dumps(receipt, default=str)) if receipt else None}
-        return result.answer, headers, extra
+        return result.answer, headers, extra, result.tool_calls
     raise HTTPException(500, f"unknown engine {engine}")
 
 
 async def engine_response(engine: str, payload: dict[str, Any]):
-    message, system = _split_request(payload["messages"])
+    message, system, tool_results = _split_request(payload["messages"],
+                                                   allow_tool_results=engine == "clinical")
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
     model = payload.get("model") or engine
 
     if not payload.get("stream"):
-        content, headers, extra = await _run(engine, message, system)
+        content, headers, extra, tool_calls = await _run(engine, message, system, payload, tool_results)
+        msg: dict[str, Any] = {"role": "assistant", "content": content or None}
+        if tool_calls:
+            msg["tool_calls"] = tool_calls
         return JSONResponse({
             "id": completion_id, "object": "chat.completion", "created": created, "model": model,
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+            "choices": [{"index": 0, "message": msg, "finish_reason": "tool_calls" if tool_calls else "stop"}],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             "dual_lobe": extra,
         }, headers=_latin1(headers))
@@ -120,20 +155,28 @@ async def engine_response(engine: str, payload: dict[str, Any]):
         async def on_delta(text: str) -> None:
             await queue.put(text)
 
-        job = asyncio.ensure_future(_run(engine, message, system, on_delta=on_delta))
+        job = asyncio.ensure_future(_run(engine, message, system, payload, tool_results, on_delta=on_delta))
         streamed: list[str] = []
         yield sse({"role": "assistant", "content": ""})
         while not job.done() or not queue.empty():
-            try:
-                text = await asyncio.wait_for(queue.get(), timeout=10)
-            except asyncio.TimeoutError:
-                if not job.done():
-                    yield ": dual-lobe working\n\n"
+            if not queue.empty():
+                text = queue.get_nowait()
+                streamed.append(text)
+                yield sse({"content": text})
                 continue
-            streamed.append(text)
-            yield sse({"content": text})
+            # Wake on new text or on the engine finishing, whichever comes first.
+            getter = asyncio.ensure_future(queue.get())
+            done, _ = await asyncio.wait({getter, job}, timeout=10, return_when=asyncio.FIRST_COMPLETED)
+            if getter in done:
+                text = getter.result()
+                streamed.append(text)
+                yield sse({"content": text})
+                continue
+            getter.cancel()
+            if not done:
+                yield ": dual-lobe working\n\n"
         try:
-            content, headers, extra = job.result()
+            content, headers, extra, tool_calls = job.result()
         except Exception as exc:  # noqa: BLE001
             detail = exc.detail if isinstance(exc, HTTPException) else f"{type(exc).__name__}: {exc}"
             yield sse({"content": ("\n\n" if streamed else "") + f"[dual-lobe error: {detail}]"}, "stop")
@@ -143,8 +186,10 @@ async def engine_response(engine: str, payload: dict[str, Any]):
         rest = content[len(sent):] if content.startswith(sent) else ("" if sent else content)
         if rest:
             yield sse({"content": rest})
+        if tool_calls:
+            yield sse({"tool_calls": [{"index": i, **tc} for i, tc in enumerate(tool_calls)]})
         meter = {k[len("X-Dual-Lobe-"):].lower().replace("-", "_"): v for k, v in headers.items()}
-        yield sse({}, "stop", dual_lobe={**extra, **meter})
+        yield sse({}, "tool_calls" if tool_calls else "stop", dual_lobe={**extra, **meter})
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(events(), media_type="text/event-stream", headers=_latin1(

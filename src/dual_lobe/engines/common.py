@@ -13,6 +13,7 @@ import json
 import re
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, TypeVar
 
@@ -162,6 +163,20 @@ def obj(properties: dict[str, Any], required: list[str] | None = None) -> dict[s
     return {"type": "object", "properties": properties, "required": list(required or [])}
 
 
+@dataclass
+class AgentPause:
+    """The agent called client-side tools: the client must run them, then the
+    conversation resumes from ``messages`` with one tool message per call."""
+
+    messages: list[dict[str, Any]]
+    calls: list[dict[str, Any]]
+
+
+def client_tool_names(client_tools: list[dict[str, Any]] | None) -> set[str]:
+    return {str((t.get("function") or {}).get("name")) for t in (client_tools or [])
+            if isinstance(t, dict) and (t.get("function") or {}).get("name")}
+
+
 async def run_agent(
     *,
     alias: str,
@@ -171,14 +186,24 @@ async def run_agent(
     timeout: float,
     tools: list[Tool] | None = None,
     max_steps: int = 12,
-) -> str:
-    """One agent turn: call the model, run any tool calls, repeat until it answers."""
+    client_tools: list[dict[str, Any]] | None = None,
+    history: list[dict[str, Any]] | None = None,
+) -> str | AgentPause:
+    """One agent turn: call the model, run any tool calls, repeat until it answers.
+
+    Server tools (``tools``) run here. Client tools (OpenAI specs the caller's
+    system executes) pause the loop: an AgentPause is returned and the caller
+    resumes later with ``history`` = the paused messages plus the tool results.
+    """
     adapter = get_registry().adapter(alias)
-    messages: list[dict[str, Any]] = [{"role": "system", "content": system},
-                                      {"role": "user", "content": prompt}]
+    messages: list[dict[str, Any]] = list(history) if history else [
+        {"role": "system", "content": system}, {"role": "user", "content": prompt}]
     by_name = {t.name: t for t in (tools or [])}
-    specs = [t.spec() for t in by_name.values()] or None
+    client_names = client_tool_names(client_tools) - set(by_name)
+    specs = ([t.spec() for t in by_name.values()]
+             + [t for t in (client_tools or []) if (t.get("function") or {}).get("name") in client_names]) or None
     deadline = time.monotonic() + timeout
+    message: dict[str, Any] = {}
     for step in range(max_steps):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -192,12 +217,24 @@ async def run_agent(
         calls = message.get("tool_calls") or []
         if not calls:
             return str(message.get("content") or "")
+        for call in calls:
+            # The client matches results by id, so every call needs a unique one.
+            if not call.get("id"):
+                call["id"] = f"call_{uuid.uuid4().hex[:24]}"
+            call.setdefault("type", "function")
         messages.append({"role": "assistant", "content": message.get("content") or "", "tool_calls": calls})
+        pending = []
         for call in calls:
             fn = call.get("function") or {}
-            tool = by_name.get(fn.get("name", ""))
-            output = (await tool.call(fn.get("arguments") or "{}")) if tool else f"UNKNOWN_TOOL: {fn.get('name')}"
+            name = fn.get("name", "")
+            if name in client_names:
+                pending.append(call)
+                continue
+            tool = by_name.get(name)
+            output = (await tool.call(fn.get("arguments") or "{}")) if tool else f"UNKNOWN_TOOL: {name}"
             messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": output})
+        if pending:
+            return AgentPause(messages=messages, calls=pending)
     return str(message.get("content") or "")
 
 
