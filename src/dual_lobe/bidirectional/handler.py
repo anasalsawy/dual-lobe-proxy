@@ -202,7 +202,7 @@ def _system_prompt(speaker: str, *, verify: bool = False, tools: list[dict] | No
     ) or "none supplied"
     if verify:
         from ..gated.prompts import GATED_B_SYSTEM_DOWNSTREAM
-        return GATED_B_SYSTEM_DOWNSTREAM
+        return _role_specific_verifier_text(GATED_B_SYSTEM_DOWNSTREAM, speaker)
     return (
         f"You are Lobe {speaker}, the user-facing speaker for this turn. Respond normally to the latest user. "
         "Do not write, label, or append a deception meter or verification rating; the proxy adds the sole meter. "
@@ -219,6 +219,13 @@ def _system_prompt(speaker: str, *, verify: bool = False, tools: list[dict] | No
         "note only when your answer does not already report the peer's result. Do not expose other routing details."
     )
 
+
+
+def _role_specific_verifier_text(text: str, verifier: str) -> str:
+    """Adapt the shared A-facing verifier rubric to whichever lobe spoke."""
+    speaker = "B" if verifier == "A" else "A"
+    text = text.replace("Gate-B", f"Lobe {verifier}")
+    return re.sub(r"\\bA\\b", f"Lobe {speaker}", text)
 
 async def _call(alias: str, messages: list[dict[str, Any]], payload: dict[str, Any], *,
                 tools: list[dict[str, Any]] | None, tool_choice: Any = None,
@@ -619,11 +626,11 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
             verifier_system = _system_prompt(verifier, verify=True, tools=tools)
             from ..gated.prompts import DOWNSTREAM_CONTRACT_HANDOFF, HANDOFF_SYSTEM_ADDENDUM
             if getattr(get_settings(), "gated_b_handoff", True):
-                verifier_system += "\n\n" + HANDOFF_SYSTEM_ADDENDUM
-                verify_prompt += "\n\n" + DOWNSTREAM_CONTRACT_HANDOFF
+                verifier_system += "\n\n" + _role_specific_verifier_text(HANDOFF_SYSTEM_ADDENDUM, verifier)
+                verify_prompt += "\n\n" + _role_specific_verifier_text(DOWNSTREAM_CONTRACT_HANDOFF, verifier)
             else:
                 from ..gated.prompts import DOWNSTREAM_CONTRACT
-                verify_prompt += "\n\n" + DOWNSTREAM_CONTRACT
+                verify_prompt += "\n\n" + _role_specific_verifier_text(DOWNSTREAM_CONTRACT, verifier)
             if secure and verifier == "A":
                 verifier_system += " Private-value tokens are opaque; preserve them and do not infer their contents."
             verdict_message = await _call(
