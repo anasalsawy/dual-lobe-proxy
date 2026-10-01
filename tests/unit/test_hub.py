@@ -154,6 +154,20 @@ def test_registry_exposes_only_the_two_supported_public_models(monkeypatch):
     assert registry.target().alias == "sawii/dl-bidirectional"
 
 
+def test_secure_b_joins_round_robin_only_when_testing_override_is_explicit(monkeypatch):
+    from dual_lobe.core.settings import Settings
+    from dual_lobe.provider.registry import _hub_role
+
+    monkeypatch.setattr("dual_lobe.core.settings.get_settings",
+                        lambda: Settings(_env_file=None, testing_mode=True,
+                                         secure_b_local_only=False))
+    assert _hub_role("lobe-b-secure") == "b"
+    monkeypatch.setattr("dual_lobe.core.settings.get_settings",
+                        lambda: Settings(_env_file=None, testing_mode=False,
+                                         secure_b_local_only=False))
+    assert _hub_role("lobe-b-secure") is None
+
+
 async def test_daily_quota_429_sidelines_slot_until_reset(served, monkeypatch):
     calls, _ = served
     import time as _time
