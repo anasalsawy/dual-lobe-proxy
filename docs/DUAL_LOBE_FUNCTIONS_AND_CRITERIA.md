@@ -68,8 +68,8 @@ Required criteria:
 2. The caller's ordinary messages, tool definitions, tool choice, tool-call IDs,
    tool results, streaming choice indices, finish reasons, and usage fields are
    preserved according to the supported contract.
-3. `lobe-a` routes to A. `lobe-a-director` or the explicit director mode selects
-   the director loop. There is no hidden phrase in user text that changes mode.
+3. Only `sawii/dl-bidirectional` and `sawii/dl-secure` are public model IDs.
+   Internal lobe aliases are not user-selectable models.
 4. Correlation (`run`, `floor`, `attempt`, worker, task, role, and call sequence)
    is metadata, not a substitute for the caller's actual conversation or tool
    result.
