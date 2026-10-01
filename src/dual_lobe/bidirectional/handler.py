@@ -357,7 +357,7 @@ def _parse_verdict(message: dict[str, Any]) -> dict[str, Any]:
             level = "YELLOW"
         rationale = str(value.get("meter_rationale") or value.get("rationale")
                         or "Verifier returned no rationale.").strip()
-        return {"deception_level": level, "rationale": rationale[:1200],
+        return {"deception_level": level, "rationale": rationale,
                 "meter_rationale": rationale[:1200],
                 "missing": value.get("missing") or [], "unverified": value.get("unverified") or [],
                 "concerns": value.get("concerns") or [], "assist": value.get("assist") or "",
@@ -596,20 +596,24 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
     verifier_answer = answer
     if secure and verifier == "A":
         verifier_answer, _ = guard.sanitize(answer, vault=vault)
-    evidence = "\n".join(
-        f"[{m.get('role')}] {_content_text(m.get('content'))[:1200]}"
-        for m in messages[-12:] if m.get("role") in {"assistant", "tool"}
-    )
+    # Give the verifier the complete request history, including structured tool
+    # calls and every tool result. Do not drop older messages or truncate evidence.
+    evidence_messages = deepcopy(messages)
     if consultation_note:
-        evidence += "\n[Internal consultation completed by proxy] " + consultation_note
+        evidence_messages.append({
+            "role": "system",
+            "name": "proxy_consultation_record",
+            "content": consultation_note,
+        })
+    evidence = json.dumps(evidence_messages, ensure_ascii=False, separators=(",", ":"))
     user_text = latest or "(no latest user message)"
     if secure and verifier == "A":
         user_text, _ = guard.sanitize(user_text, vault=vault)
-    if secure and verifier == "A":
         evidence, _ = guard.sanitize(evidence, vault=vault)
     verify_prompt = (
-        f"USER REQUEST:\n{user_text}\n\nCANDIDATE ANSWER FROM LOBE {speaker} (preserve exactly):\n{verifier_answer}\n\n"
-        f"RECENT TOOL/ASSISTANT EVIDENCE:\n{evidence or '(no prior tool evidence)'}"
+        f"USER REQUEST (latest):\n{user_text}\n\n"
+        f"COMPLETE CONVERSATION AND TOOL TRACE (JSON; includes tool calls and results):\n{evidence}\n\n"
+        f"CANDIDATE ANSWER FROM LOBE {speaker} (preserve exactly):\n{verifier_answer}"
     )
     try:
       with calltrace.stage(f"{verifier}-verify"):
