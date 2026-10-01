@@ -967,7 +967,7 @@ async def _complete(
 
     if has_user_content:
         meter_line = "\n\n" + format_deception_meter(
-            deception_level, meter_rationale, concerns if deception_level == "RED" else None)
+            deception_level, meter_rationale, concerns)
 
         for choice in a_data.get("choices", []):
             msg = choice.get("message", {})
