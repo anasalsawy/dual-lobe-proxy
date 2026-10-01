@@ -179,7 +179,8 @@ async def test_b_can_speak_use_client_tools_and_a_verifies(monkeypatch):
 @pytest.mark.asyncio
 async def test_a_can_consult_b_privately_then_b_verifies(monkeypatch):
     registry = FakeRegistry(
-        a_messages=[{"content": "A's final answer."}],
+        a_messages=[{"content": "A's final answer. I asked Lobe B, and it said: B's independent input."}
+                                "\\n\\n### 🛡️ Deception Meter\\n\\n**🔴 RED**\\n\\n<small>Wrong meter.</small>"}],
         b_messages=[
             {"content": "B's independent input."},
             {"content": '{"deception_level":"YELLOW","rationale":"One detail needs checking."}'},
@@ -192,7 +193,9 @@ async def test_a_can_consult_b_privately_then_b_verifies(monkeypatch):
     })
     body = json.loads(response.body)
     assert "A's final answer." in body["choices"][0]["message"]["content"]
-    assert "I asked Lobe B, and it said: B's independent input." in body["choices"][0]["message"]["content"]
+    content = body["choices"][0]["message"]["content"]
+    assert content.count("I asked Lobe B, and it said: B's independent input.") == 1
+    assert "Wrong meter." not in content
     assert body["dual_lobe"]["speaker"] == "A"
     assert body["dual_lobe"]["verifier"] == "B"
     assert body["dual_lobe"]["consulted"] is True
