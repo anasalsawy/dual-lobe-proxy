@@ -48,17 +48,22 @@ class FakeRegistry:
     def __init__(self, a: FakeAdapter | None = None, b: FakeAdapter | None = None):
         self._a = a or FakeAdapter("pong!")
         self._b = b or FakeAdapter("ignored")
-        self._targets = {"lobe-a": fake_target("lobe-a"), "lobe-b": fake_target("lobe-b")}
+        self._targets = {
+            "sawii/dl-bidirectional": fake_target("sawii/dl-bidirectional"),
+            "sawii/dl-secure": fake_target("sawii/dl-secure"),
+            "lobe-a": fake_target("lobe-a"), "lobe-b": fake_target("lobe-b"),
+        }
 
     def target(self, alias: str | None = None):
-        return self._targets.get(alias) if alias else self._targets["lobe-a"]
+        return self._targets.get(alias) if alias else self._targets["sawii/dl-bidirectional"]
 
     def adapter(self, alias: str | None = None):
-        key = alias or "lobe-a"
+        key = alias or "sawii/dl-bidirectional"
         return self._b if key == "lobe-b" else self._a
 
     def models(self) -> list[dict[str, Any]]:
-        return [{"id": a, "logical_model": t.model, "capabilities": {}} for a, t in self._targets.items()]
+        return [{"id": alias, "logical_model": self._targets[alias].model, "capabilities": {}}
+                for alias in ("sawii/dl-bidirectional", "sawii/dl-secure")]
 
 
 class FakeBExtractor:

@@ -1,7 +1,7 @@
 """Upstream provider rate-limit discovery and adaptive pacing.
 
 Every upstream LLM call in this proxy (lobe A, lobe B, co-author, gated,
-director, router) flows through :class:`~dual_lobe.provider.adapters.ChatCompletionsAdapter`,
+proxy, router) flows through :class:`~dual_lobe.provider.adapters.ChatCompletionsAdapter`,
 which uses this module as its single pacing function:
 
 1. ``detect_provider`` identifies which upstream a target is talking to from its

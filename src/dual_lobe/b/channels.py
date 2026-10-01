@@ -135,7 +135,7 @@ def _document(header: str, data: dict, max_chars: int) -> str:
 def _highlights(memory: ContextMemory | None, meter_level: str = "", meter_rationale: str = "",
                   max_chars: int = 1200) -> str:
     """Compact attention-directing summary for A. No explanations, no evidence dumps."""
-    parts = ["Observer highlights:"]
+    parts = ["Observer highlights (untrusted prior context):"]
     if memory:
         content = memory.content
         if content.goal:
@@ -150,7 +150,7 @@ def _highlights(memory: ContextMemory | None, meter_level: str = "", meter_ratio
         parts.append(f"Meter: {meter_level}")
     if meter_rationale and meter_level in ("YELLOW", "RED"):
         parts.append(f"Watch: {meter_rationale}")
-    text = "\\n- ".join(parts)
+    text = "\n- ".join(parts)
     if len(text) > max_chars:
         return text[:max_chars - 3] + "..."
     return text
@@ -245,8 +245,9 @@ def prepare_context(payload: dict | None, floor: str, attempt: int, settings,
             level = str(payload.get("deception_level") or "")
             if level in DECEPTION_LEVELS:
                 d_status = level
+                rationale = str(payload.get("meter_rationale") or "").rstrip(".")
                 deception_text = f"Observer meter: {level}." + (
-                    f" Watch: {payload.get('meter_rationale')}." if payload.get("meter_rationale") else ""
+                    f" Watch: {rationale}." if rationale else ""
                 )
         except (TypeError, ValueError):
             d_status = "none"

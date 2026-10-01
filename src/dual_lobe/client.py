@@ -11,7 +11,6 @@ import getpass
 import json
 import os
 import uuid
-from urllib.parse import quote
 
 import httpx
 
@@ -23,7 +22,7 @@ def delivery(headers) -> str:
 
 
 async def reply(client: httpx.AsyncClient, messages: list[dict], run: str,
-                director: bool = False, memory_id: str | None = None) -> dict:
+                model: str = "sawii/dl-bidirectional", memory_id: str | None = None) -> dict:
     content = ""
     finished = False
     pending_tools = []
@@ -31,7 +30,7 @@ async def reply(client: httpx.AsyncClient, messages: list[dict], run: str,
     if memory_id:
         headers["X-DL-Memory-ID"] = memory_id
     async with client.stream("POST", "/v1/chat/completions", headers=headers,
-                             json={"model": "lobe-a-director" if director else "lobe-a",
+                             json={"model": model,
                                    "messages": messages, "stream": True}) as response:
         if response.status_code != 200:
             await response.aread()
@@ -39,8 +38,7 @@ async def reply(client: httpx.AsyncClient, messages: list[dict], run: str,
         print(delivery(response.headers))
         if memory_id:
             print("Shared memory space: " + response.headers.get("x-dual-lobe-memory-space", "unknown"))
-        if not director:
-            print("A: ", end="", flush=True)
+        print("Assistant: ", end="", flush=True)
         try:
             async for line in response.aiter_lines():
                 if not line.startswith("data:"):
@@ -50,7 +48,7 @@ async def reply(client: httpx.AsyncClient, messages: list[dict], run: str,
                     break
                 chunk = json.loads(data)
                 if "error" in chunk:
-                    raise RuntimeError("The exchange was interrupted; the text above is incomplete. Use /new before restarting a director session.")
+                    raise RuntimeError("The stream was interrupted; the text above is incomplete.")
                 for choice in chunk.get("choices") or []:
                     if choice.get("index", 0) != 0:
                         continue
@@ -89,7 +87,7 @@ async def show_state(client: httpx.AsyncClient, run: str) -> None:
                       "claim_review": payload.get("claim_review")}, indent=2, ensure_ascii=False))
 
 
-async def conversation(url: str, key: str, run: str, director: bool = False,
+async def conversation(url: str, key: str, run: str, model: str = "sawii/dl-bidirectional",
                         memory_id: str | None = None, message: str | None = None) -> None:
     messages = []
     async with httpx.AsyncClient(base_url=url.rstrip("/"),
@@ -99,12 +97,11 @@ async def conversation(url: str, key: str, run: str, director: bool = False,
         if ready.status_code != 200:
             raise RuntimeError(f"Proxy is not ready (HTTP {ready.status_code}).")
         print(f"Live proxy conversation: {run}")
-        print("/director starts visible A/B mode; /normal returns to ordinary A; /new starts a fresh run.")
-        print("/state inspects observer memory; /director-state inspects the loop; /memory inspects shared history; /quit exits.")
-        print(f"Mode: {'director' if director else 'normal'}. Shared memory: {memory_id or 'off'}. Ctrl+C cancels.")
+        print("/new starts a fresh run; /state inspects B's latest review; /memory inspects shared history; /quit exits.")
+        print(f"Model: {model}. Shared memory: {memory_id or 'off'}. Ctrl+C cancels.")
         print("This client holds chat history for this session and does not execute tools.")
         if message is not None:
-            await reply(client, [{"role": "user", "content": message}], run, director, memory_id)
+            await reply(client, [{"role": "user", "content": message}], run, model, memory_id)
             return
         while True:
             try:
@@ -116,23 +113,16 @@ async def conversation(url: str, key: str, run: str, director: bool = False,
             if text.strip() == "/state":
                 await show_state(client, run)
                 continue
-            if text.strip() in ("/director", "/normal", "/new"):
-                if text.strip() == "/new":
-                    messages.clear()
-                else:
-                    director = text.strip() == "/director"
-                # Each mode switch starts a distinct director session while the
-                # selected shared memory space remains available across runs.
+            if text.strip() == "/new":
+                messages.clear()
                 run = "conversation-test-" + uuid.uuid4().hex[:12]
-                print(f"Run: {run}; mode: {'director' if director else 'normal'}; memory: {memory_id or 'off'}")
+                print(f"Run: {run}; model: {model}; memory: {memory_id or 'off'}")
                 continue
-            if text.strip() in ("/director-state", "/memory"):
-                if text.strip() == "/memory" and not memory_id:
+            if text.strip() in ("/memory",):
+                if not memory_id:
                     print("Start the client with --memory-id NAME to select a shared space.")
                     continue
-                path = ("/v1/dual-lobe/director/" + quote(run, safe="") if text.strip() == "/director-state"
-                        else "/v1/dual-lobe/memory/" + quote(memory_id, safe="") + "?limit=3")
-                inspected = await client.get(path)
+                inspected = await client.get("/v1/dual-lobe/memory/" + memory_id + "?limit=3")
                 if inspected.status_code == 200:
                     print(json.dumps(inspected.json(), ensure_ascii=False, indent=2))
                 else:
@@ -142,7 +132,7 @@ async def conversation(url: str, key: str, run: str, director: bool = False,
                 continue
             messages.append({"role": "user", "content": text})
             try:
-                answer = await reply(client, messages, run, director, memory_id)
+                answer = await reply(client, messages, run, model, memory_id)
             except (RuntimeError, ValueError, httpx.HTTPError) as exc:
                 # Do not silently store a partial answer as a completed turn or retry it.
                 messages.pop()
@@ -156,7 +146,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default=os.environ.get("DUAL_LOBE_PROXY_URL", "http://localhost:8801"))
     parser.add_argument("--run", default="conversation-test-" + uuid.uuid4().hex[:12])
-    parser.add_argument("--director", action="store_true", help="Watch A and B exchange turns automatically.")
+    parser.add_argument("--model", choices=("sawii/dl-bidirectional", "sawii/dl-secure"),
+                        default="sawii/dl-bidirectional", help="Select one of the two supported models.")
     parser.add_argument("--memory-id", default=os.environ.get("DUAL_LOBE_MEMORY_ID"), help="Shared memory space across apps/runs.")
     parser.add_argument("--message", help="Send one request and exit, instead of interactive input.")
     args = parser.parse_args()
@@ -166,7 +157,7 @@ def main() -> None:
     if not key:
         parser.error("A proxy key is required. Do not enter your provider key here.")
     try:
-        asyncio.run(conversation(args.url, key, args.run, args.director, args.memory_id, args.message))
+        asyncio.run(conversation(args.url, key, args.run, args.model, args.memory_id, args.message))
     except (KeyboardInterrupt, EOFError):
         pass
     except (RuntimeError, ValueError, httpx.HTTPError) as exc:

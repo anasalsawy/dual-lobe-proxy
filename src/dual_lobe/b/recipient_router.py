@@ -102,8 +102,8 @@ def parse_hierarchy_roles(raw: str) -> dict[str, int]:
     """Parse 'chief:0,l1:1,l2:2' into a role -> rank map.
 
     Lower number = higher rank. Empty input returns empty dict.
-    Also adds short-name aliases (e.g. 'dl-dialogue1' for 'sawii/dl-dialogue1')
-    so rank_of can resolve names the LLM returns without the full prefix.
+    Also adds short-name aliases for configured role names so rank_of can resolve
+    names the LLM returns without a provider prefix.
     """
     result: dict[str, int] = {}
     if not raw:
@@ -277,7 +277,7 @@ def _apply_routing_mode(
     return analysis
 
 
-async def _analyze_recipient(agent_name: str, message: str, active_rules: List[AgentRule] | None = None, routing_context: dict | None = None, system_prompt: str | None = None, conversation_history: list[dict] | None = None) -> str:
+async def _analyze_recipient(agent_name: str, message: str, active_rules: List[AgentRule] | None = None, routing_context: dict | None = None, system_prompt: str | None = None, conversation_history: list[dict] | None = None, model_alias: str = "lobe-b") -> str:
     """Call the router model to analyze recipient intention.
 
     Returns the raw model response (should be valid JSON).
@@ -379,7 +379,7 @@ async def _analyze_recipient(agent_name: str, message: str, active_rules: List[A
 
     try:
         async with asyncio.timeout(10):
-            response = await get_registry().adapter("lobe-b").buffered(
+            response = await get_registry().adapter(model_alias).buffered(
                 NormalizedRequest(
                     messages=[
                         {"role": "system", "content": RECIPIENT_ROUTER_SYSTEM},
@@ -535,6 +535,7 @@ async def route_message(
     run_id: str,
     context_for_memory: dict[str, Any] | None = None,
     mode: str | None = None,
+    model_alias: str = "lobe-b",
 ) -> tuple[RecipientAnalysis, bool]:
     """Route a message to determine response responsibility.
 
@@ -625,7 +626,9 @@ async def route_message(
         conv_history = all_msgs[-7:-1] if len(all_msgs) > 1 else []
 
         # Call the router model with full context
-        raw = await _analyze_recipient(agent_name, message, active_rules, routing_context, system_prompt=system_prompt, conversation_history=conv_history)
+        raw = await _analyze_recipient(agent_name, message, active_rules, routing_context,
+                                       system_prompt=system_prompt, conversation_history=conv_history,
+                                       model_alias=model_alias)
         analysis = _parse_recipient_analysis(raw)
 
         # B's LLM makes the full routing decision — no Python override.

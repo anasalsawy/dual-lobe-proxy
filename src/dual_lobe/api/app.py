@@ -11,7 +11,7 @@ from ..core.engine import dispose_engines
 from ..core.settings import get_settings
 from ..provider.adapters import close_http_client
 from ..obs.telemetry import TRACER
-from . import chat, director, events, health, memory, state
+from . import chat, events, health, memory, state
 
 LOG = logging.getLogger("dual_lobe.api")
 
@@ -51,7 +51,6 @@ app.add_middleware(
 )
 
 app.include_router(chat.router)
-app.include_router(director.router)
 app.include_router(memory.router)
 app.include_router(events.router)
 app.include_router(state.router)

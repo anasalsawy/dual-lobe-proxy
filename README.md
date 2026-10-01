@@ -6,10 +6,10 @@ An OpenAI-compatible inference proxy with two supported model variants. Both var
 
 | Model ID | Use it for | Lobe A | Lobe B |
 |---|---|---|---|
-| `sawii/dl-bidirectional` | General work | Configured provider model | Configured provider model; both lobes can speak and use caller tools |
+| `sawii/dl-bidirectional` | General work | Configured provider model | Configured provider model; both lobes can speak and use caller tools; B verifies A by default |
 | `sawii/dl-secure` | Sensitive/private work | Configured provider model; receives tokenized sensitive values | Local-only model; checks input before A, can speak/use tools, and verifies A |
 
-The proxy exposes these two variants in `GET /v1/models`. Older aliases remain temporarily resolvable for existing clients but are no longer advertised.
+The proxy exposes only these two public model IDs in `GET /v1/models` and rejects every other model ID at the chat endpoint. Internal A/B provider targets are not separate products.
 
 ## Conversation routing
 
@@ -34,8 +34,8 @@ This is a proxy privacy boundary, not a formal data-loss-prevention guarantee. D
 
 ## Latency and calls
 
-- Ordinary, unaddressed requests on the existing general gated route do only local routing detection; they make no routing model call.
-- `sawii/dl-bidirectional` always uses the routed speaker/verifier flow.
+- Ordinary, unaddressed requests on the general model stay on the existing gated A/B verification path. Explicit routing uses a local check and adds no separate router-model call.
+- `sawii/dl-bidirectional` keeps unaddressed turns on the ordinary gated path; explicit addressing opts into the routed speaker flow. The routing check is local and adds no router-model call when unused.
 - `sawii/dl-secure` adds a local B input-gate call on every request, then runs the routed speaker/verifier flow. Tool-result continuations are gated again.
 - A peer consultation adds a private lobe call. A handoff adds a call to the new speaker. Client tools run outside the proxy and return through the next request.
 
@@ -63,4 +63,4 @@ For database integration tests, run `uv run --locked pytest -q` with a permitted
 
 ## Design notes
 
-The implementation details, request-by-request routing matrix, privacy gate contract, token lifecycle, and test coverage are in [Two model variants](docs/TWO_MODEL_VARIANTS.md). The older design notes under `docs/` describe retired variants and are retained as historical material; this README is the current product contract.
+The implementation details, request-by-request routing matrix, privacy gate contract, token lifecycle, and test coverage are in [Two model variants](docs/TWO_MODEL_VARIANTS.md). The repository contains only the two variants documented here; group-chat routing and A/B conversation routing are separate features described in [Recipient routing](docs/RECIPIENT_ROUTING.md).

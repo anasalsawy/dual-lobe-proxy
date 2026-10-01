@@ -77,13 +77,13 @@ def test_chat_nonstream_success(client, tenant):
     tid, raw = tenant
     r = client.post(
         "/v1/chat/completions",
-        json={"model": "lobe-a", "messages": [{"role": "user", "content": "ping"}]},
+        json={"model": "sawii/dl-bidirectional", "messages": [{"role": "user", "content": "ping"}]},
         headers={"Authorization": f"Bearer {raw}"},
     )
     assert r.status_code == 200
     body = r.json()
-    assert body["choices"][0]["message"]["content"] == "pong!"
-    assert body["model"] == "lobe-a"
+    assert body["choices"][0]["message"]["content"].startswith("pong!")
+    assert body["model"] == "sawii/dl-bidirectional"
     run_id = r.headers.get("X-Dual-Lobe-Run-Id")
     assert run_id
 
@@ -97,7 +97,7 @@ def test_chat_missing_messages(client, tenant):
     _, raw = tenant
     r = client.post(
         "/v1/chat/completions",
-        json={"model": "lobe-a", "messages": []},
+        json={"model": "sawii/dl-bidirectional", "messages": []},
         headers={"Authorization": f"Bearer {raw}"},
     )
     assert r.status_code == 400
@@ -113,9 +113,10 @@ def test_chat_upstream_failure_is_502_and_no_crash(client, tenant, monkeypatch):
 
     reg = FakeRegistry(a=FakeAdapter(fail=Boom("empty model response")))
     monkeypatch.setattr("dual_lobe.api.chat.get_registry", lambda: reg)
+    monkeypatch.setattr("dual_lobe.gated.handler.get_registry", lambda: reg)
     r = client.post(
         "/v1/chat/completions",
-        json={"model": "lobe-a", "messages": [{"role": "user", "content": "ping"}]},
+        json={"model": "sawii/dl-bidirectional", "messages": [{"role": "user", "content": "ping"}]},
         headers={"Authorization": f"Bearer {raw}"},
     )
     assert r.status_code == 502
@@ -128,9 +129,10 @@ def test_chat_stream_success(client, tenant, monkeypatch):
     _, raw = tenant
     reg = FakeRegistry()
     monkeypatch.setattr("dual_lobe.api.chat.get_registry", lambda: reg)
+    monkeypatch.setattr("dual_lobe.gated.handler.get_registry", lambda: reg)
     r = client.post(
         "/v1/chat/completions",
-        json={"model": "lobe-a", "stream": True, "messages": [{"role": "user", "content": "ping"}]},
+        json={"model": "sawii/dl-bidirectional", "stream": True, "messages": [{"role": "user", "content": "ping"}]},
         headers={"Authorization": f"Bearer {raw}"},
     )
     assert r.status_code == 200
@@ -148,9 +150,10 @@ def test_chat_stream_incomplete(client, tenant, monkeypatch):
 
     reg = FakeRegistry(a=FakeAdapter(fail=Cut("connection reset")))
     monkeypatch.setattr("dual_lobe.api.chat.get_registry", lambda: reg)
+    monkeypatch.setattr("dual_lobe.gated.handler.get_registry", lambda: reg)
     r = client.post(
         "/v1/chat/completions",
-        json={"model": "lobe-a", "stream": True, "messages": [{"role": "user", "content": "ping"}]},
+        json={"model": "sawii/dl-bidirectional", "stream": True, "messages": [{"role": "user", "content": "ping"}]},
         headers={"Authorization": f"Bearer {raw}"},
     )
     assert r.status_code == 200

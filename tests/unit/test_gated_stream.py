@@ -29,8 +29,8 @@ async def test_gated_stream_sends_text_before_b_and_meter_last(monkeypatch):
     fake = Fake()
     monkeypatch.setattr(handler, "get_registry", lambda: fake)
     events = [e async for e in handler.gated_stream(
-        {"model": "sawii/dl-gated", "stream": True, "messages": [{"role": "user", "content": "capital?"}]},
-        "run-1", 1, "sawii/dl-gated")]
+        {"model": "sawii/dl-bidirectional", "stream": True, "messages": [{"role": "user", "content": "capital?"}]},
+        "run-1", 1, "sawii/dl-bidirectional")]
     chunks = [json.loads(e[6:]) for e in events if e.startswith("data: {")]
     texts = [c["choices"][0]["delta"].get("content") for c in chunks]
     assert texts[1:3] == ["Canberra ", "is the capital."]            # streamed before B ran

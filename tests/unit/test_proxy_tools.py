@@ -125,9 +125,9 @@ async def test_memory_search_miss_returns_explicit_no_match(monkeypatch):
 async def test_delegate_and_consult_call_b_and_stay_inline(monkeypatch):
     seen = []
 
-    async def fake_b(system, user, max_tokens):
+    async def fake_b(system, user, max_tokens, alias="lobe-b"):
         seen.append((system, max_tokens, user))
-        return "B deliverable" if system == pt.DELEGATE_SYSTEM else "B advice"
+        return "B deliverable" if "DELEGATED TASK:" in user else "B advice"
 
     monkeypatch.setattr(pt, "_call_b_text", fake_b)
     messages = [{"role": "user", "content": "do the task"}]
@@ -260,7 +260,7 @@ async def test_gated_turn_executes_proxy_search_invisible_to_client(monkeypatch)
         _final("The deployment target is Windows."),
     ])
     data, headers = await gh.gated_response(
-        _payload(), "run-proxy-1", 1, "sawii/dl-gated",
+        _payload(), "run-proxy-1", 1, "sawii/dl-bidirectional",
         shared_text=None, shared_space="project")
     assert data["choices"][0]["message"]["content"].startswith(
         "The deployment target is Windows.")
@@ -276,7 +276,7 @@ async def test_gated_turn_executes_proxy_search_invisible_to_client(monkeypatch)
 async def test_gated_turn_without_proxy_calls_is_untouched(monkeypatch):
     a_reqs = _setup(monkeypatch, [_final("plain answer")])
     data, headers = await gh.gated_response(
-        _payload(), "run-proxy-2", 1, "sawii/dl-gated",
+        _payload(), "run-proxy-2", 1, "sawii/dl-bidirectional",
         shared_text=None, shared_space=None)
     assert data["choices"][0]["message"]["content"].startswith("plain answer")
     assert "X-Dual-Lobe-Proxy-Tools" not in headers
@@ -285,7 +285,7 @@ async def test_gated_turn_without_proxy_calls_is_untouched(monkeypatch):
 
 async def test_proxy_tools_disabled_sends_no_schemas(monkeypatch):
     a_reqs = _setup(monkeypatch, [_final("plain")], proxy_enabled=False)
-    await gh.gated_response(_payload(), "run-proxy-3", 1, "sawii/dl-gated",
+    await gh.gated_response(_payload(), "run-proxy-3", 1, "sawii/dl-bidirectional",
                             shared_text=None, shared_space=None)
     assert a_reqs[0].tools is None
 
@@ -374,7 +374,7 @@ def _b_with_tool_calls(*, name="get_weather", arguments=None):
 async def test_gated_turn_merges_b_tool_calls_and_header(monkeypatch):
     _setup(monkeypatch, [_final("kicking off")], b_json=_b_with_tool_calls())
     data, headers = await gh.gated_response(
-        _payload(tools=[_WEATHER_TOOL]), "run-btools-1", 1, "sawii/dl-gated",
+        _payload(tools=[_WEATHER_TOOL]), "run-btools-1", 1, "sawii/dl-bidirectional",
         shared_text=None, shared_space=None)
     choice = data["choices"][0]
     assert choice["message"]["content"].startswith("kicking off")
@@ -388,7 +388,7 @@ async def test_gated_turn_drops_b_request_for_unoffered_tool(monkeypatch):
     _setup(monkeypatch, [_final("plain")],
            b_json=_b_with_tool_calls(name="not_offered"))
     data, headers = await gh.gated_response(
-        _payload(tools=[_WEATHER_TOOL]), "run-btools-2", 1, "sawii/dl-gated",
+        _payload(tools=[_WEATHER_TOOL]), "run-btools-2", 1, "sawii/dl-bidirectional",
         shared_text=None, shared_space=None)
     assert "tool_calls" not in data["choices"][0]["message"]
     assert "X-Dual-Lobe-B-Tool-Calls" not in headers
