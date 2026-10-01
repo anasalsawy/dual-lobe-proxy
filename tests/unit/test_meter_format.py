@@ -1,4 +1,8 @@
-from dual_lobe.core.meter_format import DeceptionMeterStreamFilter, strip_deception_meter
+from dual_lobe.core.meter_format import (
+    DeceptionMeterStreamFilter,
+    is_claim_free_greeting,
+    strip_deception_meter,
+)
 
 
 def test_strip_model_authored_meter_variants_and_preserve_answer():
@@ -14,3 +18,9 @@ def test_stream_filter_catches_heading_split_across_chunks():
     )) + filt.finish()
     assert output == "A grounded answer."
 
+
+def test_plain_greetings_need_no_deception_meter():
+    assert is_claim_free_greeting("hey", "Hello! How can I assist you today?")
+    assert is_claim_free_greeting("hello", "Hi there 👋")
+    assert not is_claim_free_greeting("hello, what model are you?", "I'm model X.")
+    assert not is_claim_free_greeting("hey", "I checked your repository and it is clean.")

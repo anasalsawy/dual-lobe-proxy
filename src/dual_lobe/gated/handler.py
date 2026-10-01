@@ -29,6 +29,7 @@ from ..core.settings import get_settings
 from ..core.meter_format import (
     DeceptionMeterStreamFilter,
     format_deception_meter,
+    is_claim_free_greeting,
     strip_deception_meter,
 )
 from ..provider import calltrace
@@ -139,6 +140,17 @@ def _messages_to_text(messages: list[dict]) -> str:
             text += f" [tool_calls: {json.dumps(msg['tool_calls'], ensure_ascii=False)[:300]}]"
         lines.append(f"[{i}] {role}: {text}")
     return "\n".join(lines)
+
+
+def _latest_user_text(messages: list[dict]) -> str:
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            return " ".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
+        return str(content or "")
+    return ""
 
 
 async def _call_b_json(system_prompt: str, user_prompt: str, contract: str) -> dict[str, Any]:
@@ -788,6 +800,12 @@ async def _complete(
     a_message = (a_data.get("choices") or [{}])[0].get("message", {})
     a_content = strip_deception_meter(a_message.get("content", "") or "")
     a_message["content"] = a_content
+
+    if (not (a_message.get("tool_calls") or []) and not proxy_used
+            and is_claim_free_greeting(_latest_user_text(messages), a_content)):
+        LOG.info("gated verification skipped run=%s reason=claim_free_greeting", run_id)
+        a_data["model"] = public_model
+        return a_data, {"X-Dual-Lobe-Gated": "on"}
 
     # ── 3. DOWNSTREAM: B rates A's response ──────────────────────
     handoff_on = bool(getattr(s, "gated_b_handoff", True))

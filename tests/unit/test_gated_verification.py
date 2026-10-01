@@ -51,6 +51,25 @@ async def test_missing_verification_never_emits_green(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_plain_greeting_skips_meter_and_downstream_call(monkeypatch):
+    class NoCalls:
+        def adapter(self, _alias):
+            raise AssertionError("A claim-free greeting does not need a verifier call")
+
+    monkeypatch.setattr(handler, "get_settings", lambda: Settings(
+        _env_file=None, gated_b_handoff=False, gated_flip_back=False))
+    monkeypatch.setattr(handler, "get_registry", lambda: NoCalls())
+    messages = [{"role": "user", "content": "hey"}]
+    result, headers = await handler._complete(
+        {"choices": [{"message": {"role": "assistant", "content": "Hello! How can I help?"}}]},
+        payload={"messages": messages}, run_id="plain-greeting", tenant_id=1,
+        public_model="sawii/dl-bidirectional", shared_space=None,
+        enriched_messages=messages, a_adapter=SimpleNamespace(), proxy_used={})
+    assert result["choices"][0]["message"]["content"] == "Hello! How can I help?"
+    assert "X-Dual-Lobe-Meter" not in headers
+
+
+@pytest.mark.asyncio
 async def test_non_object_verifier_json_is_retried_then_fails(monkeypatch):
     class InvalidVerifier:
         def __init__(self):

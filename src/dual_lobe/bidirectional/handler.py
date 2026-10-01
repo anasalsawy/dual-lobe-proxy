@@ -16,7 +16,11 @@ from typing import Any
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..core.settings import get_settings
-from ..core.meter_format import format_deception_meter, strip_deception_meter
+from ..core.meter_format import (
+    format_deception_meter,
+    is_claim_free_greeting,
+    strip_deception_meter,
+)
 from ..provider.adapters import NormalizedRequest, response_dict
 from ..provider.registry import get_registry
 from ..provider import calltrace
@@ -548,8 +552,15 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
         f"USER REQUEST:\n{user_text}\n\nCANDIDATE ANSWER FROM LOBE {speaker} (preserve exactly):\n{verifier_answer}\n\n"
         f"RECENT TOOL/ASSISTANT EVIDENCE:\n{evidence or '(no prior tool evidence)'}"
     )
+    skip_verification = (
+        not (message.get("tool_calls") or []) and not consultation_note
+        and is_claim_free_greeting(latest, answer)
+    )
     try:
-        with calltrace.stage(f"{verifier}-verify"):
+        if skip_verification:
+            verdict = None
+        else:
+          with calltrace.stage(f"{verifier}-verify"):
             verifier_system = _system_prompt(verifier, verify=True, tools=tools)
             from ..gated.prompts import DOWNSTREAM_CONTRACT_HANDOFF, HANDOFF_SYSTEM_ADDENDUM
             if getattr(get_settings(), "gated_b_handoff", True):
@@ -565,24 +576,26 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
                                    {"role": "user", "content": verify_prompt}],
                 payload, tools=tools or None, tool_choice="none" if tools else None, verify=True,
             )
-        verdict = _parse_verdict(verdict_message)
-        from ..gated.handler import _verified_meter
-        level, rationale, concerns = _verified_meter(
-            verdict, verifier_answer, evidence + "\n" + verifier_answer)
-        verdict.update(deception_level=level, rationale=rationale,
-                       meter_rationale=rationale, concerns=concerns)
+          verdict = _parse_verdict(verdict_message)
+          from ..gated.handler import _verified_meter
+          level, rationale, concerns = _verified_meter(
+              verdict, verifier_answer, evidence + "\n" + verifier_answer)
+          verdict.update(deception_level=level, rationale=rationale,
+                         meter_rationale=rationale, concerns=concerns)
     except Exception as exc:  # noqa: BLE001
         LOG.warning("bidirectional verification failed speaker=%s verifier=%s error=%s",
                     speaker, verifier, type(exc).__name__)
-        verdict = {"deception_level": "YELLOW",
+        verdict = None if skip_verification else {
+                   "deception_level": "YELLOW",
                    "rationale": "The independent verification call failed; the answer remains unverified.",
                    "meter_rationale": "The independent verification call failed; the answer remains unverified.",
                    "missing": [], "unverified": ["Verifier call failed."], "concerns": []}
-    if run_id:
+    if run_id and verdict:
         _set_meter(run_id, {"deception_level": verdict["deception_level"],
                             "meter_rationale": verdict["rationale"], "timestamp": time.time(),
                             "speaker": speaker, "verifier": verifier})
-    meter = format_deception_meter(verdict["deception_level"], verdict["rationale"])
+    meter = (format_deception_meter(verdict["deception_level"], verdict["rationale"])
+             if verdict else "")
     safe_memory_answer = answer
     if secure:
         # This internal snapshot is consumed by the API persistence layer and
@@ -592,7 +605,8 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
         answer = vault.rehydrate_text(answer)
         meter = vault.rehydrate_text(meter)
         vault.destroy_key()
-    return f"{answer}\n\n{meter}", [], {
+    final_answer = f"{answer}\n\n{meter}" if meter else answer
+    return final_answer, [], {
         "mode": "bidirectional", "speaker": speaker, "verifier": verifier,
         "verdict": verdict, "consulted": consulted or bool(consult_calls),
         "privacy_gate": gate_result,

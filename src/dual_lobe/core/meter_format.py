@@ -10,6 +10,10 @@ _METER_HEADING = re.compile(
     r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:(?:\*\*|__)[ \t]*)?"
     r"(?:🛡️?[ \t]*)*(?:(?:\*\*|__)[ \t]*)?deception[ \t]+meter\b[^\n]*(?:\n|$)"
 )
+_GREETING_ONLY = re.compile(
+    r"^(?:hi|hey|hello|greetings|good morning|good afternoon|good evening)(?: there)?"
+    r"(?: how can i (?:help|assist)(?: you)?(?: today)?| what can i help you with)?$"
+)
 
 
 def strip_deception_meter(text: Any) -> str:
@@ -17,6 +21,16 @@ def strip_deception_meter(text: Any) -> str:
     value = str(text or "")
     match = _METER_HEADING.search(value)
     return value[:match.start()].rstrip() if match else value
+
+
+def is_claim_free_greeting(user_text: Any, answer: Any) -> bool:
+    """Identify only a plain greeting exchange with no factual content to verify."""
+    def normalized(value: Any) -> str:
+        value = re.sub(r"[^a-z0-9' ]", " ", str(value or "").casefold())
+        return " ".join(value.split())
+
+    return bool(_GREETING_ONLY.fullmatch(normalized(user_text))
+                and _GREETING_ONLY.fullmatch(normalized(answer)))
 
 
 class DeceptionMeterStreamFilter:

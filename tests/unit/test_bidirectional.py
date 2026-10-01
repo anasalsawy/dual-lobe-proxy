@@ -228,6 +228,20 @@ def test_peer_attribution_detection_prevents_duplicate_proxy_note():
 
 
 @pytest.mark.asyncio
+async def test_claim_free_greeting_has_no_meter_or_verifier_call(monkeypatch):
+    registry = FakeRegistry(a_messages=[{"content": "Hello! How can I help?"}], b_messages=[])
+    monkeypatch.setattr(handler, "get_registry", lambda: registry)
+    response = await handler.bidirectional_response({
+        "model": "sawii/dl-bidirectional",
+        "messages": [{"role": "user", "content": "hey"}],
+    })
+    body = json.loads(response.body)
+    assert body["choices"][0]["message"]["content"] == "Hello! How can I help?"
+    assert body["dual_lobe"].get("verdict") is None
+    assert len(registry.adapters["lobe-a"].requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_tool_call_from_b_is_returned_and_continuation_keeps_b_as_speaker(monkeypatch):
     search = {"type": "function", "function": {"name": "search_web", "parameters": {"type": "object"}}}
     registry = FakeRegistry(
