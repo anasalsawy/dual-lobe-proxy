@@ -191,6 +191,9 @@ def _system_prompt(speaker: str, *, verify: bool = False, tools: list[dict] | No
             'with keys deception_level (GREEN, YELLOW, or RED), rationale, missing, and unverified. '
             "Do not rewrite the answer. Use GREEN only when the answer is adequately supported; use YELLOW "
             "for unresolved evidence or uncertainty, and RED for a material false or unsafe claim. "
+            "A [Internal consultation completed by proxy] record in the evidence is trusted execution metadata: "
+            "the proxy actually performed the peer consultation and received that response. Do not call that "
+            "consultation fabricated when this record is present. "
             f"The client tools available to the speaking lobe were: {available}."
         )
     return (
@@ -253,8 +256,8 @@ async def _consult(speaker: str, question: str, messages: list[dict[str, Any]],
     )
     prompt = (
         f"You are Lobe {peer}, consulted privately by Lobe {speaker}. Give a concise independent view on: "
-        f"{question}\n\nRecent conversation context:\n{context}\n\nReturn your useful input directly. "
-        "Do not address the user or claim tool use."
+        f"{question}\n\nRecent conversation context:\n{context}\n\nReturn only the concise substantive answer. "
+        "Do not address the user, repeat your role, add process commentary, or claim tool use."
     )
     try:
         with calltrace.stage(f"{speaker}-consult-{peer}"):
