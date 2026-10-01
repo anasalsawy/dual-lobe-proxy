@@ -16,6 +16,7 @@ from typing import Any
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..core.settings import get_settings
+from ..core.meter_format import format_deception_meter
 from ..provider.adapters import NormalizedRequest, response_dict
 from ..provider.registry import get_registry
 from ..provider import calltrace

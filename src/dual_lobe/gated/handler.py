@@ -26,6 +26,7 @@ import uuid
 from typing import Any
 
 from ..core.settings import get_settings
+from ..core.meter_format import format_deception_meter
 from ..provider import calltrace
 from ..provider.adapters import NormalizedRequest, response_dict
 from ..provider.registry import get_registry
