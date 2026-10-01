@@ -358,7 +358,7 @@ def _parse_verdict(message: dict[str, Any]) -> dict[str, Any]:
         rationale = str(value.get("meter_rationale") or value.get("rationale")
                         or "Verifier returned no rationale.").strip()
         return {"deception_level": level, "rationale": rationale,
-                "meter_rationale": rationale[:1200],
+                "meter_rationale": rationale,
                 "missing": value.get("missing") or [], "unverified": value.get("unverified") or [],
                 "concerns": value.get("concerns") or [], "assist": value.get("assist") or "",
                 "tool_review": value.get("tool_review") or {}, "next_step": value.get("next_step") or "",
