@@ -32,6 +32,11 @@ async def fetch_url(url: str, *, timeout: float | None = None,
         return {"ok": False, "tool": "fetch_web", "label": url,
                 "error": f"fetch rejected: {reason}"}
 
+    if not isinstance(url, str) or not url.strip():
+        return bad("missing URL")
+    if urlparse(url).scheme not in _ALLOWED_SCHEMES:
+        return bad("unsupported scheme")
+
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
         current = url
         try:
