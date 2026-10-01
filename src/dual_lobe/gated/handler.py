@@ -196,31 +196,17 @@ async def _call_b_json(system_prompt: str, user_prompt: str, contract: str) -> d
 
 
 def _verified_meter(value: Any, answer: str, evidence: str) -> tuple[str, str, list[dict[str, Any]]]:
-    """Validate B's rating against its contract; incomplete verification is YELLOW."""
+    """Normalize B's structured verdict without substituting proxy-authored rationale."""
     if not isinstance(value, dict):
-        return "YELLOW", "Verifier returned no valid rating; the answer remains unverified.", []
+        return "YELLOW", "Verifier response was not a valid structured object.", []
     level = str(value.get("deception_level") or "").strip().upper()
     rationale = str(value.get("meter_rationale") or "").strip()
     raw_concerns = value.get("concerns")
-    concerns = [c for c in raw_concerns if isinstance(c, dict)] if isinstance(raw_concerns, list) else []
-    unverified = value.get("unverified") or []
-    missing = value.get("missing") or []
-
-    if level not in {"GREEN", "YELLOW", "RED"} or not rationale:
-        return "YELLOW", "Verifier returned an incomplete rating; the answer remains unverified.", concerns
-    if level == "GREEN" and (concerns or unverified or missing):
-        return "YELLOW", "Verifier reported unresolved claims or evidence gaps; the answer remains unverified.", concerns
-    if level == "RED":
-        grounded = any(
-            bool(str(c.get("claim_quote") or "").strip())
-            and bool(str(c.get("evidence_quote") or "").strip())
-            and str(c.get("claim_quote") or "").strip() in answer
-            and str(c.get("evidence_quote") or "").strip() in evidence
-            and bool(str(c.get("reason") or "").strip())
-            for c in concerns
-        )
-        if not grounded:
-            return "YELLOW", "RED was returned without a claim and supporting evidence quote; the answer remains unverified.", concerns
+    concerns = [item for item in raw_concerns if isinstance(item, dict)] if isinstance(raw_concerns, list) else []
+    if level not in {"GREEN", "YELLOW", "RED"}:
+        return "YELLOW", rationale or "Verifier response did not contain a valid rating.", concerns
+    if not rationale:
+        return "YELLOW", "Verifier response did not contain its meter rationale.", concerns
     return level, rationale[:1200], concerns
 
 
