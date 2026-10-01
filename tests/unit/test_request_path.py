@@ -112,6 +112,27 @@ async def test_bidirectional_sse_drops_json_content_length(request_path, monkeyp
     assert "answer" in body and "[DONE]" in body
 
 
+async def test_bidirectional_json_recomputes_content_length_after_metadata(request_path, monkeypatch):
+    from starlette.responses import JSONResponse
+
+    async def fake_bidirectional(*args, **kwargs):
+        return JSONResponse(
+            {"choices": [{"message": {"role": "assistant", "content": "answer"},
+                          "finish_reason": "stop"}]},
+            headers={"Content-Length": "1"},
+        )
+
+    monkeypatch.setattr("dual_lobe.bidirectional.handler.bidirectional_response", fake_bidirectional)
+    request, principal, _, _ = request_path
+    response = await chat.chat_completions(ChatCompletionRequest(
+        model="sawii/dl-secure", stream=False,
+        messages=[{"role": "user", "content": "Hey B, answer this."}],
+    ), request, principal)
+
+    assert int(response.headers["content-length"]) == len(response.body)
+    assert b"memory_space" in response.body
+
+
 async def test_actual_asgi_stream_yields_before_provider_finishes(request_path):
     request, principal, persist, adapter = request_path
     released = asyncio.Event()
