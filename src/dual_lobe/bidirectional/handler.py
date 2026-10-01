@@ -201,7 +201,8 @@ def _system_prompt(speaker: str, *, verify: bool = False, tools: list[dict] | No
         "'I asked Lobe B, and it suggested ...'). Use handoff_to_other_lobe when the other lobe should take over "
         "and answer the user directly. You may call any client tool supplied with this request. Tool calls are "
         "executed by the caller and returned to you on the next request. Never claim a tool ran until its result "
-        "appears in the conversation. Do not expose internal consultation unless useful to the user."
+        "appears in the conversation. When a peer consultation note is supplied, do not restate or duplicate it; "
+        "the proxy appends the peer's exact input after your answer. Do not expose internal consultation unless useful."
     )
 
 
@@ -501,6 +502,8 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
         f"[{m.get('role')}] {_content_text(m.get('content'))[:1200]}"
         for m in messages[-12:] if m.get("role") in {"assistant", "tool"}
     )
+    if consultation_note:
+        evidence += "\\n[Internal consultation completed by proxy] " + consultation_note
     user_text = latest or "(no latest user message)"
     if secure and verifier == "A":
         user_text, _ = guard.sanitize(user_text, vault=vault)
