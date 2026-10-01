@@ -28,6 +28,8 @@ def served(monkeypatch):
         host = request.url.host
         calls.append(host)
         body = json.loads(request.content)
+        if failing.get(host) == "empty":
+            return httpx.Response(200, json={"choices": [{"message": {"content": None}}]})
         if host in failing:
             return httpx.Response(failing[host], json={"error": "nope"})
         if body.get("stream"):
@@ -80,6 +82,16 @@ async def test_error_switches_to_next_slot_and_skips_it_after(served):
     for _ in range(4):
         await a.buffered(_req())
     assert "two.example" not in calls        # cooling slot is not hit again
+
+
+async def test_empty_success_switches_to_next_slot(served):
+    calls, failing = served
+    a = hub.HubAdapter(_target("one.example"), "a", hub.configured_slots())
+    await a.buffered(_req())
+    failing["two.example"] = "empty"
+    data = await a.buffered(_req())
+    assert data["choices"][0]["message"]["content"] == "three.example"
+    assert calls[-2:] == ["two.example", "three.example"]
 
 
 async def test_429_parks_slot_and_call_succeeds(served):
