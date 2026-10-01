@@ -269,14 +269,46 @@ async def _consult(speaker: str, question: str, messages: list[dict[str, Any]],
         "Do not address the user, repeat your role, add process commentary, or claim tool use."
     )
     try:
-        with calltrace.stage(f"{speaker}-consult-{peer}"):
-            message = await _call(_role_alias(peer, secure=secure),
-                                  [{"role": "user", "content": prompt}], payload, tools=None)
-        return _content_text(message.get("content"))[:5000] or "The other lobe returned no text."
+        for attempt in range(2):
+            with calltrace.stage(f"{speaker}-consult-{peer}"):
+                message = await _call(
+                    _role_alias(peer, secure=secure),
+                    [
+                        {"role": "system", "content":
+                         f"You are Lobe {peer}. Reply with plain text only: the concise answer to Lobe {speaker}. "
+                         "Do not emit role names, channel labels, or special-token/control syntax."},
+                        {"role": "user", "content": prompt + (
+                            "\n\nPrevious attempt returned no readable text. Give a direct plain-text answer."
+                            if attempt else "")},
+                    ],
+                    payload, tools=None,
+                )
+            advice = _clean_consultation_text(message.get("content"))
+            if advice:
+                return advice[:5000]
+            LOG.warning("private consultation returned no readable text speaker=%s peer=%s attempt=%s",
+                        speaker, peer, attempt + 1)
+        return f"Lobe {peer} returned no readable answer after one retry; no peer answer is available."
     except Exception as exc:  # noqa: BLE001
         LOG.warning("private lobe consultation failed speaker=%s peer=%s error=%s",
                     speaker, peer, type(exc).__name__)
         return f"Lobe {peer} could not be reached for this consultation."
+
+
+def _clean_consultation_text(value: Any) -> str:
+    """Discard provider control markers and accept only substantive peer text."""
+    text = _content_text(value)
+    had_control = bool(re.search(r"<\|[^|]{1,100}\|>", text))
+    text = re.sub(r"<\|[^|]{1,100}\|>", " ", text).strip()
+    text = re.sub(r"(?im)^\s*(?:assistant|analysis|final|commentary)\s*:?\s*$", "", text)
+    if had_control:
+        text = re.sub(r"(?i)^(?:(?:assistant|analysis|final|commentary)\s+)+", "", text)
+    text = " ".join(text.split())
+    if had_control and text.casefold().strip(" :") in {
+        "assistant", "analysis", "final", "commentary", "assistant analysis", "assistant final",
+    }:
+        return ""
+    return text if any(char.isalnum() for char in text) else ""
 
 
 async def _secure_gate(messages: list[dict[str, Any]], payload: dict[str, Any]) -> dict[str, Any]:

@@ -230,6 +230,29 @@ def test_model_authored_consultation_commentary_is_replaced_by_proxy_record():
     assert handler._strip_peer_consultation_commentary("The result is correct.") == "The result is correct."
 
 
+def test_peer_consultation_control_tokens_are_not_reported_as_an_answer():
+    assert handler._clean_consultation_text("<|start|>assistant<|channel|>") == ""
+    assert handler._clean_consultation_text("<|start|>assistant<|channel|>analysis 2 + 2 = 4") == "2 + 2 = 4"
+
+
+@pytest.mark.asyncio
+async def test_private_consultation_retries_control_only_output(monkeypatch):
+    outputs = iter(("<|start|>assistant<|channel|>", "2 + 2 = 4"))
+    calls = []
+
+    async def fake_call(alias, messages, payload, **kwargs):
+        calls.append((alias, messages, kwargs))
+        return {"content": next(outputs)}
+
+    monkeypatch.setattr(handler, "_call", fake_call)
+    result = await handler._consult(
+        "B", "What is 2 + 2?", [{"role": "user", "content": "Question"}], {},
+    )
+    assert result == "2 + 2 = 4"
+    assert len(calls) == 2
+    assert "plain text only" in calls[0][1][0]["content"]
+
+
 @pytest.mark.asyncio
 async def test_claim_free_greeting_has_no_meter_or_verifier_call(monkeypatch):
     registry = FakeRegistry(a_messages=[{"content": "Hello! How can I help?"}], b_messages=[])
