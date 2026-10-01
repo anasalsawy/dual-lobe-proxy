@@ -48,14 +48,13 @@ class Settings(BaseSettings):
     b_api_key: str | None = Field(default=None, validation_alias="DUAL_LOBE_B_API_KEY")
     b_dialect: str = Field(default="chat_completions", validation_alias="DUAL_LOBE_B_DIALECT")
 
-    # Service-wide mode. "clinical" selects the secure bidirectional route: a
-    # local B privacy gate wraps the normal routed speaker/verifier flow.
-    engine: str = Field(default="gated", pattern=r"^(gated|clinical)$", validation_alias="DUAL_LOBE_ENGINE")
-    clinical_b_model: str | None = Field(default=None, validation_alias="DUAL_LOBE_CLINICAL_B_MODEL")
-    clinical_b_base_url: str | None = Field(default=None, validation_alias="DUAL_LOBE_CLINICAL_B_BASE_URL")
-    clinical_b_api_key: str | None = Field(default=None, validation_alias="DUAL_LOBE_CLINICAL_B_API_KEY")
+    # The secure public model ID selects this local B privacy gate. It is not a
+    # service-wide engine mode; both public variants share the same runtime.
+    secure_b_model: str | None = Field(default=None, validation_alias="DUAL_LOBE_SECURE_B_MODEL")
+    secure_b_base_url: str | None = Field(default=None, validation_alias="DUAL_LOBE_SECURE_B_BASE_URL")
+    secure_b_api_key: str | None = Field(default=None, validation_alias="DUAL_LOBE_SECURE_B_API_KEY")
     testing_mode: bool = Field(default=False, validation_alias="DUAL_LOBE_TESTING_MODE")
-    clinical_b_local_only: bool = Field(default=True, validation_alias="DUAL_LOBE_CLINICAL_B_LOCAL_ONLY")
+    secure_b_local_only: bool = Field(default=True, validation_alias="DUAL_LOBE_SECURE_B_LOCAL_ONLY")
 
     rollout_stage: RolloutStage = Field(default="context", validation_alias="DUAL_LOBE_ROLLOUT_STAGE")
     pulse_every: int = Field(default=1, ge=1, validation_alias="DUAL_LOBE_PULSE_EVERY")
