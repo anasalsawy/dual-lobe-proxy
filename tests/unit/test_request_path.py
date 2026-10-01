@@ -155,6 +155,17 @@ def test_unknown_request_fields_are_not_silently_dropped():
         ChatCompletionRequest(messages=[], unknown_option=True)
 
 
+async def test_old_lobe_alias_is_rejected_as_a_public_model(request_path):
+    from fastapi import HTTPException
+
+    request, principal, _, _ = request_path
+    with pytest.raises(HTTPException, match="unsupported model"):
+        await chat.chat_completions(
+            ChatCompletionRequest(model="lobe-a", messages=[{"role": "user", "content": "hi"}]),
+            request, principal,
+        )
+
+
 def test_original_goal_is_not_a_long_system_prompt():
     assert chat._original_goal([
         {"role": "system", "content": "rules" * 10000},

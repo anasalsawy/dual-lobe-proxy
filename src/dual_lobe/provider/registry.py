@@ -32,14 +32,9 @@ def env_targets() -> dict[str, ProviderTarget]:
     )
     base_fields = {f.name: getattr(base, f.name) for f in fields(base)}
     base_fields.pop("alias", None)
-    dialogue = ProviderTarget(alias="sawii/dialogue", **base_fields)
-    flat = ProviderTarget(alias="sawii/dl-dialogue", **base_fields)
-    chief = ProviderTarget(alias="sawii/dl-dialogue1", **base_fields)
-    moderator = ProviderTarget(alias="sawii/dl-dialogue2", **base_fields)
-    worker = ProviderTarget(alias="sawii/dl-dialogue3", **base_fields)
-    gated = ProviderTarget(alias="sawii/dl-gated", **base_fields)
     bidirectional = ProviderTarget(alias="sawii/dl-bidirectional", **base_fields)
     secure = ProviderTarget(alias="sawii/dl-secure", **base_fields)
+    # Internal target retained for the director RPC; never listed as a model.
     dual_lobe = ProviderTarget(alias="sawii/dual-lobe", **base_fields)
     # Internal aliases for B-lobe shadow cycles and director mode.
     # Not exposed in /v1/models (filtered out by user_facing_models set).
@@ -71,14 +66,7 @@ def env_targets() -> dict[str, ProviderTarget]:
     )
     return {
         "lobe-b-clinical": lobe_b_clinical,
-        "sawii/dual-lobe-old": base,
         "sawii/dual-lobe": dual_lobe,
-        "sawii/dialogue": dialogue,
-        "sawii/dl-dialogue": flat,
-        "sawii/dl-dialogue1": chief,
-        "sawii/dl-dialogue2": moderator,
-        "sawii/dl-dialogue3": worker,
-        "sawii/dl-gated": gated,
         "sawii/dl-bidirectional": bidirectional,
         "sawii/dl-secure": secure,
         "lobe-a": lobe_a,
@@ -106,9 +94,7 @@ async def load_db_targets(session: AsyncSession) -> dict[str, ProviderTarget]:
 
 # Env-configured aliases go through the round-robin hub when hub slots exist;
 # lobe-b rotates over B's slots, every other env alias is lobe A.
-_HUB_ROLES = {alias: "a" for alias in (
-    "sawii/dual-lobe-old", "sawii/dual-lobe", "sawii/dialogue", "sawii/dl-dialogue",
-    "sawii/dl-dialogue1", "sawii/dl-dialogue2", "sawii/dl-dialogue3", "sawii/dl-gated", "lobe-a")}
+_HUB_ROLES = {alias: "a" for alias in ("sawii/dual-lobe", "lobe-a")}
 _HUB_ROLES["sawii/dl-bidirectional"] = "a"
 _HUB_ROLES["sawii/dl-secure"] = "a"
 _HUB_ROLES["lobe-b"] = "b"
@@ -135,16 +121,14 @@ class Registry:
             self.register(target)
 
     def target(self, alias: str | None = None) -> ProviderTarget:
-        return self._targets[alias or "sawii/dual-lobe"]
+        return self._targets[alias or "sawii/dl-bidirectional"]
 
     def adapter(self, alias: str | None = None):
         target = self.target(alias)
         return self._adapters[target.alias]
 
     def models(self) -> list[dict[str, Any]]:
-        # Only expose user-facing models, hide internal routing components
-        # The supported product surface has two variants. Older aliases remain
-        # resolvable for existing deployments, but are no longer advertised.
+        # Only expose the two supported user-facing product variants.
         user_facing_models = {"sawii/dl-bidirectional", "sawii/dl-secure"}
         result = [
             {

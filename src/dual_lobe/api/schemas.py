@@ -10,7 +10,7 @@ EventKind = str
 
 class ChatCompletionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    model: str = "lobe-a"
+    model: str = "sawii/dl-bidirectional"
     messages: list[dict[str, Any]] = Field(default_factory=list)
     stream: bool = False
     temperature: float | None = None

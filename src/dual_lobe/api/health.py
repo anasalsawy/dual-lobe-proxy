@@ -28,7 +28,7 @@ async def readyz():
     except Exception:
         ledger = "down"
     try:
-        registry = "ok" if get_registry().target("sawii/dual-lobe").enabled else "down"
+        registry = "ok" if get_registry().target("sawii/dl-bidirectional").enabled else "down"
     except KeyError:
         registry = "down"
     rc = 200 if ledger == "ok" and registry == "ok" else 503

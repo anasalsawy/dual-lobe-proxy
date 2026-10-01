@@ -138,6 +138,22 @@ def test_registry_wraps_env_aliases_only_when_slots_configured(monkeypatch):
     hub.reset_for_tests()
 
 
+def test_registry_exposes_only_the_two_supported_public_models(monkeypatch):
+    from dual_lobe.core.settings import Settings
+    from dual_lobe.provider.registry import Registry, env_targets
+
+    monkeypatch.delenv("DUAL_LOBE_HUB_SLOTS", raising=False)
+    monkeypatch.setattr("dual_lobe.core.settings.get_settings", lambda: Settings(_env_file=None))
+    targets = env_targets()
+    registry = Registry()
+    registry.refresh(targets)
+    assert {item["id"] for item in registry.models()} == {
+        "sawii/dl-bidirectional", "sawii/dl-secure"
+    }
+    assert "sawii/dl-gated" not in targets
+    assert registry.target().alias == "sawii/dl-bidirectional"
+
+
 async def test_daily_quota_429_sidelines_slot_until_reset(served, monkeypatch):
     calls, _ = served
     import time as _time

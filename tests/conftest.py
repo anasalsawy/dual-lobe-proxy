@@ -65,6 +65,7 @@ def fake_target_and_registry(monkeypatch):
 
     reg = FakeRegistry()
     monkeypatch.setattr("dual_lobe.api.chat.get_registry", lambda: reg)
+    monkeypatch.setattr("dual_lobe.gated.handler.get_registry", lambda: reg)
     return reg
 
 

@@ -1,10 +1,10 @@
 # Two model variants: routing and privacy contract
 
-This document is the current implementation contract for the two public variants in the Dual-Lobe Proxy. Older branch/engine descriptions are historical and do not define the public model surface.
+This document is the current implementation contract for the two public variants in the Dual-Lobe Proxy. The chat endpoint accepts only `sawii/dl-bidirectional` and `sawii/dl-secure`, aside from the separately enabled director RPC. Other branch/engine descriptions are historical and do not define the public model surface.
 
 ## 1. General: `sawii/dl-bidirectional`
 
-A and B are provider-backed peer lobes. Configure them independently with the A/B settings; either can receive the user-facing turn, use caller-supplied tools, privately consult the other, and hand off the turn. Default speaker is A. The opposite lobe verifies the finished answer and the proxy adds the meter.
+A and B are provider-backed peer lobes. Configure them independently with the A/B settings; either can receive the user-facing turn, use caller-supplied tools, privately consult the other, and hand off the turn. Default speaker is A and B verifies through the existing gated path. Explicit lobe addressing opts into bidirectional speaker routing; its local check adds no routing-model call to unaddressed turns.
 
 | User intent | Speaker | Peer action | User-visible result |
 |---|---|---|---|
@@ -16,7 +16,7 @@ A and B are provider-backed peer lobes. Configure them independently with the A/
 | Speaker calls `handoff_to_other_lobe` | Other lobe | Former speaker verifies | New speaker's answer plus meter |
 | Speaker calls caller tool | Same speaker resumes after tool result | Peer verifies when finished | Tool call is returned to caller, then final answer plus meter |
 
-Routing detection on the ordinary gated route uses local text/regex checks only. If no explicit route is requested, that route continues through its existing code path without a routing-model call. `sawii/dl-bidirectional` explicitly selects the routed speaker/verifier path every turn.
+Routing detection on the ordinary general route uses local text/regex checks only. If no explicit route is requested, the request continues through the existing gated path without a routing-model call.
 
 ## 2. Secure: `sawii/dl-secure`
 
