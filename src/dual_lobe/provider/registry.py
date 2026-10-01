@@ -88,10 +88,19 @@ async def load_db_targets(session: AsyncSession) -> dict[str, ProviderTarget]:
     return out
 
 
-# Env-configured aliases go through the round-robin hub when hub slots exist;
-# lobe-b rotates over B's slots, every other env alias is lobe A.
-_HUB_ROLES = {alias: "a" for alias in ("sawii/dl-bidirectional", "sawii/dl-secure", "lobe-a")}
-_HUB_ROLES["lobe-b"] = "b"
+def _hub_role(alias: str) -> str | None:
+    """Select a round-robin pool; secure B joins B only in explicit test mode."""
+    if alias in {"sawii/dl-bidirectional", "sawii/dl-secure", "lobe-a"}:
+        return "a"
+    if alias == "lobe-b":
+        return "b"
+    if alias == "lobe-b-secure":
+        from ..core.settings import get_settings
+
+        settings = get_settings()
+        if settings.testing_mode and not settings.secure_b_local_only:
+            return "b"
+    return None
 
 
 class Registry:
@@ -101,7 +110,7 @@ class Registry:
 
     def register(self, target: ProviderTarget) -> None:
         self._targets[target.alias] = target
-        role = _HUB_ROLES.get(target.alias) if target.api_key else None
+        role = _hub_role(target.alias) if target.api_key else None
         slots = hub.configured_slots() if role else []
         if role and slots and target.kind == "chat_completions":
             self._adapters[target.alias] = hub.HubAdapter(target, role, slots)
