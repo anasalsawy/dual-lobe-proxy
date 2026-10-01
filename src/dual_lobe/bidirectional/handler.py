@@ -650,7 +650,7 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
         _set_meter(run_id, {"deception_level": verdict["deception_level"],
                             "meter_rationale": verdict["rationale"], "timestamp": time.time(),
                             "speaker": speaker, "verifier": verifier})
-    meter = (format_deception_meter(verdict["deception_level"], verdict["rationale"])
+    meter = (format_deception_meter(verdict["deception_level"], verdict["rationale"], concerns)
              if verdict else "")
     safe_memory_answer = answer
     if secure:
