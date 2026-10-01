@@ -44,7 +44,7 @@ def request_path(monkeypatch):
     "model, expected_b_alias",
     [
         ("sawii/dl-bidirectional", "lobe-b"),
-        ("sawii/dl-secure", "lobe-b-clinical"),
+        ("sawii/dl-secure", "lobe-b-secure"),
     ],
 )
 async def test_public_models_use_existing_b_group_router(request_path, monkeypatch, model, expected_b_alias):
