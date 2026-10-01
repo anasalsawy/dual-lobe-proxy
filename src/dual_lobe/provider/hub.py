@@ -165,11 +165,15 @@ def _classify(exc: BaseException) -> tuple[float, str]:
             if daily is not None:
                 return daily, "429 daily quota used up"
             return 0.0, "429"  # the slot's gate already parked itself for Retry-After
+        if code == 402:
+            return COOL_AUTH, "provider credit or payment required"
         if code in (401, 403, 404):
             return COOL_AUTH, f"http {code}"
         if code >= 500 or code == 408:
             return COOL_SERVER, f"http {code}"
         return 0.0, f"http {code}"
+    if isinstance(exc, ValueError) and "empty completion" in str(exc).lower():
+        return COOL_SERVER, "empty completion"
     if isinstance(exc, (httpx.TransportError, asyncio.TimeoutError, TimeoutError)):
         return COOL_TRANSPORT, type(exc).__name__
     return 0.0, f"{type(exc).__name__}: {exc}"
