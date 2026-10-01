@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 12998)
-Total output lines: 981
-
 """Streaming A transport with best-effort, post-response observer enqueue."""
 from __future__ import annotations
 
@@ -414,7 +411,211 @@ async def chat_completions(
         if memory_space:
             try:
                 shared = await load_memory(principal.tenant_id, memory_space, messages)
-               …2998 tokens truncated…ait-Policy": "no-wait-unless-intervention",
+                shared_text, shared_entries = shared.text, len(shared.entry_ids)
+            except Exception:
+                LOG.warning("shared memory load failed run=%s (fail-open)", run_id)
+        result = await bidirectional_response({**payload, "stream": False}, run_id, principal.tenant_id, shared_text,
+                                              shared_space=memory_space, clinical=clinical_secure)
+        data = json.loads(result.body)
+        private_lobe_data = data.get("dual_lobe") or {}
+        safe_memory_messages = private_lobe_data.pop("_memory_messages", None)
+        safe_memory_answer = private_lobe_data.pop("_memory_answer", None)
+        safe_memory_tool_calls = private_lobe_data.pop("_memory_tool_calls", None)
+        data["dual_lobe"] = {**(data.get("dual_lobe") or {}), "memory_space": memory_space or "off",
+                             "shared_entries": shared_entries}
+        memory_messages = messages
+        if clinical_secure and memory_space:
+            # Persist only the already gated request snapshot. Strip ephemeral
+            # tokens too: their vault keys are request-scoped and cannot be
+            # recovered on later turns.
+            import re
+
+            def persisted(value):
+                if isinstance(value, str):
+                    return re.sub(r"<PHI:[A-Z0-9_:-]+>", "[REDACTED]", value)
+                if isinstance(value, list):
+                    return [persisted(item) for item in value]
+                if isinstance(value, dict):
+                    return {key: persisted(item) for key, item in value.items()}
+                return value
+
+            memory_messages = persisted(safe_memory_messages or [])
+            if safe_memory_answer is not None:
+                safe_response = {"role": "assistant", "content": persisted(safe_memory_answer)}
+            elif safe_memory_tool_calls is not None:
+                safe_response = {"role": "assistant", "content": None,
+                                 "tool_calls": persisted(safe_memory_tool_calls)}
+            else:
+                safe_response = {"role": "assistant", "content": "[Secure response not persisted.]"}
+            data_for_memory = {**data, "choices": [{"message": safe_response}]}
+        else:
+            data_for_memory = data
+        background = _record_background(principal.tenant_id, memory_space, run_id, memory_messages,
+                                        data_for_memory)
+        headers = _headers(dict(result.headers))
+        headers["X-Dual-Lobe-Memory-Space"] = memory_space or "off"
+        headers["X-Dual-Lobe-Shared-Entries"] = str(shared_entries)
+        if payload.get("stream", False):
+            async def _bidirectional_stream():
+                chunk = dict(data)
+                chunk["object"] = "chat.completion.chunk"
+                for choice in chunk.get("choices", []):
+                    choice["delta"] = choice.pop("message", {})
+                    choice["finish_reason"] = choice.get("finish_reason") or "stop"
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+            return StreamingResponse(_bidirectional_stream(), media_type="text/event-stream",
+                                     headers={**headers, "Cache-Control": "no-cache",
+                                               "X-Accel-Buffering": "no"}, background=background)
+        return JSONResponse(data, status_code=200, headers=headers, background=background)
+
+    # Per-service engine (model 1 "split", model 2 "clinical"); "gated" continues below.
+    if s.engine != "gated" and alias != "sawii/dl-bidirectional":
+        from ..engines.respond import engine_response
+
+        return await engine_response(s.engine, payload)
+
+    # Dual-lobe mode: pre-final A/B collaboration. For streaming requests,
+    # bridge the handler's event sink into the HTTP response so the client can
+    # watch A/B turns as they complete rather than waiting for finalization.
+    if alias == "sawii/dual-lobe":
+        from ..dl import handler as dl_handler
+
+        # Experimental interleaved mode: A streams to the user immediately while
+        # B shadows semantic snapshots in parallel. No approval gate is placed in
+        # A's normal path; only material B interventions cause resynchronization.
+        if payload.get("stream", False) and payload.get("dual_lobe_interleaved", False):
+            try:
+                from ..dl.interleaved import interleaved_event_stream
+            except ImportError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="interleaved mode is not available in this build",
+                ) from None
+            inline_flags = payload.get("dual_lobe_interleaved_inline_flags")
+            if inline_flags is None:
+                inline_flags = True
+            live_events = payload.get("dual_lobe_live_events")
+            if live_events is None:
+                live_events = True
+
+            async def _dl_interleaved_stream():
+                completion_id = f"chatcmpl-dl-shadow-{run_id}"
+                created = int(time.time())
+                role_sent = False
+                terminal_seen = False
+
+                def _event_chunk(event):
+                    return {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": alias,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+                        "dual_lobe_event": event,
+                    }
+
+                async for item in interleaved_event_stream(
+                    payload, run_id, principal.tenant_id, alias, task=str(run.goal or "")
+                ):
+                    if item["kind"] == "chunk":
+                        chunk = item["data"]
+                        chunk["id"] = chunk.get("id") or completion_id
+                        chunk["model"] = alias
+                        # The provider may omit role in its first delta; make sure
+                        # generic clients still receive a valid assistant opener.
+                        choices = chunk.get("choices") or []
+                        if choices and not role_sent:
+                            delta = choices[0].get("delta") or {}
+                            if not delta.get("role"):
+                                opener = {
+                                    "id": completion_id, "object": "chat.completion.chunk",
+                                    "created": created, "model": alias,
+                                    "choices": [{"index": 0, "delta": {"role": "assistant"},
+                                                 "finish_reason": None}],
+                                }
+                                yield "data: " + json.dumps(opener, ensure_ascii=False) + "\n\n"
+                            role_sent = True
+                        for choice in choices:
+                            if choice.get("finish_reason") is not None:
+                                terminal_seen = True
+                        yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
+                        continue
+
+                    if item["kind"] == "event":
+                        event = item["event"]
+                        if live_events:
+                            yield "data: " + json.dumps(_event_chunk(event), ensure_ascii=False) + "\n\n"
+                        if inline_flags and event.get("type") == "shadow_intervention":
+                            action = str(event.get("action", "FLAG")).replace("_", " ")
+                            content = str(event.get("message", "") or "").strip()
+                            if content:
+                                text = f"\n\n🅱️ B — {action}\n{content}\n\n🅰️ A\n"
+                                visible = {
+                                    "id": completion_id, "object": "chat.completion.chunk",
+                                    "created": created, "model": alias,
+                                    "choices": [{"index": 0, "delta": {"content": text},
+                                                 "finish_reason": None}],
+                                }
+                                yield "data: " + json.dumps(visible, ensure_ascii=False) + "\n\n"
+                        if event.get("type") == "shadow_tool_request":
+                            # B has the same host tool definitions as A. Surface its
+                            # request through the canonical OpenAI tool-call channel so
+                            # the existing host executes it normally. On the next turn
+                            # both lobes receive the exact tool result from conversation
+                            # history/shared reality.
+                            tool_calls = event.get("tool_calls") or []
+                            if inline_flags and event.get("message"):
+                                notice = {
+                                    "id": completion_id, "object": "chat.completion.chunk",
+                                    "created": created, "model": alias,
+                                    "choices": [{"index": 0, "delta": {
+                                        "content": f"\n\n🅱️ B — TOOL REQUEST\n{str(event.get('message'))}\n"
+                                    }, "finish_reason": None}],
+                                }
+                                yield "data: " + json.dumps(notice, ensure_ascii=False) + "\n\n"
+                            if tool_calls:
+                                tool_delta = {
+                                    "id": completion_id, "object": "chat.completion.chunk",
+                                    "created": created, "model": alias,
+                                    "choices": [{"index": 0, "delta": {
+                                        "tool_calls": [dict({"index": i}, **call) for i, call in enumerate(tool_calls)]
+                                    }, "finish_reason": None}],
+                                }
+                                yield "data: " + json.dumps(tool_delta, ensure_ascii=False) + "\n\n"
+                                terminal = {
+                                    "id": completion_id, "object": "chat.completion.chunk",
+                                    "created": created, "model": alias,
+                                    "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                                }
+                                yield "data: " + json.dumps(terminal, ensure_ascii=False) + "\n\n"
+                                terminal_seen = True
+                        continue
+
+                    if item["kind"] == "meta":
+                        if live_events:
+                            yield "data: " + json.dumps(
+                                _event_chunk({"type": "shadow_meta", **item["data"]}),
+                                ensure_ascii=False
+                            ) + "\n\n"
+
+                # The upstream A stream may already have emitted a terminal choice.
+                # We still terminate the multiplexed SSE exactly once.
+                if not terminal_seen:
+                    final = {
+                        "id": completion_id, "object": "chat.completion.chunk",
+                        "created": created, "model": alias,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    }
+                    yield "data: " + json.dumps(final, ensure_ascii=False) + "\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                _dl_interleaved_stream(), media_type="text/event-stream",
+                headers=_headers({
+                    "X-Dual-Lobe-Mode": "interleaved-shadow",
+                    "X-Dual-Lobe-Meter": "LIVE",
+                    "X-Dual-Lobe-Wait-Policy": "no-wait-unless-intervention",
                     "X-Dual-Lobe-Tool-Mode": str(payload.get("dual_lobe_tool_mode") or "shared"),
                     "X-DL-Run-ID": external_run,
                     "X-DL-Internal-Run-ID": run_id,
