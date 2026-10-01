@@ -614,44 +614,37 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
         f"USER REQUEST:\n{user_text}\n\nCANDIDATE ANSWER FROM LOBE {speaker} (preserve exactly):\n{verifier_answer}\n\n"
         f"RECENT TOOL/ASSISTANT EVIDENCE:\n{evidence or '(no prior tool evidence)'}"
     )
-    skip_verification = (
-        not (message.get("tool_calls") or []) and not consultation_note
-        and is_claim_free_greeting(latest, answer)
-    )
     try:
-        if skip_verification:
-            verdict = None
+      with calltrace.stage(f"{verifier}-verify"):
+        verifier_system = _system_prompt(verifier, verify=True, tools=tools)
+        from ..gated.prompts import DOWNSTREAM_CONTRACT_HANDOFF, HANDOFF_SYSTEM_ADDENDUM
+        if getattr(get_settings(), "gated_b_handoff", True):
+            verifier_system += "\\n\\n" + _role_specific_verifier_text(HANDOFF_SYSTEM_ADDENDUM, verifier)
+            verify_prompt += "\\n\\n" + _role_specific_verifier_text(DOWNSTREAM_CONTRACT_HANDOFF, verifier)
         else:
-          with calltrace.stage(f"{verifier}-verify"):
-            verifier_system = _system_prompt(verifier, verify=True, tools=tools)
-            from ..gated.prompts import DOWNSTREAM_CONTRACT_HANDOFF, HANDOFF_SYSTEM_ADDENDUM
-            if getattr(get_settings(), "gated_b_handoff", True):
-                verifier_system += "\n\n" + _role_specific_verifier_text(HANDOFF_SYSTEM_ADDENDUM, verifier)
-                verify_prompt += "\n\n" + _role_specific_verifier_text(DOWNSTREAM_CONTRACT_HANDOFF, verifier)
-            else:
-                from ..gated.prompts import DOWNSTREAM_CONTRACT
-                verify_prompt += "\n\n" + _role_specific_verifier_text(DOWNSTREAM_CONTRACT, verifier)
-            if secure and verifier == "A":
-                verifier_system += " Private-value tokens are opaque; preserve them and do not infer their contents."
-            verdict_message = await _call(
-                _role_alias(verifier, secure=secure), [{"role": "system", "content": verifier_system},
-                                   {"role": "user", "content": verify_prompt}],
-                payload, tools=tools or None, tool_choice="none" if tools else None, verify=True,
-            )
-          verdict = _parse_verdict(verdict_message)
-          from ..gated.handler import _verified_meter
-          level, rationale, concerns = _verified_meter(
-              verdict, verifier_answer, evidence + "\n" + verifier_answer)
-          verdict.update(deception_level=level, rationale=rationale,
-                         meter_rationale=rationale, concerns=concerns)
+            from ..gated.prompts import DOWNSTREAM_CONTRACT
+            verify_prompt += "\\n\\n" + _role_specific_verifier_text(DOWNSTREAM_CONTRACT, verifier)
+        if secure and verifier == "A":
+            verifier_system += " Private-value tokens are opaque; preserve them and do not infer their contents."
+        verdict_message = await _call(
+            _role_alias(verifier, secure=secure), [{"role": "system", "content": verifier_system},
+                               {"role": "user", "content": verify_prompt}],
+            payload, tools=tools or None, tool_choice="none" if tools else None, verify=True,
+        )
+      verdict = _parse_verdict(verdict_message)
+      from ..gated.handler import _verified_meter
+      level, rationale, concerns = _verified_meter(
+          verdict, verifier_answer, evidence + "\\n" + verifier_answer)
+      verdict.update(deception_level=level, rationale=rationale,
+                     meter_rationale=rationale, concerns=concerns)
     except Exception as exc:  # noqa: BLE001
         LOG.warning("bidirectional verification failed speaker=%s verifier=%s error=%s",
                     speaker, verifier, type(exc).__name__)
-        verdict = None if skip_verification else {
-                   "deception_level": "YELLOW",
-                   "rationale": "The independent verification call failed; the answer remains unverified.",
-                   "meter_rationale": "The independent verification call failed; the answer remains unverified.",
-                   "missing": [], "unverified": ["Verifier call failed."], "concerns": []}
+        verdict = {
+            "deception_level": "YELLOW",
+            "rationale": "The independent verification call failed; the answer remains unverified.",
+            "meter_rationale": "The independent verification call failed; the answer remains unverified.",
+            "missing": [], "unverified": ["Verifier call failed."], "concerns": []}
     if run_id and verdict:
         _set_meter(run_id, {"deception_level": verdict["deception_level"],
                             "meter_rationale": verdict["rationale"], "timestamp": time.time(),
