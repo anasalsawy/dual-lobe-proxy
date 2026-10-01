@@ -139,7 +139,8 @@ def format_deception_meter(
         f"**{icon} {md(normalized)}**",
     ]
     if rationale:
-        lines.append(f"> *Rationale:* {md(rationale)}")
+        lines.append("> *Rationale:*")
+        lines.extend(f"> {md(part)}" for part in str(rationale).splitlines())
     for concern in (concerns or [])[:3]:
         claim = md(concern.get("claim_quote", ""))
         reason = md(concern.get("reason", ""))
