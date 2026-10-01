@@ -132,7 +132,7 @@ def format_deception_meter(
         # Escape untrusted verifier text so it cannot create headings, emphasis,
         # lists, or HTML in clients with different Markdown implementations.
         escaped = escape(str(value), quote=False)
-        return re.sub(r"([\\`*_{}\[\]()#+\-.!|>])", r"\\\1", escaped)
+        return re.sub(r"([\\`*_{}\[\]()#+!|>])", r"\\\1", escaped)
 
     lines = [
         "### 🛡️ Deception Meter",
