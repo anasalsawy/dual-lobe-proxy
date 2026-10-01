@@ -108,6 +108,7 @@ async def test_bidirectional_sse_drops_json_content_length(request_path, monkeyp
     ), request, principal)
 
     assert "content-length" not in response.headers
+    assert response.headers["content-type"].startswith("text/event-stream")
     body = "".join([chunk async for chunk in response.body_iterator])
     assert "answer" in body and "[DONE]" in body
 
