@@ -782,12 +782,6 @@ async def _complete(
     a_content = strip_deception_meter(a_message.get("content", "") or "")
     a_message["content"] = a_content
 
-    if (not (a_message.get("tool_calls") or []) and not proxy_used
-            and is_claim_free_greeting(_latest_user_text(messages), a_content)):
-        LOG.info("gated verification skipped run=%s reason=claim_free_greeting", run_id)
-        a_data["model"] = public_model
-        return a_data, {"X-Dual-Lobe-Gated": "on"}
-
     # ── 3. DOWNSTREAM: B rates A's response ──────────────────────
     handoff_on = bool(getattr(s, "gated_b_handoff", True))
     b_system = GATED_B_SYSTEM_DOWNSTREAM + (("\n\n" + HANDOFF_SYSTEM_ADDENDUM) if handoff_on else "")
