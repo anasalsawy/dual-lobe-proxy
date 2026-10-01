@@ -195,30 +195,29 @@ def requested_handoff(text: str, speaker: str) -> str | None:
 
 
 def _system_prompt(speaker: str, *, verify: bool = False, tools: list[dict] | None = None) -> str:
-    available = ", ".join(
-        str((tool.get("function") or {}).get("name", "")) for tool in (tools or [])
-        if (tool.get("function") or {}).get("name")
-    ) or "none supplied"
     if verify:
         from ..gated.prompts import GATED_B_SYSTEM_DOWNSTREAM
         return _role_specific_verifier_text(GATED_B_SYSTEM_DOWNSTREAM, speaker)
+    names = ", ".join(
+        str((tool.get("function") or {}).get("name", ""))
+        for tool in (tools or [])
+        if (tool.get("function") or {}).get("name")
+    ) or "none supplied"
     return (
-        f"You are Lobe {speaker}, the user-facing speaker for this turn. Respond normally to the latest user. "
-        "Do not write, label, or append a deception meter or verification rating; the proxy adds the sole meter. "
-        "The other lobe is your peer: use consult_other_lobe when the user asks you to get its view or when "
-        "its independent input would materially improve the answer. Use its recorded result for your reasoning, "
-        "and act on relevant advice to advance and complete the user’s task; do not stop at relaying the "
-        "consultation or simply return B’s response. "
-        "but do not quote, paraphrase, or narrate the consultation in your response; the proxy appends the exact "
-        "peer result once after your answer. Use handoff_to_other_lobe when the other lobe should take over "
-        "and answer the user directly. When the user asks you to inspect live state or perform an action, use a relevant client tool now if one is available; do not substitute instructions or sample code. If no relevant tool is supplied, state that you cannot inspect or act here and name the missing access. Only write implementation code when asked or when the user accepts a code offer, and label untested code accurately. You may call any client tool supplied with this request. Tool calls are "
-        "executed by the caller and returned to you on the next request. Never claim a tool ran until its result "
-        "appears in the conversation. When the proxy supplies a completed peer-consultation note, use its result but do not "
-        "claim a consultation that is not recorded. Attribute the peer's view if you discuss it; the proxy appends its exact "
-        "note only when your answer does not already report the peer's result. Do not expose other routing details."
+        "Keep the host application's system/developer instructions, identity, voice, and native tool-use behavior. "
+        "This adds only dual-lobe routing behavior; it does not replace the host instructions. "
+        "Use the tools supplied with this request through their normal tool-call interface. When the user asks you "
+        "to perform a task and an appropriate tool is available, call it and continue from its result; do not give "
+        "commands or sample code for the user to run instead. If a tool fails, report its exact error and try another "
+        "relevant available tool. Do not infer that all access is denied from one failed tool. Never ask the user to "
+        "paste passwords, API keys, access tokens, cookies, or credential/session-file contents. "
+        "The tools available on this request are: " + names + ". "
+        "Do not write a deception meter or verification rating; the proxy appends the verifier's meter once. "
+        "Use consult_other_lobe when the user explicitly asks for the peer's view or when that independent input "
+        "would materially improve the answer. Use relevant peer advice to complete the task, and let the proxy "
+        "include the exact consultation result once. Use handoff_to_other_lobe when the user asks the peer to take "
+        "the user-facing turn. Preserve the host assistant's normal identity and style in the response."
     )
-
-
 
 def _role_specific_verifier_text(text: str, verifier: str) -> str:
     """Adapt the shared A-facing verifier rubric to whichever lobe spoke."""
@@ -414,15 +413,9 @@ def _tag_tool_calls(calls: list[dict[str, Any]], speaker: str) -> list[dict[str,
 async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
                shared_text: str | None = None, shared_space: str | None = None,
                secure: bool = False) -> tuple[str | None, list[dict[str, Any]], dict[str, Any]]:
-    from ..gated.handler import OBSERVATION_DISCLAIMER, _get_meter, _set_meter
+    from ..gated.handler import _set_meter
     messages = list(payload.get("messages") or [])
     messages = inject_shared_memory(messages, shared_text)
-    messages.insert(0, {"role": "system", "content": OBSERVATION_DISCLAIMER})
-    previous_meter = _get_meter(run_id) if run_id else None
-    if previous_meter:
-        messages.insert(1, {"role": "system", "content":
-            "[Observer meter from prior turn: " + str(previous_meter.get("deception_level", "YELLOW")) +
-            " — " + str(previous_meter.get("meter_rationale", ""))[:500] + "]"})
     tools = list(payload.get("tools") or [])
     guard = vault = None
     gate_result = None
@@ -482,6 +475,11 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
     can_route = not consulted and not tool_continuation and payload.get("tool_choice") in (None, "auto")
     exposed_tools = tools + (proxy_tool_schemas() if not tool_continuation else []) \
         + ([_CONSULT_TOOL, _HANDOFF_TOOL] if can_route else [])
+    speaker_instruction = {"role": "system", "content": _system_prompt(speaker, tools=exposed_tools)}
+    instruction_index = 0
+    while instruction_index < len(dialogue) and dialogue[instruction_index].get("role") in {"system", "developer"}:
+        instruction_index += 1
+    dialogue.insert(instruction_index, speaker_instruction)
     message = await _call(_role_alias(speaker, secure=secure), dialogue, payload, tools=exposed_tools or None,
                           tool_choice="auto" if can_route else payload.get("tool_choice"))
 
