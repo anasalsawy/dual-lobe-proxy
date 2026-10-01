@@ -100,25 +100,25 @@ def _rehydrate_messages(messages: list[dict[str, Any]], vault) -> list[dict[str,
     return safe
 
 
-def _role_alias(speaker: str, *, clinical: bool) -> str:
-    return "lobe-b-clinical" if clinical and speaker == "B" else _ROLES[speaker]
+def _role_alias(speaker: str, *, secure: bool) -> str:
+    return "lobe-b-secure" if secure and speaker == "B" else _ROLES[speaker]
 
 
-def _assert_clinical_b_local() -> None:
+def _assert_secure_b_local() -> None:
     """Fail closed if the secure variant's raw-data B endpoint is remote."""
     from urllib.parse import urlparse
     from fastapi import HTTPException
 
     s = get_settings()
-    if s.testing_mode and not s.clinical_b_local_only:
+    if s.testing_mode and not s.secure_b_local_only:
         return
-    target = get_registry().target("lobe-b-clinical")
+    target = get_registry().target("lobe-b-secure")
     host = (urlparse(target.base_url or "").hostname or "").lower()
     local = host in {"localhost", "::1", "host.docker.internal"} or host.startswith("127.")
     if not local:
         raise HTTPException(503, "Secure B is local-only unless testing mode is explicitly enabled with "
                                 "DUAL_LOBE_TESTING_MODE=true and "
-                                "DUAL_LOBE_CLINICAL_B_LOCAL_ONLY=false.")
+                                "DUAL_LOBE_SECURE_B_LOCAL_ONLY=false.")
 
 
 def _content_text(value: Any) -> str:
@@ -222,7 +222,7 @@ async def _call(alias: str, messages: list[dict[str, Any]], payload: dict[str, A
         stream=False,
         response_format={"type": "json_object"} if verify else payload.get("response_format"),
         seed=payload.get("seed"),
-        timeout=get_settings().b_timeout if alias in {"lobe-b", "lobe-b-clinical"} else get_settings().a_timeout,
+        timeout=get_settings().b_timeout if alias in {"lobe-b", "lobe-b-secure"} else get_settings().a_timeout,
         reasoning_effort=payload.get("reasoning_effort"),
         frequency_penalty=payload.get("frequency_penalty"),
         presence_penalty=payload.get("presence_penalty"),
@@ -237,12 +237,12 @@ async def _call(alias: str, messages: list[dict[str, Any]], payload: dict[str, A
 
 
 async def _consult(speaker: str, question: str, messages: list[dict[str, Any]],
-                   payload: dict[str, Any], *, clinical: bool = False, guard=None, vault=None) -> str:
+                   payload: dict[str, Any], *, secure: bool = False, guard=None, vault=None) -> str:
     peer = "B" if speaker == "A" else "A"
-    if clinical and peer == "A":
+    if secure and peer == "A":
         messages = _privacy_view(messages, guard, vault)
         question, _ = guard.sanitize(question, vault=vault)
-    elif clinical and peer == "B":
+    elif secure and peer == "B":
         messages = _rehydrate_messages(messages, vault)
         question = vault.rehydrate_text(question)
     context = "\n".join(
@@ -256,7 +256,7 @@ async def _consult(speaker: str, question: str, messages: list[dict[str, Any]],
     )
     try:
         with calltrace.stage(f"{speaker}-consult-{peer}"):
-            message = await _call(_role_alias(peer, clinical=clinical),
+            message = await _call(_role_alias(peer, secure=secure),
                                   [{"role": "user", "content": prompt}], payload, tools=None)
         return _content_text(message.get("content"))[:5000] or "The other lobe returned no text."
     except Exception as exc:  # noqa: BLE001
@@ -265,9 +265,9 @@ async def _consult(speaker: str, question: str, messages: list[dict[str, Any]],
         return f"Lobe {peer} could not be reached for this consultation."
 
 
-async def _clinical_gate(messages: list[dict[str, Any]], payload: dict[str, Any]) -> dict[str, Any]:
-    """Run local B's privacy check before any clinical input reaches provider A."""
-    _assert_clinical_b_local()
+async def _secure_gate(messages: list[dict[str, Any]], payload: dict[str, Any]) -> dict[str, Any]:
+    """Run local B's privacy check before any secure input reaches provider A."""
+    _assert_secure_b_local()
     raw = "\n\n".join(f"{m.get('role', '?')}: {_content_text(m.get('content'))[:5000]}"
                        for m in messages[-12:])
     system = (
@@ -278,7 +278,7 @@ async def _clinical_gate(messages: list[dict[str, Any]], payload: dict[str, Any]
         "This response stays inside the local proxy and is never sent to a remote model or user."
     )
     with calltrace.stage("B-privacy-gate"):
-        result = await _call("lobe-b-clinical", [{"role": "system", "content": system},
+        result = await _call("lobe-b-secure", [{"role": "system", "content": system},
             {"role": "user", "content": raw}], payload, tools=None, verify=True)
     try:
         value = json.loads(_content_text(result.get("content")))
@@ -323,7 +323,7 @@ def _tag_tool_calls(calls: list[dict[str, Any]], speaker: str) -> list[dict[str,
 
 async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
                shared_text: str | None = None, shared_space: str | None = None,
-               clinical: bool = False) -> tuple[str | None, list[dict[str, Any]], dict[str, Any]]:
+               secure: bool = False) -> tuple[str | None, list[dict[str, Any]], dict[str, Any]]:
     from ..gated.handler import OBSERVATION_DISCLAIMER, _get_meter, _set_meter
     messages = list(payload.get("messages") or [])
     messages = inject_shared_memory(messages, shared_text)
@@ -336,12 +336,12 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
     tools = list(payload.get("tools") or [])
     guard = vault = None
     gate_result = None
-    if clinical:
+    if secure:
         from .privacy import PrivacyGuard
 
         guard = PrivacyGuard()
         vault = guard.new_vault()
-        gate_result = await _clinical_gate(messages, payload)
+        gate_result = await _secure_gate(messages, payload)
         for value in gate_result.pop("sensitive_values", []):
             vault.tokenize(value, label="sensitive")
         # Seed the vault from the full incoming conversation even when B is the
@@ -363,8 +363,8 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
     latest = latest_user_text(messages)
     tool_continuation = bool(messages and messages[-1].get("role") == "tool")
     explicit_peer = None if tool_continuation else requested_consultee(latest, speaker)
-    dialogue = list(safe_messages if clinical and speaker == "A" else messages)
-    if clinical and speaker == "A":
+    dialogue = list(safe_messages if secure and speaker == "A" else messages)
+    if secure and speaker == "A":
         boundary = (
             "Privacy boundary: opaque <PHI:...> tokens stand for exact private values. Keep them unchanged; "
             "never guess or expand their values. You may include a token in a protected tool argument when "
@@ -377,8 +377,8 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
     consulted = False
     consultation_note = ""
     if explicit_peer:
-        advice = await _consult(speaker, latest, dialogue, payload, clinical=clinical, guard=guard, vault=vault)
-        if clinical and speaker == "A":
+        advice = await _consult(speaker, latest, dialogue, payload, secure=secure, guard=guard, vault=vault)
+        if secure and speaker == "A":
             advice, _ = guard.sanitize(advice, vault=vault)
         consultation_note = f"I asked Lobe {explicit_peer}, and it said: {advice}"
         dialogue.append({"role": "user", "name": f"lobe_{explicit_peer.lower()}_private_input",
@@ -388,7 +388,7 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
     can_route = not consulted and not tool_continuation and payload.get("tool_choice") in (None, "auto")
     exposed_tools = tools + (proxy_tool_schemas() if not tool_continuation else []) \
         + ([_CONSULT_TOOL, _HANDOFF_TOOL] if can_route else [])
-    message = await _call(_role_alias(speaker, clinical=clinical), dialogue, payload, tools=exposed_tools or None,
+    message = await _call(_role_alias(speaker, secure=secure), dialogue, payload, tools=exposed_tools or None,
                           tool_choice="auto" if can_route else payload.get("tool_choice"))
 
     calls = message.get("tool_calls") or []
@@ -408,7 +408,7 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
         dialogue.extend({"role": "tool", "tool_call_id": str(c.get("id") or f"proxy-{i}"),
                          "name": (c.get("function") or {}).get("name"), "content": results[i]}
                         for i, c in enumerate(proxy_calls))
-        message = await _call(_role_alias(speaker, clinical=clinical), dialogue, payload, tools=tools or None,
+        message = await _call(_role_alias(speaker, secure=secure), dialogue, payload, tools=tools or None,
                               tool_choice=payload.get("tool_choice"))
         calls = message.get("tool_calls") or []
     handoff_calls = [c for c in calls if ((c.get("function") or {}).get("name") == "handoff_to_other_lobe")]
@@ -425,7 +425,7 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
                          "content": f"Lobe {previous_speaker} handed this user-facing turn to you. "
                                     f"Its context: {context}"})
         speaker, verifier = new_speaker, previous_speaker
-        if clinical:
+        if secure:
             dialogue = (_privacy_view(dialogue, guard, vault) if speaker == "A"
                         else _rehydrate_messages(dialogue, vault))
             if speaker == "A":
@@ -434,7 +434,7 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
                     "unchanged. The proxy resolves them only at protected tool execution."})
         consulted = False
         consultation_note = ""
-        message = await _call(_role_alias(speaker, clinical=clinical), dialogue, payload, tools=tools or None,
+        message = await _call(_role_alias(speaker, secure=secure), dialogue, payload, tools=tools or None,
                               tool_choice=payload.get("tool_choice"))
         calls = message.get("tool_calls") or []
 
@@ -446,8 +446,8 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
             question = str(args.get("question") or latest)
         except (json.JSONDecodeError, AttributeError, TypeError):
             pass
-        advice = await _consult(speaker, question, dialogue, payload, clinical=clinical, guard=guard, vault=vault)
-        if clinical and speaker == "A":
+        advice = await _consult(speaker, question, dialogue, payload, secure=secure, guard=guard, vault=vault)
+        if secure and speaker == "A":
             advice, _ = guard.sanitize(advice, vault=vault)
         peer = 'B' if speaker == 'A' else 'A'
         consultation_note = f"I asked Lobe {peer}, and it said: {advice}"
@@ -457,20 +457,20 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
             {"role": "tool", "tool_call_id": consult_id, "name": "consult_other_lobe", "content": advice},
         ])
         external_tools = [t for t in tools if ((t.get("function") or {}).get("name") != "consult_other_lobe")]
-        message = await _call(_role_alias(speaker, clinical=clinical), dialogue, payload, tools=external_tools or None,
+        message = await _call(_role_alias(speaker, secure=secure), dialogue, payload, tools=external_tools or None,
                               tool_choice=payload.get("tool_choice"))
         calls = message.get("tool_calls") or []
 
     client_calls = [c for c in calls if ((c.get("function") or {}).get("name") != "consult_other_lobe")]
     if client_calls:
         safe_memory_calls = deepcopy(client_calls)
-        if clinical and speaker == "A":
+        if secure and speaker == "A":
             for call in client_calls:
                 fn = call.get("function") or {}
                 args = fn.get("arguments")
                 if isinstance(args, str):
                     fn["arguments"] = vault.rehydrate_text(args)
-        if clinical:
+        if secure:
             for call in safe_memory_calls:
                 fn = call.get("function") or {}
                 args = fn.get("arguments")
@@ -482,7 +482,7 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
             "status": "awaiting_client_tools", "consulted": consulted or bool(consult_calls),
             "consultation_note": consultation_note, "privacy_gate": gate_result,
             **({"_memory_messages": safe_messages, "_memory_tool_calls": safe_memory_calls}
-               if clinical else {}),
+               if secure else {}),
         }
 
     answer = _content_text(message.get("content")).strip()
@@ -494,16 +494,16 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
         answer += "\n\n" + consultation_note
 
     verifier_answer = answer
-    if clinical and verifier == "A":
+    if secure and verifier == "A":
         verifier_answer, _ = guard.sanitize(answer, vault=vault)
     evidence = "\n".join(
         f"[{m.get('role')}] {_content_text(m.get('content'))[:1200]}"
         for m in messages[-12:] if m.get("role") in {"assistant", "tool"}
     )
     user_text = latest or "(no latest user message)"
-    if clinical and verifier == "A":
+    if secure and verifier == "A":
         user_text, _ = guard.sanitize(user_text, vault=vault)
-    if clinical and verifier == "A":
+    if secure and verifier == "A":
         evidence, _ = guard.sanitize(evidence, vault=vault)
     verify_prompt = (
         f"USER REQUEST:\n{user_text}\n\nCANDIDATE ANSWER FROM LOBE {speaker} (preserve exactly):\n{verifier_answer}\n\n"
@@ -512,10 +512,10 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
     try:
         with calltrace.stage(f"{verifier}-verify"):
             verifier_system = _system_prompt(verifier, verify=True, tools=tools)
-            if clinical and verifier == "A":
+            if secure and verifier == "A":
                 verifier_system += " Private-value tokens are opaque; preserve them and do not infer their contents."
             verdict_message = await _call(
-                _role_alias(verifier, clinical=clinical), [{"role": "system", "content": verifier_system},
+                _role_alias(verifier, secure=secure), [{"role": "system", "content": verifier_system},
                                    {"role": "user", "content": verify_prompt}],
                 payload, tools=tools or None, tool_choice="none" if tools else None, verify=True,
             )
@@ -532,7 +532,7 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
                             "speaker": speaker, "verifier": verifier})
     meter = f"[{verdict['deception_level']}] {verdict['rationale']}"
     safe_memory_answer = answer
-    if clinical:
+    if secure:
         # This internal snapshot is consumed by the API persistence layer and
         # removed before returning the response. It is captured before tokens
         # are restored for the user.
@@ -545,17 +545,17 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
         "verdict": verdict, "consulted": consulted or bool(consult_calls),
         "privacy_gate": gate_result,
         **({"_memory_messages": safe_messages, "_memory_answer": safe_memory_answer}
-           if clinical else {}),
+           if secure else {}),
     }
 
 
 async def bidirectional_response(payload: dict[str, Any], run_id: str = "", tenant_id: int = 0,
                                  shared_text: str | None = None, shared_space: str | None = None,
-                                 clinical: bool = False):
+                                 secure: bool = False):
     started = time.time()
     answer, tool_calls, extra = await _run(payload, run_id=run_id, tenant_id=tenant_id,
                                            shared_text=shared_text, shared_space=shared_space,
-                                           clinical=clinical)
+                                           secure=secure)
     extra["calls"] = calltrace.snapshot()
     extra["model_calls"] = len(extra["calls"])
     if tool_calls:
