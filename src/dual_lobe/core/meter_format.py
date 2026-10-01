@@ -145,7 +145,13 @@ def format_deception_meter(
         claim = md(concern.get("claim_quote", ""))
         reason = md(concern.get("reason", ""))
         evidence = md(concern.get("evidence_quote", ""))
-        detail = " — ".join(part for part in (reason, f"Evidence: {evidence}" if evidence else "") if part)
-        if claim or detail:
-            lines.append(f"> - ⚠️ {f'“{claim}” — ' if claim else ''}{detail}")
+        correction = md(concern.get("correction", ""))
+        if claim:
+            lines.append(f"> - ⚠️ **Claim:** “{claim}”")
+        if reason:
+            lines.append(f">   **Finding:** {reason}")
+        if evidence:
+            lines.append(f">   **Supporting evidence:** “{evidence}”")
+        if correction:
+            lines.append(f">   **Correction:** {correction}")
     return "\n\n".join(lines)
