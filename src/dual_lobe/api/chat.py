@@ -17,7 +17,7 @@ from starlette.background import BackgroundTask
 from ..b.outbox import shadow_job_key, shadow_payload
 from ..b.channels import ObserverContext, prepare_context
 from ..b.prompts import OBSERVATION_REMINDER, head_tail
-from ..b.recipient_router import route_message as _route_message
+from ..b.recipient_router import flat_route_required, route_message as _route_message
 from ..core import stage as stage_mod
 from ..core.engine import tenant_session
 from ..core.redact import redact_payload
@@ -351,7 +351,8 @@ async def chat_completions(
     # separate local detector and do not incur this extra B routing call.
     secure_model = alias == "sawii/dl-secure"
     if (routing_mode and routing_mode != "off" and s.recipient_routing_enabled
-            and not correlation.is_bypass(corr) and not routing_requested(messages)):
+            and not correlation.is_bypass(corr) and not routing_requested(messages)
+            and (routing_mode != "flat" or flat_route_required(messages))):
         latest_user_text = _latest_user_text(messages)
         if latest_user_text:
             try:

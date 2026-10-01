@@ -114,6 +114,33 @@ def explicit_addressee(message: str) -> str | None:
     return None
 
 
+def flat_route_required(messages: list[dict[str, Any]]) -> bool:
+    """Whether flat routing has a concrete recipient to resolve this turn.
+
+    Ordinary group broadcasts need no routing inference or database round trip.
+    Explicit names and a follow-up to the immediately preceding addressed turn do.
+    """
+    user_positions = [i for i, item in enumerate(messages) if item.get("role") == "user"]
+    if not user_positions:
+        return False
+    current = user_positions[-1]
+    if explicit_addressee(_message_text(messages[current])):
+        return True
+    if len(user_positions) < 2:
+        return False
+    previous = user_positions[-2]
+    if not any(item.get("role") == "assistant" for item in messages[previous + 1:current]):
+        return False
+    return explicit_addressee(_message_text(messages[previous])) is not None
+
+
+def _message_text(message: dict[str, Any]) -> str:
+    content = message.get("content", "")
+    if isinstance(content, list):
+        return " ".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
+    return str(content or "")
+
+
 HierarchyRule = dict[str, Any]
 
 
@@ -645,35 +672,43 @@ async def route_message(
         # Exclude the last message (it's the current message being analyzed separately)
         conv_history = all_msgs[-7:-1] if len(all_msgs) > 1 else []
 
-        # In flat mode, explicit lexical addresses are unambiguous. Resolve them
-        # locally so a passing mention never summons the named lobe and a clear
-        # direct address does not incur a classifier call.
-        explicit_target = explicit_addressee(message) if mode == "flat" else None
-        if explicit_target:
-            canonical = lambda value: re.sub(r"^lobe\s+", "", value.strip().lower())
-            target_key = canonical(explicit_target)
-            agent_key = canonical(agent_name)
-            same_agent = target_key == agent_key or (
-                target_key in {"a", "b"} and agent_key in {target_key, f"lobe {target_key}"}
-            )
+        if mode == "flat":
+            target = explicit_addressee(message)
+            if target is None:
+                positions = [i for i, item in enumerate(all_msgs) if item.get("role") == "user"]
+                if len(positions) >= 2:
+                    previous, current = positions[-2:]
+                    if any(item.get("role") == "assistant" for item in all_msgs[previous + 1:current]):
+                        target = explicit_addressee(_message_text(all_msgs[previous]))
+            canonical = lambda value: re.sub(r"^lobe[-_\s]+", "", value.strip().lower())
+            same_agent = False
+            if target:
+                target_key = canonical(target)
+                agent_key = canonical(agent_name)
+                same_agent = target_key == agent_key
+                if target_key in {"a", "b"} and agent_key in {target_key, f"lobe {target_key}", f"lobe-{target_key}", f"lobe_{target_key}"}:
+                    same_agent = True
+                reason = "explicit_direct_address" if explicit_addressee(message) else "implicit_followup_to_addressed_agent"
+            else:
+                reason = "flat_group_broadcast"
             analysis = RecipientAnalysis(
-                should_respond=same_agent,
+                should_respond=(same_agent if target else True),
                 confidence=1.0,
-                reasoning=("explicit_direct_address" if same_agent else "explicitly_addressed_other_agent"),
+                reasoning=("explicitly_addressed_other_agent" if target and not same_agent else reason),
                 speaker=None,
-                detected_recipients=[explicit_target],
-                is_broadcast=False,
+                detected_recipients=[target] if target else [],
+                is_broadcast=not bool(target),
             )
             await repo.append_event(
                 session, "recipient_routed", tenant_id, run_id=run_id,
                 actor="lobe-b.router",
                 payload={"agent_name": agent_name, "mode": mode,
-                         **analysis.to_event_payload(), "decision_source": "deterministic_address",
+                         **analysis.to_event_payload(), "decision_source": "deterministic_flat",
                          "active_rules_count": len(active_rules) if active_rules else 0},
             )
             return analysis, True
 
-        # Call the semantic router for ambiguous recipients and contextual follow-ups.
+        # Hierarchy mode still needs semantic classification for its tier rules.
         raw = await _analyze_recipient(agent_name, message, active_rules, routing_context,
                                        system_prompt=system_prompt, conversation_history=conv_history,
                                        model_alias=model_alias)
