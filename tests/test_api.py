@@ -16,7 +16,7 @@ def test_health(client):
 
 def test_models_listed(client):
     ids = [m["id"] for m in client.get("/v1/models").json()["data"]]
-    assert "lobe-a" in ids and "lobe-b" in ids
+    assert ids == ["sawii/dl-bidirectional", "sawii/dl-secure"]
 
 
 def test_requires_bearer(client):

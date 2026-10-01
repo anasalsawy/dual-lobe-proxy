@@ -21,10 +21,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
@@ -37,6 +39,7 @@ from ..common import AgentPause, ProxyToolTrace, Tool, client_tool_names, extrac
 from ..split.memory import JsonlMemoryStore
 from ..split.tools import memory_search_tool
 from ..split.models import Verdict, Handoff
+from .access import tools_for_a, tools_for_b, tool_name
 from .models import ExecutionReport, Plan, PlanContract
 from .privacy import EphemeralTokenVault, PrivacyGuard, PrivacyReceipt, ProviderPrivacyPolicy
 from .prompts import (DIRECT_VERIFIER_SYSTEM, build_direct_verification_prompt, build_execution_prompt,
@@ -86,7 +89,7 @@ def _memory_block(slice_text: str) -> str:
 class ClinicalRunResult:
     sanitized_query: str
     sanitized_patient_context: str
-    plan: Plan
+    plan: Plan | None
     plan_revision: int
     plan_sha256: str
     execution_report: str
@@ -115,17 +118,29 @@ class _RunState:
     vault: EphemeralTokenVault
     trace: ProxyToolTrace
     delegate_state: ExecutionDelegateState
-    contract: PlanContract
+    contract: PlanContract | None
     client_tools: list[dict[str, Any]]
+    a_client_tools: list[dict[str, Any]]
+    phase: str
     memory_slice: str
     memory_entries: int
     timings: dict[str, int | float]
     started: float
+    a_messages: list[dict[str, Any]] = field(default_factory=list)
+    sensitive_context_present: bool = False
     b_messages: list[dict[str, Any]] | None = None
     pending_ids: list[str] = field(default_factory=list)
     b_rounds: int = 0
     tool_nudged: bool = False
     expires: float = 0.0
+
+
+@dataclass
+class _AWorkResult:
+    answer: str | None = None
+    plan: Plan | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    messages: list[dict[str, Any]] = field(default_factory=list)
 
 
 _PENDING: dict[str, _RunState] = {}
@@ -186,17 +201,23 @@ class ClinicalDualLobeEngine:
     def _a_tokens() -> int:
         return int(os.getenv("DUAL_LOBE_A_MAX_TOKENS", "8000"))
 
-    async def _a_work(self, *, query: str, patient_context: str, memory_slice: str,
-                      client_tools: list[dict[str, Any]]) -> tuple[str | None, Plan | None]:
+    async def _a_work(self, *, query: str, memory_slice: str,
+                      client_tools: list[dict[str, Any]], a_client_tools: list[dict[str, Any]],
+                      history: list[dict[str, Any]] | None = None,
+                      sensitive_context_present: bool = False) -> _AWorkResult:
         """A answers normally, or signals B handoff by calling create_execution_plan."""
-        tool_descriptions = []
-        for item in client_tools:
-            fn = item.get("function") or {}
-            if fn.get("name"):
-                tool_descriptions.append(f"{fn['name']}: {fn.get('description') or 'No description supplied.'}")
-        tool_descriptions.extend(f"{tool.name}: {tool.description}" for tool in self.execution_tools)
-        prompt = build_a_work_prompt(query=query, patient_context=patient_context,
-                                     available_tools=tool_descriptions, memory_slice=memory_slice)
+        b_tool_descriptions = [
+            f"{tool_name(item)}: {(item.get('function') or {}).get('description') or 'No description supplied.'}"
+            for item in client_tools if tool_name(item)
+        ]
+        b_tool_descriptions.extend(f"{tool.name}: {tool.description}" for tool in self.execution_tools)
+        a_tool_descriptions = [
+            f"{tool_name(item)}: {(item.get('function') or {}).get('description') or 'No description supplied.'}"
+            for item in a_client_tools if tool_name(item)
+        ]
+        prompt = build_a_work_prompt(query=query, patient_context="", available_tools=b_tool_descriptions,
+                                     a_tools=a_tool_descriptions, memory_slice="",
+                                     sensitive_context_present=sensitive_context_present)
         plan_tool = {"type": "function", "function": {
             "name": "create_execution_plan",
             "description": "Hand a complete execution plan to Lobe B. Call only when this task needs execution.",
@@ -209,13 +230,20 @@ class ClinicalDualLobeEngine:
                     "depends_on": {"type": "array", "items": {"type": "string"}},
                 }, "required": ["id", "action"]}},
                 "success_condition": {"type": "string"},
+                "research_context": {"type": "array", "items": {"type": "string"},
+                                     "description": "Questions or facts B should research and summarize with sources; do not claim to have browsed."},
             }, "required": ["goal", "steps", "success_condition"]}}
         }
+        messages = history or [
+            {"role": "system", "content": PLANNER_AGENT_SYSTEM},
+            {"role": "user", "content": prompt},
+        ]
+        available_tools = [plan_tool, *a_client_tools]
         with calltrace.stage("A-work"):
             response = await common.get_registry().adapter("lobe-a").buffered(NormalizedRequest(
-                messages=[{"role": "system", "content": PLANNER_AGENT_SYSTEM}, {"role": "user", "content": prompt}],
+                messages=messages,
                 max_tokens=self._a_tokens(),
-                timeout=get_settings().a_timeout, tools=[plan_tool], tool_choice="auto"))
+                timeout=get_settings().a_timeout, tools=available_tools, tool_choice="auto"))
         data = response_dict(response)
         message = ((data.get("choices") or [{}])[0].get("message") or {})
         calls = message.get("tool_calls") or []
@@ -223,12 +251,26 @@ class ClinicalDualLobeEngine:
             answer = str(message.get("content") or "").strip()
             if not answer:
                 raise RuntimeError("lobe-a returned neither a direct answer nor an execution plan")
-            return answer, None
-        if len(calls) != 1 or ((calls[0].get("function") or {}).get("name") != "create_execution_plan"):
-            raise RuntimeError("lobe-a returned an unexpected tool call instead of answering or creating a plan")
-        args = (calls[0].get("function") or {}).get("arguments") or "{}"
-        plan_data = args if isinstance(args, dict) else extract_json_object(str(args))
-        return None, Plan.model_validate(plan_data)
+            return _AWorkResult(answer=answer, messages=messages)
+        names = [tool_name(call) for call in calls]
+        if "create_execution_plan" in names:
+            if len(calls) != 1:
+                raise RuntimeError("A must return either a plan or safe tool calls, not both")
+            args = (calls[0].get("function") or {}).get("arguments") or "{}"
+            plan_data = args if isinstance(args, dict) else extract_json_object(str(args))
+            return _AWorkResult(plan=Plan.model_validate(plan_data), messages=messages)
+        allowed = {tool_name(tool) for tool in a_client_tools}
+        unexpected = sorted(set(names) - allowed)
+        if unexpected:
+            raise PermissionError(f"lobe-a requested tools outside its clinical permission set: {unexpected}")
+        tagged_calls = []
+        for call in calls:
+            tagged = dict(call)
+            tagged["id"] = "clinicalA_" + str(call.get("id") or uuid.uuid4().hex)[-48:]
+            tagged_calls.append(tagged)
+        history_messages = list(messages) + [{"role": "assistant", "content": message.get("content"),
+                                               "tool_calls": tagged_calls}]
+        return _AWorkResult(tool_calls=tagged_calls, messages=history_messages)
 
     async def _revise_plan(self, *, query: str, patient_context: str, contract: PlanContract, concern: str,
                            evidence: str) -> Plan:
@@ -297,10 +339,13 @@ class ClinicalDualLobeEngine:
                            client_tools: list[dict[str, Any]] | None = None) -> ClinicalRunResult:
         started = time.perf_counter()
         timings: dict[str, int | float] = {}
-        client_tools = [t for t in (client_tools or []) if isinstance(t, dict) and t.get("function")]
+        all_tools = [t for t in (client_tools or []) if isinstance(t, dict) and t.get("function")]
+        a_client_tools = tools_for_a(all_tools)
+        client_tools = tools_for_b(all_tools)
         vault = self.privacy_guard.new_vault()
         sanitized_query, sanitized_context, receipt = self.privacy_guard.prepare(
             query=query, patient_context=patient_context, vault=vault)
+        sensitive_context_present = bool(sanitized_context.strip() or receipt.direct_identifier_types)
         memory_hits = await asyncio.to_thread(self.memory.search, sanitized_query, 4, include_split_experience=False)
         memory_slice = "\n\n".join(f"- {x}" for x in memory_hits)[:4000]
 
@@ -308,18 +353,33 @@ class ClinicalDualLobeEngine:
         delegate_state = ExecutionDelegateState()
         try:
             t = time.perf_counter()
-            direct_answer, plan = await self._a_work(query=sanitized_query, patient_context=sanitized_context,
-                                                    memory_slice=memory_slice, client_tools=client_tools)
+            a_work = await self._a_work(query=sanitized_query, memory_slice="", client_tools=client_tools,
+                                        a_client_tools=a_client_tools,
+                                        sensitive_context_present=sensitive_context_present)
             timings["a_work_ms"] = int((time.perf_counter() - t) * 1000)
         except BaseException:
             delegate_state.close()
             vault.destroy_key()
             raise
 
-        if plan is None:
+        state = _RunState(query=query, patient_context=patient_context, sanitized_query=sanitized_query,
+                          sanitized_context=sanitized_context, receipt=receipt, vault=vault, trace=trace,
+                          delegate_state=delegate_state, contract=None, client_tools=client_tools,
+                          a_client_tools=a_client_tools, phase="a_work", memory_slice="",
+                          memory_entries=len(memory_hits), timings=timings, started=started,
+                          a_messages=a_work.messages, sensitive_context_present=sensitive_context_present)
+        if a_work.tool_calls:
+            _park(state, a_work.tool_calls)
+            return ClinicalRunResult(
+                sanitized_query=sanitized_query, sanitized_patient_context=sanitized_context, plan=None,
+                plan_revision=0, plan_sha256="", execution_report="", delegated_results="", answer="",
+                timings_ms=dict(timings), logical_model_calls=1, privacy_receipt=receipt,
+                tool_calls=a_work.tool_calls, memory_entries_used=len(memory_hits))
+
+        if a_work.plan is None:
             # A answered normally without a plan; B independently verifies that exact answer.
             try:
-                answer = str(direct_answer or "").strip()
+                answer = str(a_work.answer or "").strip()
                 if on_delta is not None:
                     await on_delta(answer)
                 t = time.perf_counter()
@@ -349,23 +409,75 @@ class ClinicalDualLobeEngine:
             result.timings_ms["total_ms"] = int((time.perf_counter() - started) * 1000)
             return result
 
-        if plan is None:  # Defensive runtime guard.
+        if a_work.plan is None:  # Defensive runtime guard.
             delegate_state.close()
             vault.destroy_key()
             raise RuntimeError("lobe-a selected execution without a plan")
+        plan = a_work.plan
         contract = PlanContract(plan)
         trace.add("plan_frozen", input_text=f"revision={contract.revision}", output_text=contract.current_json(),
                   provenance="deterministic_plan_contract")
-        state = _RunState(query=query, patient_context=patient_context, sanitized_query=sanitized_query,
-                          sanitized_context=sanitized_context, receipt=receipt, vault=vault, trace=trace,
-                          delegate_state=delegate_state, contract=contract, client_tools=client_tools,
-                          memory_slice=memory_slice, memory_entries=len(memory_hits), timings=timings,
-                          started=started)
+        state.contract = contract
+        state.phase = "b_execution"
+        state.memory_slice = ""
         return await self._continue(state, on_delta=on_delta, local_delivery=local_delivery)
 
     async def resume_clinical(self, state: _RunState, tool_results: dict[str, str], *, on_delta=None,
                               local_delivery: Callable[[str], None] | None = None) -> ClinicalRunResult:
         """Continue a paused run with the client's tool results."""
+        if state.phase == "a_work":
+            messages = list(state.a_messages)
+            for cid in state.pending_ids:
+                content = tool_results.get(cid, "TOOL_RESULT_MISSING: the client returned no result for this call.")
+                safe_content, _ = self.privacy_guard.sanitize(content, vault=state.vault)
+                messages.append({"role": "tool", "tool_call_id": cid, "content": safe_content})
+                state.trace.add("a_safe_tool_result", input_text=f"tool_call_id={cid}", output_text=safe_content,
+                                provenance="client_tool_execution")
+            state.pending_ids = []
+            t = time.perf_counter()
+            try:
+                a_work = await self._a_work(query=state.sanitized_query, memory_slice="",
+                                            client_tools=state.client_tools, a_client_tools=state.a_client_tools,
+                                            history=messages,
+                                            sensitive_context_present=state.sensitive_context_present)
+                state.timings["a_work_ms"] += int((time.perf_counter() - t) * 1000)
+                if a_work.tool_calls:
+                    state.a_messages = a_work.messages
+                    _park(state, a_work.tool_calls)
+                    return ClinicalRunResult(
+                        sanitized_query=state.sanitized_query,
+                        sanitized_patient_context=state.sanitized_context, plan=None, plan_revision=0,
+                        plan_sha256="", execution_report="", delegated_results="", answer="",
+                        timings_ms=dict(state.timings), logical_model_calls=2, privacy_receipt=state.receipt,
+                        tool_calls=a_work.tool_calls, memory_entries_used=state.memory_entries)
+                if a_work.plan is not None:
+                    state.contract = PlanContract(a_work.plan)
+                    state.phase = "b_execution"
+                    state.trace.add("plan_frozen", input_text="revision=0",
+                                    output_text=state.contract.current_json(),
+                                    provenance="deterministic_plan_contract")
+                    return await self._continue(state, on_delta=on_delta, local_delivery=local_delivery)
+                answer = str(a_work.answer or "").strip()
+                verdict = await self._verify_direct_answer(query=state.sanitized_query, answer=answer,
+                                                           memory_slice="")
+                if verdict.deception_level == "GREEN" and (verdict.handoff.missing or verdict.handoff.unverified
+                                                            or verdict.handoff.proof_requests):
+                    verdict = verdict.model_copy(update={"deception_level": "YELLOW"})
+                if on_delta is not None:
+                    await on_delta(answer)
+                if local_delivery is not None:
+                    local_delivery(state.vault.rehydrate_text(answer))
+                placeholder = Plan(goal=state.sanitized_query[:200] or "answer", steps=[
+                    {"id": "S1", "action": "answer directly"}], success_condition="user question answered")
+                result = ClinicalRunResult(
+                    sanitized_query=state.sanitized_query, sanitized_patient_context=state.sanitized_context,
+                    plan=placeholder, plan_revision=0, plan_sha256="", execution_report="", delegated_results="",
+                    answer=answer, verdict=verdict, timings_ms=state.timings, logical_model_calls=3,
+                    privacy_receipt=state.receipt, memory_entries_used=state.memory_entries)
+                return result
+            finally:
+                if state.phase != "a_work" or not state.pending_ids:
+                    _release(state)
         messages = list(state.b_messages or [])
         for cid in state.pending_ids:
             content = tool_results.get(cid, "TOOL_RESULT_MISSING: the client returned no result for this call.")
@@ -386,10 +498,14 @@ class ClinicalDualLobeEngine:
     async def _continue(self, state: _RunState, *, on_delta, local_delivery) -> ClinicalRunResult:
         """Run (or resume) B's execution; pause again for client tools or finish with A's review."""
         contract, trace = state.contract, state.trace
+        if contract is None:
+            raise RuntimeError("B execution cannot start without A's plan contract")
 
         async def planner_callback(concern: str, evidence: str) -> Plan:
-            return await self._revise_plan(query=state.sanitized_query, patient_context=state.sanitized_context,
-                                           contract=contract, concern=concern, evidence=evidence)
+            safe_concern, _ = self.privacy_guard.sanitize(concern, vault=state.vault)
+            safe_evidence, _ = self.privacy_guard.sanitize(evidence, vault=state.vault)
+            return await self._revise_plan(query=state.sanitized_query, patient_context="",
+                                           contract=contract, concern=safe_concern, evidence=safe_evidence)
 
         parked = False
         try:
@@ -451,18 +567,35 @@ class ClinicalDualLobeEngine:
             report.assert_matches_contract(contract)
 
             vault, guard = state.vault, self.privacy_guard
-            safe_report, _ = guard.sanitize_trace(execution_report_raw, vault=vault)
-            safe_delegated, _ = guard.sanitize_trace(delegated_results_raw, vault=vault)
-            safe_trace, trace_phi_types = guard.sanitize_trace(trace.render(), vault=vault)
+            # Raw page/database/tool output stays on B's side. A receives only
+            # B's concise summary, deterministic completion statuses, and
+            # tool/event names without arguments or outputs.
+            safe_report_text, report_types = guard.sanitize_trace(
+                json.dumps({"plan_revision": report.plan_revision,
+                            "steps": [{"id": step.id, "status": step.status}
+                                      for step in report.steps],
+                            "summary": report.summary[:2000],
+                            "open_issue": report.open_issue[:1000]}, ensure_ascii=False), vault=vault)
+            safe_delegated, delegated_types = guard.sanitize_trace(delegated_results_raw, vault=vault)
+            events = trace.snapshot_from(0)
+            safe_trace = json.dumps([{"event": e.name, "provenance": e.provenance} for e in events],
+                                    ensure_ascii=False)
+            trace_phi_types: set[str] = set()
+            for source in (execution_report_raw, delegated_results_raw, trace.render()):
+                _, found = guard.sanitize_trace(source, vault=vault)
+                trace_phi_types.update(found)
             receipt = replace(state.receipt, direct_identifier_types=tuple(sorted(
-                set(state.receipt.direct_identifier_types) | set(trace_phi_types))), token_count=vault.token_count)
+                set(state.receipt.direct_identifier_types) | set(report_types) | set(delegated_types)
+                | trace_phi_types)), token_count=vault.token_count)
 
             t = time.perf_counter()
             with calltrace.stage("A-review"):
                 final_answer = await self._answer(build_final_review_prompt(
-                query=state.sanitized_query, patient_context=state.sanitized_context,
+                query=state.sanitized_query, patient_context="",
                 final_plan_json=contract.current_json(), plan_revision=contract.revision,
-                execution_report=safe_report, delegated_results=safe_delegated, trace_text=safe_trace)
+                execution_report=safe_report_text,
+                delegated_results=("B collected delegated results and included relevant findings in its safe summary."
+                                   if delegated_results_raw else ""), trace_text=safe_trace)
                 + _memory_block(state.memory_slice), on_delta)
             state.timings["a_review_ms"] = int((time.perf_counter() - t) * 1000)
 
@@ -475,7 +608,7 @@ class ClinicalDualLobeEngine:
             result = ClinicalRunResult(
                 sanitized_query=state.sanitized_query, sanitized_patient_context=state.sanitized_context,
                 plan=contract.current, plan_revision=contract.revision, plan_sha256=contract.fingerprint(),
-                execution_report=safe_report, delegated_results=safe_delegated, answer=final_answer,
+                execution_report=safe_report_text, delegated_results="", answer=final_answer,
                 trace_event_count=len(trace.snapshot_from(0)),
                 trace_sha256=hashlib.sha256(safe_trace.encode("utf-8")).hexdigest(), timings_ms=state.timings,
                 logical_model_calls=2 + state.b_rounds + contract.revision + state.delegate_state.child_count,

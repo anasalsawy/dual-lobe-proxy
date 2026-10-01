@@ -147,14 +147,44 @@ async def test_clinical_a_plans_on_sanitized_data_b_executes_raw_a_reviews(scrip
     result = await ClinicalDualLobeEngine().run_clinical(
         query="Should I increase spironolactone?", patient_context="Patient email jane@x.org, K+ 6.8")
     assert result.answer == "Final: hold spironolactone."
-    assert "jane@x.org" not in seen["plan"] and "<PHI:EMAIL:" in seen["plan"]   # A never sees raw PHI
+    assert "jane@x.org" not in seen["plan"] and "<PHI:EMAIL:" not in seen["plan"]
+    assert "PATIENT / CLINICAL RECORDS" not in seen["plan"]
+    assert "protected context exists and was withheld" in seen["plan"]
     assert "jane@x.org" in seen["exec"]                                            # local B sees raw data
     assert "jane@x.org" not in seen["review"]                                      # B's report sanitized for A
     assert [c[0] for c in fake.calls] == ["lobe-a", "lobe-b-clinical", "lobe-a"]
-    assert all([t["function"]["name"] for t in c[2]] == ["create_execution_plan"]
-               for c in fake.calls if c[0] == "lobe-a")  # A can create a plan; B owns execution tools
+    a_calls = [c for c in fake.calls if c[0] == "lobe-a" and c[2]]
+    assert len(a_calls) == 1 and [t["function"]["name"] for t in a_calls[0][2]] == ["create_execution_plan"]
     assert result.logical_model_calls == 3
     assert result.privacy_receipt.vault_key_destroyed
+
+
+def test_sensitive_tools_are_b_only_and_general_web_tools_are_a_only():
+    from dual_lobe.engines.clinical.access import tools_for_a, tools_for_b
+
+    tools = [
+        {"type": "function",
+         "function": {"name": "search_web", "parameters": {"type": "object"}}},
+        {"type": "function", "x-dual-lobe-scope": "public",
+         "function": {"name": "patient_site", "parameters": {"type": "object"}}},
+        {"type": "function", "x-dual-lobe-scope": "internet",
+         "function": {"name": "password_form", "parameters": {"type": "object"}}},
+        {"type": "function", "function": {"name": "browser", "parameters": {"type": "object"}}},
+    ]
+    assert tools_for_a(tools) == []
+    assert [t["function"]["name"] for t in tools_for_b(tools)] == [
+        "search_web", "patient_site", "password_form", "browser"]
+
+
+def test_privacy_guard_redacts_password_assignments_from_text():
+    from dual_lobe.engines.clinical.privacy import PrivacyGuard
+
+    guard = PrivacyGuard()
+    vault = guard.new_vault()
+    safe, labels = guard.sanitize("Log in with password=hunter2 and continue", vault=vault)
+    assert "hunter2" not in safe and "PHI:SECRET" in safe
+    assert "secret" in labels
+    vault.destroy_key()
 
 
 async def test_clinical_b_consult_revises_plan_contract(scripted):
@@ -177,6 +207,81 @@ async def test_clinical_b_consult_revises_plan_contract(scripted):
     result = await ClinicalDualLobeEngine().run_clinical(query="q", patient_context="K+ 6.8")
     assert result.plan_revision == 1
     assert result.logical_model_calls == 4
+
+
+async def test_browseruse_covered_route_handles_sensitive_field_without_extra_a_call(scripted):
+    from dual_lobe.engines import respond
+
+    initial = dict(PLAN, goal="Log into the requested site and complete the task.", steps=[
+        {"id": "S1", "action": "Navigate to the requested site and report a safe page summary.",
+         "parallelizable": False, "depends_on": []},
+        {"id": "S2", "action": "If authentication is required, B enters the credential from the approved source.",
+         "parallelizable": False, "depends_on": ["S1"]},
+    ])
+    browser = [
+        {"type": "function", "function": {"name": "browser_navigate", "description": "Navigate and inspect page",
+         "parameters": {"type": "object", "properties": {"url": {"type": "string"}}}}},
+        {"type": "function", "function": {"name": "browser_fill", "description": "Fill a field",
+         "parameters": {"type": "object", "properties": {"field": {"type": "string"},
+                                                               "value": {"type": "string"}}}}},
+    ]
+    seen = {"a": [], "b": []}
+
+    def handler(alias, req):
+        combined = "\n".join(str(m.get("content") or "") for m in req.messages)
+        if alias == "lobe-a":
+            seen["a"].append(combined)
+            if "B EXECUTION REPORT" in combined:
+                return _msg("The site task is complete.")
+            assert "browser_navigate" in combined
+            assert all(t["function"]["name"] == "create_execution_plan" for t in req.tools)
+            return _msg(tool_calls=_plan_call(initial))
+
+        seen["b"].append(req)
+        if len(req.messages) == 2:
+            return _msg(tool_calls=[_call("browser_navigate", {"url": "https://example.test/login"}, "nav")])
+        last = req.messages[-1]
+        if last.get("role") == "tool" and last.get("tool_call_id") == "nav":
+            # A's plan already covers the credential step, so B proceeds directly.
+            return _msg(tool_calls=[_call("browser_fill", {"field": "password", "value": "hunter2"}, "pw")])
+        if last.get("role") == "tool" and last.get("tool_call_id") == "pw":
+            return _msg(json.dumps({"plan_revision": 0,
+                "steps": [{"id": "S1", "status": "completed", "result": "RAW PAGE LOGIN DATA", "evidence": "raw DOM"},
+                          {"id": "S2", "status": "completed", "result": "authenticated", "evidence": "password=hunter2"}],
+                "summary": "Authentication succeeded. Credential entered from the approved source and not retained.",
+                "open_issue": ""}))
+        raise AssertionError("unexpected Browser Use state")
+
+    fake = scripted(handler)
+    respond_local = respond._assert_clinical_b_local
+    respond._assert_clinical_b_local = lambda: None
+    try:
+        first = await respond.engine_response("clinical", {"model": "m", "tools": browser,
+            "messages": [{"role": "user", "content": "Log into the site and download the requested report."}]})
+        first_body = json.loads(first.body)
+        assert first_body["choices"][0]["finish_reason"] == "tool_calls"
+        assert first_body["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "browser_navigate"
+
+        second = await respond.engine_response("clinical", {"model": "m", "tools": browser, "messages": [
+            {"role": "user", "content": "Log into the site and download the requested report."},
+            {"role": "assistant", "content": None, "tool_calls": first_body["choices"][0]["message"]["tool_calls"]},
+            {"role": "tool", "tool_call_id": "nav", "content": "Login page; password field is present."}]})
+        second_body = json.loads(second.body)
+        assert second_body["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "browser_fill"
+        assert len(seen["a"]) == 1  # A is not called again for a planned navigation/password step.
+        assert all("Login page" not in prompt and "hunter2" not in prompt for prompt in seen["a"])
+
+        third = await respond.engine_response("clinical", {"model": "m", "tools": browser, "messages": [
+            {"role": "user", "content": "Log into the site and download the requested report."},
+            {"role": "assistant", "content": None, "tool_calls": second_body["choices"][0]["message"]["tool_calls"]},
+            {"role": "tool", "tool_call_id": "pw", "content": "Field filled; login succeeded."}]})
+        assert json.loads(third.body)["choices"][0]["message"]["content"].startswith("The site task is complete.")
+        assert "hunter2" not in seen["a"][-1]
+        assert "RAW PAGE LOGIN DATA" not in seen["a"][-1] and "raw DOM" not in seen["a"][-1]
+        assert [alias for alias, _, _ in fake.calls] == ["lobe-a", "lobe-b-clinical", "lobe-b-clinical",
+                                                         "lobe-b-clinical", "lobe-a"]
+    finally:
+        respond._assert_clinical_b_local = respond_local
 
 
 async def test_clinical_report_outside_plan_is_rejected(scripted):
@@ -286,7 +391,8 @@ def _tool_handler(seen):
         if req.messages[-1]["role"] == "tool" and req.messages[-1]["tool_call_id"] == "w1":
             seen["b_saw_result"] = req.messages[-1]["content"]
             return _msg(json.dumps({"plan_revision": 0, "steps": [
-                {"id": "S1", "status": "completed", "result": "18C sunny", "evidence": "get_weather"}]}))
+                {"id": "S1", "status": "completed", "result": "RAW PAGE: 18C sunny", "evidence": "raw response"}],
+                "summary": "Safe finding: Paris is 18C and sunny."}))
         return _msg(tool_calls=[_call("get_weather", {"city": "Paris"}, "w1")])
     return handler
 
@@ -317,7 +423,8 @@ async def test_clinical_b_calls_client_tool_then_resumes_with_result(scripted):
         assert second.headers["x-dual-lobe-resumed"] == "true"
         assert body2["choices"][0]["message"]["content"] == "It is 18C and sunny in Paris."
         assert seen["b_saw_result"] == "18C, sunny"
-        assert "18C, sunny" in seen["review"]                   # A reviews against the real tool result
+        assert "Safe finding: Paris is 18C and sunny." in seen["review"]
+        assert "RAW PAGE" not in seen["review"] and "raw response" not in seen["review"]
         # Resume did not re-plan: only B (1 call) and A's review (1 call) ran.
         assert [c[0] for c in fake.calls[calls_before:]] == ["lobe-b-clinical", "lobe-a"]
     finally:
@@ -364,7 +471,7 @@ async def test_clinical_long_term_memory_is_sanitized_and_read_back(scripted, tm
     assert "spironolactone" in stored and "jane@x.org" not in stored        # remembered, no raw PHI
     result = await ClinicalDualLobeEngine().run_clinical(query="spironolactone again?", patient_context="K+ 6.1")
     assert result.memory_entries_used == 1
-    assert "LONG-TERM MEMORY" in seen[-1] and "Hold spironolactone" in seen[-1]  # A plans with the memory
+    assert "LONG-TERM MEMORY" not in seen[-1]  # potentially sensitive memory remains on B's side
 
 
 async def test_clinical_stream_returns_tool_calls_chunk(scripted):

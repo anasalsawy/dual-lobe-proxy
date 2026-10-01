@@ -398,13 +398,12 @@ async def chat_completions(
         run_id = str(run.id)
         await session.commit()
 
-    # Explicit cross-lobe requests opt into the same full routing/verifier path
-    # on every public model. The local check is constant-time and makes no
-    # provider call; unaddressed turns continue through their existing engine.
-    # The clinical service mode has a separate privacy-preserving planner and
-    # local B executor. Do not send its unsanitized conversation through the
-    # general-purpose conversational speaker path.
-    if s.engine != "clinical" and (alias == "sawii/dl-bidirectional" or routing_requested(messages)):
+    # General bidirectional model: gated conversation plus explicit peer routing.
+    # Clinical service: same conversational routing, with a local B privacy gate
+    # before any A-facing call and token restoration at the response boundary.
+    # Default general gated traffic remains on its existing zero-extra-call path.
+    clinical_secure = s.engine == "clinical" or alias == "sawii/dl-secure"
+    if clinical_secure or alias == "sawii/dl-bidirectional" or routing_requested(messages):
         from ..bidirectional.handler import bidirectional_response
         shared_text, shared_entries = None, 0
         if memory_space:
@@ -413,12 +412,44 @@ async def chat_completions(
                 shared_text, shared_entries = shared.text, len(shared.entry_ids)
             except Exception:
                 LOG.warning("shared memory load failed run=%s (fail-open)", run_id)
-        result = await bidirectional_response(payload, run_id, principal.tenant_id, shared_text,
-                                              shared_space=memory_space)
+        result = await bidirectional_response({**payload, "stream": False}, run_id, principal.tenant_id, shared_text,
+                                              shared_space=memory_space, clinical=clinical_secure)
         data = json.loads(result.body)
+        private_lobe_data = data.get("dual_lobe") or {}
+        safe_memory_messages = private_lobe_data.pop("_memory_messages", None)
+        safe_memory_answer = private_lobe_data.pop("_memory_answer", None)
+        safe_memory_tool_calls = private_lobe_data.pop("_memory_tool_calls", None)
         data["dual_lobe"] = {**(data.get("dual_lobe") or {}), "memory_space": memory_space or "off",
                              "shared_entries": shared_entries}
-        background = _record_background(principal.tenant_id, memory_space, run_id, messages, data)
+        memory_messages = messages
+        if clinical_secure and memory_space:
+            # Persist only the already gated request snapshot. Strip ephemeral
+            # tokens too: their vault keys are request-scoped and cannot be
+            # recovered on later turns.
+            import re
+
+            def persisted(value):
+                if isinstance(value, str):
+                    return re.sub(r"<PHI:[A-Z0-9_:-]+>", "[REDACTED]", value)
+                if isinstance(value, list):
+                    return [persisted(item) for item in value]
+                if isinstance(value, dict):
+                    return {key: persisted(item) for key, item in value.items()}
+                return value
+
+            memory_messages = persisted(safe_memory_messages or [])
+            if safe_memory_answer is not None:
+                safe_response = {"role": "assistant", "content": persisted(safe_memory_answer)}
+            elif safe_memory_tool_calls is not None:
+                safe_response = {"role": "assistant", "content": None,
+                                 "tool_calls": persisted(safe_memory_tool_calls)}
+            else:
+                safe_response = {"role": "assistant", "content": "[Secure response not persisted.]"}
+            data_for_memory = {**data, "choices": [{"message": safe_response}]}
+        else:
+            data_for_memory = data
+        background = _record_background(principal.tenant_id, memory_space, run_id, memory_messages,
+                                        data_for_memory)
         headers = _headers(dict(result.headers))
         headers["X-Dual-Lobe-Memory-Space"] = memory_space or "off"
         headers["X-Dual-Lobe-Shared-Entries"] = str(shared_entries)

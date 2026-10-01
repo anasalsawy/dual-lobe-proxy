@@ -20,6 +20,7 @@ class Plan(BaseModel):
     constraints: list[str] = Field(default_factory=list)
     steps: list[PlanStep] = Field(min_length=1)
     success_condition: str = Field(min_length=1)
+    research_context: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_graph(self):

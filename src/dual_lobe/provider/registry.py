@@ -39,6 +39,7 @@ def env_targets() -> dict[str, ProviderTarget]:
     worker = ProviderTarget(alias="sawii/dl-dialogue3", **base_fields)
     gated = ProviderTarget(alias="sawii/dl-gated", **base_fields)
     bidirectional = ProviderTarget(alias="sawii/dl-bidirectional", **base_fields)
+    secure = ProviderTarget(alias="sawii/dl-secure", **base_fields)
     dual_lobe = ProviderTarget(alias="sawii/dual-lobe", **base_fields)
     # Internal aliases for B-lobe shadow cycles and director mode.
     # Not exposed in /v1/models (filtered out by user_facing_models set).
@@ -56,7 +57,7 @@ def env_targets() -> dict[str, ProviderTarget]:
         api_key=s.resolved_b_api_key,
         model=s.resolved_b_model,
         kind=s.b_dialect,
-        capabilities={"stream": False, "tools": False, "responses": False},
+        capabilities={"stream": False, "tools": True, "responses": False},
     )
     # Clinical B (model 2): patient data goes only to this configured endpoint,
     # never through the round-robin hub.
@@ -79,6 +80,7 @@ def env_targets() -> dict[str, ProviderTarget]:
         "sawii/dl-dialogue3": worker,
         "sawii/dl-gated": gated,
         "sawii/dl-bidirectional": bidirectional,
+        "sawii/dl-secure": secure,
         "lobe-a": lobe_a,
         "lobe-b": lobe_b,
     }
@@ -108,6 +110,7 @@ _HUB_ROLES = {alias: "a" for alias in (
     "sawii/dual-lobe-old", "sawii/dual-lobe", "sawii/dialogue", "sawii/dl-dialogue",
     "sawii/dl-dialogue1", "sawii/dl-dialogue2", "sawii/dl-dialogue3", "sawii/dl-gated", "lobe-a")}
 _HUB_ROLES["sawii/dl-bidirectional"] = "a"
+_HUB_ROLES["sawii/dl-secure"] = "a"
 _HUB_ROLES["lobe-b"] = "b"
 
 
@@ -140,17 +143,9 @@ class Registry:
 
     def models(self) -> list[dict[str, Any]]:
         # Only expose user-facing models, hide internal routing components
-        user_facing_models = {
-            "sawii/dual-lobe",
-            "sawii/dual-lobe-old",
-            "sawii/dialogue",
-            "sawii/dl-dialogue",
-            "sawii/dl-dialogue1",
-            "sawii/dl-dialogue2",
-            "sawii/dl-dialogue3",
-            "sawii/dl-gated",
-            "sawii/dl-bidirectional",
-        }
+        # The supported product surface has two variants. Older aliases remain
+        # resolvable for existing deployments, but are no longer advertised.
+        user_facing_models = {"sawii/dl-bidirectional", "sawii/dl-secure"}
         result = [
             {
                 "id": t.alias,

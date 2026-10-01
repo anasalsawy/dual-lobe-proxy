@@ -1,315 +1,66 @@
-# Dual-lobe proxy
+# Dual-Lobe Proxy
 
-A text-only Chat Completions gateway with a background observer, visible director
-mode, and shared persistent memory (v0.4).
+An OpenAI-compatible inference proxy with two supported model variants. Both variants use the same two-lobe conversation router, tool handoff, peer consultation, verification meter, and shared-memory interface.
 
-**Normal mode:** A responds while B reviews in the background.
-**Director mode:** B takes your conversational place, asks A follow-up questions,
-and directs another A turn. Watch labelled A/B exchanges in the response stream.
-Your application continues to execute A's tools.
+## The two models
 
-**Shared memory:** all apps using the same proxy tenant share the persistent
-space named `main` by default. Override it with `X-DL-Memory-ID: project-name`.
-The proxy automatically loads its notebook and selected stored history on each
-A call, even when an app sends no prior chat history. It does not transfer tools,
-permissions, or a running agent's execution state between apps.
-
-See [director mode, memory, and the test commands](docs/DIRECTOR_AND_MEMORY.md).
-
-**New: Multi-agent recipient routing** — When multiple agents operate in the same space,
-a new recipient router in Lobe B detects whether each message is directed at the current
-agent or another entity. Messages not intended for this agent are silently suppressed
-(no response generated), but the context is still ingested into memory so the agent
-remains aware. This solves the "talking over each other" problem common in multi-agent
-setups. See [recipient routing documentation](docs/RECIPIENT_ROUTING.md).
-
-The full dual-lobe function register and acceptance contract is in
-[Dual-lobe functions and criteria](docs/DUAL_LOBE_FUNCTIONS_AND_CRITERIA.md).
-It defines the hard anti-deception rule that narrow evidence may support only a
-narrow claim, and distinguishes implemented advisory behavior from future
-acceptance/evidence gating.
-
-The cross-repository inventory is in
-[Dual-lobe design comparison](docs/DUAL_LOBE_DESIGN_COMPARISON.md). It compares
-the 24 dual-lobe-related designs and support assets found across the accessible
-repositories, including dynamics, authority, memory, anti-deception behavior,
-tests, performance evidence, and maturity.
-
-The three paths are now separate:
-
-| Purpose | Implementation |
-|---|---|
-| Broadening and tunnel vision | B maintains versioned context memory in Postgres. The gateway automatically reloads the latest completed snapshot before every eligible A call. |
-| Anti-deception findings | Evidence-linked claim concerns are stored separately from broadening content and attached directly to A's request. |
-| Awareness of monitoring | A fixed system/developer instruction states that the proxy and background observer exist, tells A to address the user, and requires accurate reporting of execution evidence. |
-
-Your original messages remain unchanged. Memory loading still supplies input to the
-next model call; it is not an extra connection into an already generating model.
-See [the setup and conversation test](docs/THREE_PATH_SETUP.md).
-
-B has no tools, browser, filesystem access, or CrewAI tasks. Director mode uses
-the same configured B provider with a separate short conversational prompt.
-It cannot guarantee truth, infer intent from writing style, or prevent every fabricated
-statement. This is an advisory development implementation, not a verified production
-security boundary. Read [the research and design](docs/RESEARCH_AND_DESIGN.md) and
-[the validation record](docs/VALIDATION.md).
-
-## Bidirectional speaker variant
-
-In the default `gated` service mode, the bidirectional speaker flow is available
-on every public chat model. A is the default speaker; opening with `Hey B, ...`
-addresses B directly. An instruction
-such as `A, ask B what it thinks` makes B contribute privately before A answers.
-The dedicated `sawii/dl-bidirectional` alias opts into this flow on every turn;
-other aliases enter it only when the latest user message explicitly addresses a
-lobe or asks one lobe to consult the other. That opt-in check is local and adds
-no model call to ordinary turns. The `clinical` service mode retains its
-privacy-preserving planner and local B executor; it does not enter this general
-speaker path.
-The other lobe then verifies the exact final answer, and the response includes a
-`Dual-Lobe meter`. If the speaker calls a client tool, the proxy returns that tool
-call and resumes the same lobe when its result arrives; verification happens after
-the speaker finishes. Both lobes receive the request's client tool schemas when
-they speak. The verifier reviews the supplied conversation and tool results without
-calling client tools itself. The speaker also receives the observer instructions,
-selected shared-memory context, and prior-turn meter; proxy memory search, consult,
-and delegation tools execute inline against the peer lobe. Every model call uses
-the configured provider hub, and `dual_lobe.calls` plus `dual_lobe.provider_hub`
-report call providers/models and non-secret slot state.
-
-The route is exposed in `/v1/models` as `sawii/dl-bidirectional` and supports
-buffered and SSE Chat Completions responses.
-
-## What happens on a call
-
-| Step | Input | Operation | Output / checks |
+| Model ID | Use it for | Lobe A | Lobe B |
 |---|---|---|---|
-| Admission | Bearer key, request, correlation headers | Resolve tenant; validate supported fields; apply process-local budgets | Unauthorized requests rejected; images/audio rejected; unknown model aliases rejected |
-| Run context | Run/floor/attempt headers and first user objective | Resolve/create run; retain original goal | Internal run UUID; no database transaction held while A generates |
-| A context | Original messages, completed memory, fresh claim findings | Add the fixed monitoring instruction; load memory as `observer_memory` and claim findings as `observer_claims` | Separate user-role data messages; original user text and tool-call/result adjacency preserved |
-| A response (normal mode) | Provider completion or SSE | Relay response; stream content as it arrives | When shared memory is selected, persist the complete observed turn before releasing the terminal event; storage failure is explicit |
-| Observation capture | Bounded original context, A output, call metadata | After response delivery, best-effort audit/outbox transaction | A never waits for a B model; a crash before this transaction can lose the observation |
-| B review | Original goal, context/output, recent reported events, relevant prior memory/findings | One bounded model call; no tool use or retries | Goal, two questions, one next step, two context notes; separately, three concerns |
-| Review validation | B JSON | Check schema, lengths, allowed labels, exact quoted substrings | Malformed/ungrounded review becomes degraded, not “clean” or “verified” |
-| Memory write | Validated B output | Atomically save a new memory version and separate claim findings in the existing tenant-scoped state store | A failed review preserves completed memory without renewing its age; old claim findings are not replayed |
-| Later A call | Latest same-run, same-floor/attempt state | Automatically reload memory and applicable claim findings | Independent freshness limits; no guarantee B finishes before the next call; no B model wait |
+| `sawii/dl-bidirectional` | General work | Configured provider model | Configured provider model; both lobes can speak and use caller tools |
+| `sawii/dl-secure` | Sensitive/private work | Configured provider model; receives tokenized sensitive values | Local-only model; checks input before A, can speak/use tools, and verifies A |
 
-The proxy does **not** implement Forge floors or CrewAI execution rules. Floor,
-attempt, worker, task and role headers correlate calls. A floor change prevents
-using an old floor's note. Analyst/Auditor/bypass calls get neither B injection nor
-new B jobs; their own review responsibilities remain outside this proxy.
+The proxy exposes these two variants in `GET /v1/models`. Older aliases remain temporarily resolvable for existing clients but are no longer advertised.
 
-## Start locally
+## Conversation routing
 
-Requires Docker Compose. This stack uses development database passwords and binds
-host ports to loopback. Do not publish it directly to the Internet.
+A is the default user-facing lobe. Address a lobe at the start of a user message to select it for that turn:
 
-1. Copy `.env.example` to `.env`.
-2. Replace `REPLACE_WITH_A_RANDOM_SECRET` in `DUAL_LOBE_BOOTSTRAP_KEYS` with a
-   random secret of at least 24 characters; `openssl rand -hex 32` can generate one.
-   Keep the scope/tenant suffix. No predictable default API key is created.
-3. Set `DUAL_LOBE_A_MODEL`, `DUAL_LOBE_A_BASE_URL`, and `DUAL_LOBE_A_API_KEY`
-   for your actual OpenAI-compatible provider. The model ID must exist there.
-4. Optionally set `DUAL_LOBE_B_MODEL`, `DUAL_LOBE_B_BASE_URL`, and
-   `DUAL_LOBE_B_API_KEY`. Omit them to inherit A. An explicitly empty B key does
-   not inherit A's key. A separate quota/provider reduces resource contention.
-5. Run:
+- `Hey A, ...` or `Hey B, ...` selects the speaker.
+- `A, ask B what it thinks: ...` has A privately consult B, then A answers and identifies B's contribution.
+- `B, ask A what it thinks: ...` works in the opposite direction.
+- `handoff_to_other_lobe` transfers the user-facing turn; the new speaker gets caller tools and the former speaker verifies.
+
+The other lobe verifies the final answer and adds the GREEN/YELLOW/RED meter. If the speaker requests a caller tool, the proxy returns the tool call; submit its result in the next Chat Completions request and the tagged call ID routes the continuation back to the same speaker. Consultation does not expose hidden conversation to the user; the final answer includes the consulted lobe's material input with attribution.
+
+## Secure variant boundary
+
+For `sawii/dl-secure`, every request first goes to the local B privacy gate. B returns a private classification and sensitive-value spans. The proxy stores the value-to-token mapping in an encrypted, request-scoped vault and replaces those values before any remote A call. Deterministic rules also mask common identifiers, credentials, and structured sensitive fields. A can reason over the remaining context and tokens. When A sends a token in a caller-tool argument, the proxy resolves it at the tool boundary. Incoming tool results pass through the gate before A sees them. B may receive raw input because B is constrained to a local endpoint.
+
+When B is user-facing, it receives the original input locally and A verifies a sanitized view of B's answer. When A is user-facing, B verifies A's answer before it is returned. The proxy restores known tokens in the final user-facing response after review.
+
+The secure path requires `DUAL_LOBE_CLINICAL_B_BASE_URL` (or the configured B URL) to resolve to localhost, loopback, or `host.docker.internal`. Production rejects a remote B endpoint. `DUAL_LOBE_TESTING_MODE=true` with `DUAL_LOBE_CLINICAL_B_LOCAL_ONLY=false` is only for tests.
+
+This is a proxy privacy boundary, not a formal data-loss-prevention guarantee. Detection can miss sensitive values, and downstream caller tools still receive resolved values they need to perform an action. Review tool permissions and retention at the connected runtime.
+
+## Latency and calls
+
+- Ordinary, unaddressed requests on the existing general gated route do only local routing detection; they make no routing model call.
+- `sawii/dl-bidirectional` always uses the routed speaker/verifier flow.
+- `sawii/dl-secure` adds a local B input-gate call on every request, then runs the routed speaker/verifier flow. Tool-result continuations are gated again.
+- A peer consultation adds a private lobe call. A handoff adds a call to the new speaker. Client tools run outside the proxy and return through the next request.
+
+Call provider/model details and the privacy-gate decision are included in the `dual_lobe` response metadata. Never treat a GREEN meter as proof of truth; it means the verifier found adequate support in the evidence it received.
+
+## Configuration
+
+Set the general provider pair with `DUAL_LOBE_A_MODEL`, `DUAL_LOBE_A_BASE_URL`, `DUAL_LOBE_A_API_KEY` and, optionally, `DUAL_LOBE_B_MODEL`, `DUAL_LOBE_B_BASE_URL`, `DUAL_LOBE_B_API_KEY`. If B is omitted, it inherits A. Configure provider round-robin slots as documented in `.env.example`.
+
+For the secure service, configure `DUAL_LOBE_CLINICAL_B_MODEL`, `DUAL_LOBE_CLINICAL_B_BASE_URL`, and `DUAL_LOBE_CLINICAL_B_API_KEY` for a local OpenAI-compatible model endpoint. Set `DUAL_LOBE_ENGINE=clinical` to make that service use the secure route for all requests. Alternatively, use `sawii/dl-secure` on a service configured with a valid local clinical B endpoint.
+
+Shared memory is selected with `X-DL-Memory-ID`. The secure route tokenizes message and response content before writing to shared memory. Use separate memory spaces for distinct privacy domains.
+
+## Run and verify
 
 ```sh
+cp .env.example .env
+# Set provider URLs/keys and a strong DUAL_LOBE_BOOTSTRAP_KEYS value.
 docker compose up --build -d
-docker compose logs initialize gateway b-worker
-curl http://localhost:8801/healthz
-curl http://localhost:8801/readyz
-```
-
-Only the `initialize` service runs migrations/bootstrap, including v0.4 migrations
-0002 (director sessions) and 0003 (shared memory). It must succeed before
-the gateway and worker start. Re-running bootstrap does not duplicate existing
-keys or reactivate revoked keys. Existing development keys from older versions
-are not automatically revoked: rotate them before sharing the service.
-
-`/healthz` checks process liveness. `/readyz` checks the database and enabled A
-registry entry; it does not test provider credentials, B worker liveness, or
-end-to-end model availability. Inspect state timestamps and worker logs for B.
-
-## Connect your application
-
-Point a Chat Completions client at `http://localhost:8801/v1`, use your **proxy**
-API key (not the upstream provider key), and select model `lobe-a`.
-No CrewAI observer agent or tools need to be added. Choose `lobe-a-director` for
-the visible director loop. Both routes load shared memory by default.
-
-Set a stable `X-DL-Run-ID` for one conversation/task. Without it, each request is
-a new run, so B cannot help subsequent calls. You can reuse the returned internal
-`X-Dual-Lobe-Run-Id` as the next request's `X-DL-Run-ID`.
-
-```sh
-curl -N http://localhost:8801/v1/chat/completions \
-  -H 'Authorization: Bearer YOUR_PROXY_SECRET' \
-  -H 'Content-Type: application/json' \
-  -H 'X-DL-Run-ID: example-task-1' \
-  -H 'X-DL-Floor-ID: implementation' \
-  -H 'X-DL-Attempt: 1' \
-  -d '{"model":"lobe-a","stream":true,"messages":[{"role":"user","content":"Explain the smallest next step for this task."}]}'
-```
-
-Send normal conversation history, including tool calls and their actual results.
-B sees only what the proxy receives; it cannot discover unreported execution.
-
-Optional correlation headers: `X-DL-Worker-ID`, `X-DL-Task-ID`,
-`X-DL-Call-Seq`, `X-DL-Agent-Role`. Roles `analyst`, `auditor`, `lobe-b`,
-and `b`, or `X-Dual-Lobe-Mode: bypass`, bypass observation/injection.
-This bypass is a caller preference, not a security permission.
-
-Read B's latest state:
-
-```sh
-curl http://localhost:8801/v1/dual-lobe/state/example-task-1 \
-  -H 'Authorization: Bearer YOUR_PROXY_SECRET'
-```
-
-`payload.oversight_status` is `reviewed`, `degraded`, or `stale`; a null revision
-means no stored review. “Reviewed” means the output contract passed, not that A's
-answer is true. `payload.context_memory` and `payload.claim_review` are separate.
-`payload.context_memory_status` reports memory freshness independently.
-
-In normal mode, context receipts describe what was prepared for a particular A request:
-`X-Dual-Lobe-Memory` is `vN`, `none`, `stale`, `scope_mismatch`, `disabled`, or
-`unavailable`; `X-Dual-Lobe-Claims` describes the claim-finding route;
-`X-Dual-Lobe-Monitoring` is `on` or `off`. They do not independently prove upstream
-receipt or that the model followed the notes. `X-Dual-Lobe-Observer` retains the overall lookup status. A matching
-`worker_call` event records `observer_delivery` after response delivery.
-`X-Dual-Lobe-Memory-Space` names the shared space or `off`;
-`X-Dual-Lobe-Shared-Entries` counts the selected journal entries. Director mode
-reloads memory per internal A turn and reports `per-turn` for observer channels.
-
-Optional external results can be posted to `/v1/dual-lobe/events` with
-`kind`, `run_id`, `payload`, and `idempotency_key`. They are stored as
-`client_event` / `client_reported`, even if the caller labels them “verified.”
-They enrich the next scheduled review; event ingestion does not itself call B.
-
-## B's exact job
-
-The editable prompt lives in [prompts.py](src/dual_lobe/b/prompts.py).
-The output contract and freshness rules live in
-[protocol.py](src/dual_lobe/b/protocol.py).
-
-For a blocker, B asks what goal was replaced by a tactic, which prerequisite is
-missing, what alternative explains the evidence, and what small authorized check
-would distinguish the alternatives. It does not seek permission bypasses.
-
-For integrity, B inspects material completion/action claims, inconsistencies,
-missing receipts, and unsupported shifts in certainty. Labels are:
-
-- `UNSUPPORTED`: a material claim lacks matching evidence in the supplied record.
-- `CONTRADICTION`: B identifies incompatible supplied statements and quotes both.
-- `SUSPICIOUS_SHIFT`: a change lacks an explanation in the supplied record.
-
-All three are **model assessments**, not verdicts. Missing evidence is not proof
-of fabrication. Confidence or tone alone is not a trigger for an accusation.
-
-## Main controls
-
-| Setting | Default | Actual meaning |
-|---|---:|---|
-| `DUAL_LOBE_B_ENABLED` | true | Enable background observation and B context |
-| `DUAL_LOBE_OBSERVATION_REMINDER` | true | Fixed monitoring instruction on observed A calls; independently switchable |
-| `DUAL_LOBE_MONITORING_ROLE` | system | `system` or `developer`; use a role supported by the provider |
-| `DUAL_LOBE_CONTEXT_MEMORY_ENABLED` | true | Maintain and automatically load broadening memory |
-| `DUAL_LOBE_CLAIM_CHECKS_ENABLED` | true | Review material claims and deliver findings directly in the request |
-| `DUAL_LOBE_CONTEXT_MEMORY_TTL_SECONDS` | 86400 s | Memory's independent observation-age limit; reads/failures do not renew it |
-| `DUAL_LOBE_MAX_MEMORY_CHARS` | 1600 | Maximum loaded broadening-memory message size |
-| `DUAL_LOBE_ROLLOUT_STAGE` | context | `context` loads both routes; `observation` only adds the monitoring instruction |
-| `DUAL_LOBE_PULSE_EVERY` | 1 | Eligible calls per run between enqueues; default every call |
-| `DUAL_LOBE_B_COOLDOWN_SECONDS` | 0 | Optional skipping of closely spaced reviews; disabled by default |
-| `DUAL_LOBE_B_RPM_LIMIT` | 20 | Per-tenant, per-worker-process B call budget |
-| `DUAL_LOBE_WORKER_MAX_CONCURRENCY` | 2 | Maximum concurrent jobs in one worker process |
-| `DUAL_LOBE_B_TIMEOUT` | 20 s | Whole B model operation deadline; one attempt |
-| `DUAL_LOBE_B_MAX_OUTPUT_TOKENS` | 1400 | Requested B output-token cap |
-| `DUAL_LOBE_MAX_SHADOW_INPUT_CHARS` | 18000 | Complete B user-prompt cap, plus fixed system prompt |
-| `DUAL_LOBE_MAX_INJECTION_CHARS` | 1200 | Maximum direct claim-finding message size, separate from memory |
-| `DUAL_LOBE_B_STATE_TTL_SECONDS` | 180 s | Claim-finding freshness and queued observation age limit |
-| `DUAL_LOBE_B_STATE_READ_TIMEOUT` | 0.025 s | Optional state-read deadline; cancellation cleanup can add overhead |
-| `DUAL_LOBE_A_RETRIES` | 1 | Total buffered A attempts; streams are never replayed |
-
-See [.env.example](.env.example) for provider, admission, and startup settings.
-Legacy `integrity-observe`, `integrity-intervene`, and `enforcement` stage
-names now mean advisory context. They do not hold, block or force verification.
-Old B retry, fail-closed, spend-unit, enriched-bootstrap and Firecrawl settings
-are retired/ignored. Redis and LiteLLM are no longer dependencies.
-
-## Compatibility and limitations
-
-Supports the explicitly declared request fields in
-[schemas.py](src/dual_lobe/api/schemas.py): messages, streaming, tools, tool choice,
-parallel tool calls, standard sampling/token limits, response format, seed and
-reasoning effort. Unknown fields return 422 instead of silently disappearing.
-Provider support for any forwarded option still varies. The Responses API,
-image/audio processing and public inference via `lobe-b` are disabled.
-
-`POST /v1/verify` returns 410. The old file checker is not connected to the
-runtime. Legacy claim/evidence tables remain readable for existing data; B does
-not create final verdicts or run artifact checks. Successful v2 state is converted
-on read without changing its observation time. New writes use v3 with separate
-`context_memory` and `claim_review` fields. The new director and shared-memory
-features require migrations 0002 and 0003; run initialization when upgrading.
-
-Normal mode's lack of a B model wait does not mean literally zero overhead: authentication, database
-run lookup, optional 25 ms state lookup, network/proxy work and additional prompt
-tokens still cost time. Shared memory adds database reads/writes and selected
-history tokens. Director mode intentionally adds serial A/B calls, time and cost.
-Shared upstream capacity can also slow A. A response
-already delivered cannot be retracted or corrected by a later B review.
-
-Observation capture is best effort after delivery, not lossless audit logging.
-A process crash/disconnect or failed background transaction may lose it. Durable
-outbox jobs are idempotent once committed. Stale jobs and close-together reviews
-may be skipped; B does not review every claim or necessarily every call.
-
-Deploy one gateway and one B worker for the documented process-local budgets.
-For public/multi-process production use, separately validate rate limits, tenant
-roles, request ingress limits, data retention, secrets, backup/recovery and TLS.
-Known-secret redaction is not comprehensive data-loss prevention. Configuring a
-different B provider sends the bounded observed context to that provider.
-
-## Development and tests
-
-```sh
 uv sync --locked --extra dev
 uv run --locked pytest tests/unit -q
-# Offline fixtures only: prints exactly how the three paths are assembled.
-uv run --locked python -m dual_lobe.demo
-# Requires a permitted, functioning Docker daemon; creates a disposable Postgres:
-uv run --locked pytest -q
 ```
 
-For a live conversation against the configured running Compose stack:
+For database integration tests, run `uv run --locked pytest -q` with a permitted Docker daemon. Local tests use scripted model replies and do not prove model quality or provider compatibility. A live provider test requires configured provider credentials and a running proxy.
 
-```sh
-docker compose exec gateway python -m dual_lobe.client --run our-first-test
-# Visible conversation, with memory shared across later apps/runs:
-docker compose exec gateway python -m dual_lobe.client --director --memory-id main --run director-test-1
-```
+## Design notes
 
-Enter the proxy key at the hidden prompt. Type `/state` to inspect B's current
-memory and findings. Each A response displays the delivered version and route
-statuses. `/director` and `/normal` switch modes; `/new` starts a fresh run while
-keeping the selected shared memory space. This test client does not execute tools or pretend to inspect files.
-Native clients can run `python -m dual_lobe.client --url http://localhost:8801`.
-
-Native execution requires Postgres, explicit `DATABASE_URL` and
-`RLS_DATABASE_URL`, `alembic upgrade head`, and
-`python -m dual_lobe.core.bootstrap`. Then start
-`uvicorn dual_lobe.api.app:app --port 8801` and
-`python -m dual_lobe.b.worker` in separate processes.
-
-`uv.lock` captures the resolved environment. Docker installs the pinned, hashed
-runtime packages in `requirements.lock`. To intentionally refresh the export:
-
-```sh
-uv lock
-uv export --no-dev --no-emit-project --format requirements-txt --output-file requirements.lock
-```
-
-Do not interpret passing deterministic tests as measured hallucination reduction.
-The research report includes a separate real-model evaluation plan.
+The implementation details, request-by-request routing matrix, privacy gate contract, token lifecycle, and test coverage are in [Two model variants](docs/TWO_MODEL_VARIANTS.md). The older design notes under `docs/` describe retired variants and are retained as historical material; this README is the current product contract.

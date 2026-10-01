@@ -117,7 +117,8 @@ async def _run(engine: str, message: str, system: str, payload: dict[str, Any], 
         if result.tool_calls:
             headers["X-Dual-Lobe-Tool-Calls"] = str(len(result.tool_calls))
         receipt = asdict(result.privacy_receipt) if result.privacy_receipt else None
-        extra = {"mode": "clinical", "plan": result.plan.model_dump(), "plan_revision": result.plan_revision,
+        extra = {"mode": "clinical", "plan": result.plan.model_dump() if result.plan else None,
+                 "plan_revision": result.plan_revision,
                  "plan_sha256": result.plan_sha256, "timings_ms": result.timings_ms,
                  "logical_model_calls": result.logical_model_calls,
                  "memory_entries_used": result.memory_entries_used,

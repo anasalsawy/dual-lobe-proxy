@@ -34,9 +34,19 @@ _DIRECT_KEYS = {
     "account_number", "member_id", "insurance_id", "license_number",
     "device_id", "ip_address", "url", "biometric_id", "photo",
     "date_of_birth", "dob",
+    "password", "passwd", "passcode", "secret", "api_key", "apikey",
+    "access_token", "refresh_token", "auth_token", "authorization",
+    "credential", "credentials", "private_key", "client_secret",
 }
 
 _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("secret", re.compile(
+        r"\b(?:my\s+)?(?:password|passwd|passcode|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|"
+        r"auth[_ -]?token|client[_ -]?secret|private[_ -]?key|credential)\b\s*(?::|=|\bis\b)\s*"
+        r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s,;]+)", re.I)),
+    ("account_number", re.compile(
+        r"\b(?:bank\s+)?(?:account|routing|card)\s+number\b\s*(?::|=|\bis\b)\s*"
+        r"(?P<value>[A-Z0-9][A-Z0-9 -]{3,30})", re.I)),
     ("email", re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)),
     ("phone", re.compile(r"(?<!\d)(?:\+?\d[\d .()\-]{7,}\d)(?!\d)")),
     ("ssn", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
@@ -219,7 +229,16 @@ class PrivacyGuard:
         for label, pattern in _PATTERNS:
             def repl(match: re.Match[str], label=label) -> str:
                 found.add(label)
-                return vault.tokenize(match.group(0), label=label)
+                value = match.groupdict().get("value")
+                if value is None:
+                    value = match.group(0)
+                    return vault.tokenize(value, label=label)
+                raw = value.strip("\"'")
+                trailing = raw.rstrip(".,!?;:")
+                punctuation = raw[len(trailing):]
+                token = vault.tokenize(trailing or raw, label=label)
+                replacement = value.replace(raw, token + punctuation, 1)
+                return match.group(0).replace(value, replacement, 1)
             out = pattern.sub(repl, out)
         return out
 
