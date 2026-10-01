@@ -14,6 +14,9 @@ def test_speaker_routing_honors_direct_address_and_defaults_to_a():
     assert handler.select_speaker([{"role": "user", "content": "A, ask B what we should do."}]) == "A"
     assert handler.requested_consultee("A, ask B what we should do.", "A") == "B"
     assert handler.requested_consultee("B, ask A what we should do.", "B") == "A"
+    assert handler.requested_handoff("B, hand the user-facing turn to A now.", "B") == "A"
+    assert handler.requested_handoff("A, transfer this turn to B.", "A") == "B"
+    assert handler.requested_handoff("B, ask A for an opinion.", "B") is None
 
 
 @pytest.mark.parametrize("text, expected_speaker, routed", [
