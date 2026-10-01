@@ -381,3 +381,28 @@ async def test_a_client_tool_continuation_exposes_client_tools_only(monkeypatch)
     assert "A found an answer." in second_body["choices"][0]["message"]["content"]
     continuation_tools = registry.adapters["lobe-a"].requests[1].tools
     assert [x["function"]["name"] for x in continuation_tools] == ["search_web"]
+
+def test_user_facing_instructions_apply_to_either_lobe():
+    prompt_a = handler._system_prompt("A")
+    prompt_b = handler._system_prompt("B")
+    assert "You are Lobe A, the user-facing speaker" in prompt_a
+    assert "You are Lobe B, the user-facing speaker" in prompt_b
+    assert "when its independent input would materially improve the answer" in prompt_a
+    assert "when its independent input would materially improve the answer" in prompt_b
+    assert "act on relevant advice to advance and complete the user’s task" in prompt_a
+    assert "act on relevant advice to advance and complete the user’s task" in prompt_b
+
+
+def test_verifier_prompt_tracks_the_lobe_that_spoke():
+    # A verifies B's answer after a B-facing turn.
+    a_verifier_prompt = handler._system_prompt("A", verify=True)
+    assert "You are Lobe A" in a_verifier_prompt
+    assert "Lobe B's response to the user" in a_verifier_prompt
+    assert "Lobe B's OUTPUT" in a_verifier_prompt
+
+    # B verifies A's answer after the default A-facing turn.
+    b_verifier_prompt = handler._system_prompt("B", verify=True)
+    assert "You are Lobe B" in b_verifier_prompt
+    assert "Lobe A's response to the user" in b_verifier_prompt
+    assert "Lobe A's OUTPUT" in b_verifier_prompt
+
