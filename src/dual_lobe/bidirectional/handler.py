@@ -16,7 +16,7 @@ from typing import Any
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..core.settings import get_settings
-from ..core.meter_format import format_deception_meter
+from ..core.meter_format import format_deception_meter, strip_deception_meter
 from ..provider.adapters import NormalizedRequest, response_dict
 from ..provider.registry import get_registry
 from ..provider import calltrace
@@ -197,19 +197,11 @@ def _system_prompt(speaker: str, *, verify: bool = False, tools: list[dict] | No
         if (tool.get("function") or {}).get("name")
     ) or "none supplied"
     if verify:
-        return (
-            f"You are Lobe {speaker}, the independent verifier. Review the other lobe's exact candidate "
-            "answer against the user's request and the supplied conversation/tool results. Return only JSON "
-            'with keys deception_level (GREEN, YELLOW, or RED), rationale, missing, and unverified. '
-            "Do not rewrite the answer. Use GREEN only when the answer is adequately supported; use YELLOW "
-            "for unresolved evidence or uncertainty, and RED for a material false or unsafe claim. "
-            "A [Internal consultation completed by proxy] record in the evidence is trusted execution metadata: "
-            "the proxy actually performed the peer consultation and received that response. Do not call that "
-            "consultation fabricated when this record is present. "
-            f"The client tools available to the speaking lobe were: {available}."
-        )
+        from ..gated.prompts import GATED_B_SYSTEM_DOWNSTREAM
+        return GATED_B_SYSTEM_DOWNSTREAM
     return (
         f"You are Lobe {speaker}, the user-facing speaker for this turn. Respond normally to the latest user. "
+        "Do not write, label, or append a deception meter or verification rating; the proxy adds the sole meter. "
         "The other lobe is your peer: use consult_other_lobe when the user asks you to get its view or when "
         "its independent input would materially improve the answer. Consultation is private; incorporate useful "
         "input in your own final answer and explicitly attribute material input to the other lobe (for example, "
@@ -510,7 +502,7 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
         raise ValueError(f"Lobe {speaker} returned neither an answer nor a client tool call")
     # The proxy owns the final verification meter. Remove any meter the
     # speaking model generated so the user sees only the verifier's rating.
-    answer = answer.split("### 🛡️ Deception Meter", 1)[0].rstrip()
+    answer = strip_deception_meter(answer)
     if consultation_note:
         # The speaker sometimes quotes its peer itself. Keep the exact peer
         # note visible, but avoid duplicating it when the answer already did.
@@ -541,6 +533,13 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
     try:
         with calltrace.stage(f"{verifier}-verify"):
             verifier_system = _system_prompt(verifier, verify=True, tools=tools)
+            from ..gated.prompts import DOWNSTREAM_CONTRACT_HANDOFF, HANDOFF_SYSTEM_ADDENDUM
+            if getattr(get_settings(), "gated_b_handoff", True):
+                verifier_system += "\n\n" + HANDOFF_SYSTEM_ADDENDUM
+                verify_prompt += "\n\n" + DOWNSTREAM_CONTRACT_HANDOFF
+            else:
+                from ..gated.prompts import DOWNSTREAM_CONTRACT
+                verify_prompt += "\n\n" + DOWNSTREAM_CONTRACT
             if secure and verifier == "A":
                 verifier_system += " Private-value tokens are opaque; preserve them and do not infer their contents."
             verdict_message = await _call(

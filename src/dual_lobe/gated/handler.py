@@ -26,7 +26,11 @@ import uuid
 from typing import Any
 
 from ..core.settings import get_settings
-from ..core.meter_format import format_deception_meter
+from ..core.meter_format import (
+    DeceptionMeterStreamFilter,
+    format_deception_meter,
+    strip_deception_meter,
+)
 from ..provider import calltrace
 from ..provider.adapters import NormalizedRequest, response_dict
 from ..provider.registry import get_registry
@@ -153,6 +157,7 @@ async def _call_b_json(system_prompt: str, user_prompt: str, contract: str) -> d
             ],
             temperature=0,
             max_tokens=s.b_max_output_tokens,
+            response_format={"type": "json_object"},
             timeout=s.b_timeout,
         )
         response = await adapter.buffered(req)
@@ -698,6 +703,8 @@ async def gated_stream(
         return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
     yield sse({"role": "assistant", "content": ""})
+    meter_filter = DeceptionMeterStreamFilter()
+    streamed_text = ""
     chunks: list[dict[str, Any]] = []
     try:
         with calltrace.stage("A"):
@@ -707,7 +714,10 @@ async def gated_stream(
                 for choice in chunk.get("choices") or []:
                     text = (choice.get("delta") or {}).get("content")
                     if text:
-                        yield sse({"content": text})
+                        clean = meter_filter.feed(text)
+                        if clean:
+                            streamed_text += clean
+                            yield sse({"content": clean})
     except Exception as exc:  # noqa: BLE001
         LOG.error("gated A stream failed run=%s: %s", run_id, exc)
         if not chunks:
@@ -715,7 +725,12 @@ async def gated_stream(
             yield "data: [DONE]\n\n"
             return
     a_data = _assemble_stream(chunks)
-    streamed_text = a_data["choices"][0]["message"].get("content") or ""
+    tail = meter_filter.finish()
+    if tail:
+        streamed_text += tail
+        yield sse({"content": tail})
+    initial_message = (a_data.get("choices") or [{}])[0].get("message", {})
+    initial_message["content"] = strip_deception_meter(initial_message.get("content") or "")
 
     proxy_used: dict[str, int] = {}
     if proxy_on:
@@ -726,11 +741,12 @@ async def gated_stream(
             a_adapter=a_adapter, s=s)
         if proxy_used:
             # The continuation replaced A's message; send whatever it added.
-            cont_text = (a_data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+            cont_message = (a_data.get("choices") or [{}])[0].get("message", {})
+            cont_text = strip_deception_meter(cont_message.get("content") or "")
             if cont_text:
                 yield sse({"content": ("\n\n" if streamed_text else "") + cont_text})
                 streamed_text = (streamed_text + "\n\n" if streamed_text else "") + cont_text
-                a_data["choices"][0]["message"]["content"] = streamed_text
+                cont_message["content"] = streamed_text
 
     final, headers = await _complete(a_data, payload=payload, run_id=run_id, tenant_id=tenant_id,
                                      public_model=public_model, shared_space=shared_space,
@@ -768,9 +784,10 @@ async def _complete(
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Steps 3-5: B rates A's finished response; meter, handoff, optional flip-back."""
     s = get_settings()
-    messages = payload["messages"]
+    messages = enriched_messages
     a_message = (a_data.get("choices") or [{}])[0].get("message", {})
-    a_content = a_message.get("content", "")
+    a_content = strip_deception_meter(a_message.get("content", "") or "")
+    a_message["content"] = a_content
 
     # ── 3. DOWNSTREAM: B rates A's response ──────────────────────
     handoff_on = bool(getattr(s, "gated_b_handoff", True))
@@ -888,7 +905,9 @@ async def _complete(
             )
             a_data = response_dict(a_response2)
             LOG.info("gated flip-back run=%s — A reconsidered", run_id)
-            a_content2 = (a_data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            revised_message = (a_data.get("choices") or [{}])[0].get("message", {})
+            a_content2 = strip_deception_meter(revised_message.get("content", "") or "")
+            revised_message["content"] = a_content2
             try:
                 recheck_prompt = (
                     f"CONVERSATION MESSAGES:\n{_messages_to_text(messages)}\n\n"

@@ -182,8 +182,8 @@ async def test_b_can_speak_use_client_tools_and_a_verifies(monkeypatch):
 @pytest.mark.asyncio
 async def test_a_can_consult_b_privately_then_b_verifies(monkeypatch):
     registry = FakeRegistry(
-        a_messages=[{"content": "A's final answer. I asked Lobe B, and it said: B's independent input."}
-                                "\\n\\n### 🛡️ Deception Meter\\n\\n**🔴 RED**\\n\\n<small>Wrong meter.</small>"}],
+        a_messages=[{"content": "A's final answer. I asked Lobe B, and it said: B's independent input."
+                                 "\n\n### 🛡️ Deception Meter\n\n**🔴 RED**\n\n<small>Wrong meter.</small>"}],
         b_messages=[
             {"content": "B's independent input."},
             {"content": '{"deception_level":"YELLOW","rationale":"One detail needs checking."}'},
