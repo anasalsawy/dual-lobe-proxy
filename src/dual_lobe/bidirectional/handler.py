@@ -179,6 +179,18 @@ def requested_consultee(text: str, speaker: str) -> str | None:
     return other if other != speaker else None
 
 
+def requested_handoff(text: str, speaker: str) -> str | None:
+    """Honor an explicit user instruction to give the turn to the peer lobe."""
+    match = re.search(
+        r"(?i)\b(?:hand(?:\s+off)?|transfer|pass|route)\b.{0,80}?\bto\s+(?:lobe\s+)?([ab])\b",
+        text,
+    ) or re.search(r"(?i)\b(?:let|have)\s+(?:lobe\s+)?([ab])\s+(?:answer|respond|take over)\b", text)
+    if not match:
+        return None
+    target = match.group(1).upper()
+    return target if target != speaker else None
+
+
 def _system_prompt(speaker: str, *, verify: bool = False, tools: list[dict] | None = None) -> str:
     available = ", ".join(
         str((tool.get("function") or {}).get("name", "")) for tool in (tools or [])
@@ -364,6 +376,9 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
     else:
         safe_messages = messages
     speaker = select_speaker(messages)
+    handoff_target = requested_handoff(latest_user_text(messages), speaker)
+    if handoff_target:
+        speaker = handoff_target
     verifier = "B" if speaker == "A" else "A"
     latest = latest_user_text(messages)
     tool_continuation = bool(messages and messages[-1].get("role") == "tool")
