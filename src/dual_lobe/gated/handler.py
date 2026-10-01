@@ -110,21 +110,16 @@ def _extract_tool_evidence(messages: list[dict]) -> str:
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
             for tc in msg["tool_calls"]:
                 fn = tc.get("function", {})
-                lines.append(f"  [msg {i}] A requested tool: {fn.get('name', '?')} args={fn.get('arguments', '{}')[:200]}")
+                lines.append(f"  [msg {i}] A requested tool: {fn.get('name', '?')} args={fn.get('arguments', '{}')}")
         elif msg.get("role") == "tool":
-            content = str(msg.get("content", ""))[:500]
+            content = str(msg.get("content", ""))
             lines.append(f"  [msg {i}] TOOL RESULT: {content}")
     return "\n".join(lines) if lines else "  (no tool calls or results in conversation)"
 
 
 def _for_b(text: Any) -> str:
-    """A's full output for B to verify; if it must be cut, B is told so, so a cut is not read as A truncating."""
-    text = str(text or "")
-    limit = get_settings().max_shadow_input_chars
-    if len(text) <= limit:
-        return text
-    return (text[:limit] + f"\n[... proxy cut A's output here for length; A's full output is {len(text)} "
-            "characters and continues past this point. Do not treat this cut as truncation by A.]")
+    """Pass A's complete output to B without proxy-side clipping."""
+    return str(text or "")
 
 
 def _messages_to_text(messages: list[dict]) -> str:
@@ -135,9 +130,9 @@ def _messages_to_text(messages: list[dict]) -> str:
         content = msg.get("content", "")
         if isinstance(content, list):
             content = " ".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
-        text = str(content or "")[:800]
+        text = str(content or "")
         if msg.get("tool_calls"):
-            text += f" [tool_calls: {json.dumps(msg['tool_calls'], ensure_ascii=False)[:300]}]"
+            text += f" [tool_calls: {json.dumps(msg['tool_calls'], ensure_ascii=False)}]"
         lines.append(f"[{i}] {role}: {text}")
     return "\n".join(lines)
 
@@ -807,7 +802,7 @@ async def _complete(
     if a_tool_calls:
         downstream_prompt += (
             "A's TOOL CALLS THIS TURN (review arguments and side effects too):\n"
-            f"{json.dumps(a_tool_calls, ensure_ascii=False)[:2000]}\n\n"
+            f"{json.dumps(a_tool_calls, ensure_ascii=False)}\n\n"
         )
 
     b_downstream: dict = {}
