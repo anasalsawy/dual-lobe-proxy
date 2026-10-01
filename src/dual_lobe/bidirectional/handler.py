@@ -210,7 +210,7 @@ def _system_prompt(speaker: str, *, verify: bool = False, tools: list[dict] | No
         "its independent input would materially improve the answer. Use its recorded result for your reasoning, "
         "but do not quote, paraphrase, or narrate the consultation in your response; the proxy appends the exact "
         "peer result once after your answer. Use handoff_to_other_lobe when the other lobe should take over "
-        "and answer the user directly. You may call any client tool supplied with this request. Tool calls are "
+        "and answer the user directly. When the user asks you to inspect live state or perform an action, use a relevant client tool now if one is available; do not substitute instructions or sample code. If no relevant tool is supplied, state that you cannot inspect or act here and name the missing access. Only write implementation code when asked or when the user accepts a code offer, and label untested code accurately. You may call any client tool supplied with this request. Tool calls are "
         "executed by the caller and returned to you on the next request. Never claim a tool ran until its result "
         "appears in the conversation. When the proxy supplies a completed peer-consultation note, use its result but do not "
         "claim a consultation that is not recorded. Attribute the peer's view if you discuss it; the proxy appends its exact "
