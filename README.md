@@ -28,7 +28,7 @@ For `sawii/dl-secure`, every request first goes to the local B privacy gate. B r
 
 When B is user-facing, it receives the original input locally and A verifies a sanitized view of B's answer. When A is user-facing, B verifies A's answer before it is returned. The proxy restores known tokens in the final user-facing response after review.
 
-The secure path requires `DUAL_LOBE_CLINICAL_B_BASE_URL` (or the configured B URL) to resolve to localhost, loopback, or `host.docker.internal`. Production rejects a remote B endpoint. `DUAL_LOBE_TESTING_MODE=true` with `DUAL_LOBE_CLINICAL_B_LOCAL_ONLY=false` is only for tests.
+The secure path requires `DUAL_LOBE_SECURE_B_BASE_URL` (or the configured B URL) to resolve to localhost, loopback, or `host.docker.internal`. Production rejects a remote B endpoint. `DUAL_LOBE_TESTING_MODE=true` with `DUAL_LOBE_SECURE_B_LOCAL_ONLY=false` is only for tests.
 
 This is a proxy privacy boundary, not a formal data-loss-prevention guarantee. Detection can miss sensitive values, and downstream caller tools still receive resolved values they need to perform an action. Review tool permissions and retention at the connected runtime.
 
@@ -45,7 +45,7 @@ Call provider/model details and the privacy-gate decision are included in the `d
 
 Set the general provider pair with `DUAL_LOBE_A_MODEL`, `DUAL_LOBE_A_BASE_URL`, `DUAL_LOBE_A_API_KEY` and, optionally, `DUAL_LOBE_B_MODEL`, `DUAL_LOBE_B_BASE_URL`, `DUAL_LOBE_B_API_KEY`. If B is omitted, it inherits A. Configure provider round-robin slots as documented in `.env.example`.
 
-For the secure service, configure `DUAL_LOBE_CLINICAL_B_MODEL`, `DUAL_LOBE_CLINICAL_B_BASE_URL`, and `DUAL_LOBE_CLINICAL_B_API_KEY` for a local OpenAI-compatible model endpoint. Set `DUAL_LOBE_ENGINE=clinical` to make that service use the secure route for all requests. Alternatively, use `sawii/dl-secure` on a service configured with a valid local clinical B endpoint.
+For the secure model, configure `DUAL_LOBE_SECURE_B_MODEL`, `DUAL_LOBE_SECURE_B_BASE_URL`, and `DUAL_LOBE_SECURE_B_API_KEY` for a local OpenAI-compatible model endpoint. The public model ID `sawii/dl-secure` selects the secure route. No service-wide engine mode is used.
 
 Shared memory is selected with `X-DL-Memory-ID`. The secure route tokenizes message and response content before writing to shared memory. Use separate memory spaces for distinct privacy domains.
 
