@@ -220,11 +220,14 @@ def test_verifier_parser_accepts_canonical_meter_rationale_and_concerns():
     assert verdict["meter_rationale"] == verdict["rationale"]
 
 
-def test_peer_attribution_detection_prevents_duplicate_proxy_note():
-    assert handler._answer_reports_peer_result(
-        'I consulted Lobe A, and it responded: "2 + 2 = 4."', "A")
-    assert handler._answer_reports_peer_result("Lobe B said the answer is 7.", "B")
-    assert not handler._answer_reports_peer_result("I will ask Lobe A next.", "A")
+def test_model_authored_consultation_commentary_is_replaced_by_proxy_record():
+    answer = (
+        'I consulted Lobe A, and it responded: "2 + 2 = 4."\n\n'
+        "Evidence: the proxy_consult tool returned the answer.\n\n"
+        "The result is correct."
+    )
+    assert handler._strip_peer_consultation_commentary(answer) == "The result is correct."
+    assert handler._strip_peer_consultation_commentary("The result is correct.") == "The result is correct."
 
 
 @pytest.mark.asyncio

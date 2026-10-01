@@ -207,9 +207,9 @@ def _system_prompt(speaker: str, *, verify: bool = False, tools: list[dict] | No
         f"You are Lobe {speaker}, the user-facing speaker for this turn. Respond normally to the latest user. "
         "Do not write, label, or append a deception meter or verification rating; the proxy adds the sole meter. "
         "The other lobe is your peer: use consult_other_lobe when the user asks you to get its view or when "
-        "its independent input would materially improve the answer. Consultation is private; incorporate useful "
-        "input in your own final answer and explicitly attribute material input to the other lobe (for example, "
-        "'I asked Lobe B, and it suggested ...'). Use handoff_to_other_lobe when the other lobe should take over "
+        "its independent input would materially improve the answer. Use its recorded result for your reasoning, "
+        "but do not quote, paraphrase, or narrate the consultation in your response; the proxy appends the exact "
+        "peer result once after your answer. Use handoff_to_other_lobe when the other lobe should take over "
         "and answer the user directly. You may call any client tool supplied with this request. Tool calls are "
         "executed by the caller and returned to you on the next request. Never claim a tool ran until its result "
         "appears in the conversation. When the proxy supplies a completed peer-consultation note, use its result but do not "
@@ -331,14 +331,34 @@ def _parse_verdict(message: dict[str, Any]) -> dict[str, Any]:
                 "missing": [], "unverified": ["Verifier did not return valid JSON."], "concerns": []}
 
 
-def _answer_reports_peer_result(answer: str, peer: str) -> bool:
-    """Detect clear attribution already written by the speaker before appending a proxy note."""
-    name = rf"(?:lobe\s+)?{re.escape(peer)}"
-    patterns = (
-        rf"\b(?:i\s+)?(?:asked|consulted|checked\s+with)\s+{name}\b.{{0,240}}\b(?:said|answered|responded|suggested|recommended|thinks|advised)\b",
-        rf"\b{name}\s+(?:said|answered|responded|suggested|recommended|advised)\b",
-    )
-    return any(re.search(pattern, answer, re.IGNORECASE | re.DOTALL) for pattern in patterns)
+def _strip_peer_consultation_commentary(answer: str) -> str:
+    """Remove model-authored reports of proxy consultations; proxy has exact records."""
+    paragraphs = re.split(r"(\n[ \t]*\n)", answer)
+    kept: list[str] = []
+    drop_next_separator = False
+    for part in paragraphs:
+        if re.fullmatch(r"\n[ \t]*\n", part or ""):
+            if not drop_next_separator:
+                kept.append(part)
+            drop_next_separator = False
+            continue
+        if re.search(r"(?i)\b(?:proxy_consult|internal communication)\b", part):
+            drop_next_separator = True
+            continue
+        sentences = re.split(r"(?<=[.!?])\s+", part)
+        clean_sentences = [sentence for sentence in sentences if not re.search(
+            r"(?i)\b(?:consult(?:ation|ed)?|proxy_consult|internal communication)\b|"
+            r"\b(?:i\s+)?asked\s+(?:lobe\s+)?[ab]\b|"
+            r"\bLobe\s+[ab]\s+(?:said|answered|responded|suggested)\b",
+            sentence,
+        )]
+        if len(clean_sentences) != len(sentences):
+            if clean_sentences:
+                kept.append(" ".join(clean_sentences))
+            drop_next_separator = True
+        else:
+            kept.append(part)
+    return "".join(kept).strip()
 
 
 def _tag_tool_calls(calls: list[dict[str, Any]], speaker: str) -> list[dict[str, Any]]:
@@ -526,13 +546,14 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
     # speaking model generated so the user sees only the verifier's rating.
     answer = strip_deception_meter(answer)
     if consultation_note:
-        # The speaker sometimes quotes its peer itself. Keep the exact peer
-        # note visible, but avoid duplicating it when the answer already did.
+        # Only the gateway has the exact consultation result. Drop model-authored
+        # paraphrases and expose the recorded peer result once.
+        answer = _strip_peer_consultation_commentary(answer)
         peer_answer = consultation_note.split(" and it said: ", 1)[-1]
         normalized_peer = re.sub(r"[\W_]+", "", peer_answer).casefold()
         normalized_answer = re.sub(r"[\W_]+", "", answer).casefold()
-        if normalized_peer and normalized_peer not in normalized_answer and not _answer_reports_peer_result(answer, peer):
-            answer += "\n\n" + consultation_note
+        if normalized_peer and normalized_peer not in normalized_answer:
+            answer = (answer + "\n\n" if answer else "") + consultation_note
 
     verifier_answer = answer
     if secure and verifier == "A":
@@ -542,7 +563,7 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
         for m in messages[-12:] if m.get("role") in {"assistant", "tool"}
     )
     if consultation_note:
-        evidence += "\\n[Internal consultation completed by proxy] " + consultation_note
+        evidence += "\n[Internal consultation completed by proxy] " + consultation_note
     user_text = latest or "(no latest user message)"
     if secure and verifier == "A":
         user_text, _ = guard.sanitize(user_text, vault=vault)
