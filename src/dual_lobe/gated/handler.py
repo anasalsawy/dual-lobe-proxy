@@ -29,7 +29,6 @@ from ..core.settings import get_settings
 from ..core.meter_format import (
     DeceptionMeterStreamFilter,
     format_deception_meter,
-    is_claim_free_greeting,
     strip_deception_meter,
 )
 from ..provider import calltrace
