@@ -267,8 +267,8 @@ async def _consult(speaker: str, question: str, messages: list[dict[str, Any]],
         messages = _rehydrate_messages(messages, vault)
         question = vault.rehydrate_text(question)
     context = "\n".join(
-        f"{m.get('role', '?')}: {_content_text(m.get('content'))[:1800]}"
-        for m in messages[-8:]
+        f"{m.get('role', '?')}: {_content_text(m.get('content'))}"
+        for m in messages
     )
     prompt = (
         f"You are Lobe {peer}, consulted privately by Lobe {speaker}. Give a concise independent view on: "
@@ -292,7 +292,7 @@ async def _consult(speaker: str, question: str, messages: list[dict[str, Any]],
                 )
             advice = _clean_consultation_text(message.get("content"))
             if advice:
-                return advice[:5000]
+                return advice
             LOG.warning("private consultation returned no readable text speaker=%s peer=%s attempt=%s",
                         speaker, peer, attempt + 1)
         return f"Lobe {peer} returned no readable answer after one retry; no peer answer is available."
@@ -321,8 +321,8 @@ def _clean_consultation_text(value: Any) -> str:
 async def _secure_gate(messages: list[dict[str, Any]], payload: dict[str, Any]) -> dict[str, Any]:
     """Run local B's privacy check before any secure input reaches provider A."""
     _assert_secure_b_local()
-    raw = "\n\n".join(f"{m.get('role', '?')}: {_content_text(m.get('content'))[:5000]}"
-                       for m in messages[-12:])
+    raw = "\n\n".join(f"{m.get('role', '?')}: {_content_text(m.get('content'))}"
+                       for m in messages)
     system = (
         "You are the LOCAL privacy gate in front of Lobe A. Inspect the supplied conversation for sensitive "
         "personal, medical, financial, credential, or identifying values that should be replaced with opaque "
