@@ -223,6 +223,15 @@ class HubAdapter:
             started = time.monotonic()
             try:
                 data = await adapter.buffered(req)
+                choices = (data or {}).get("choices") or []
+                message = choices[0].get("message") if choices and isinstance(choices[0], dict) else None
+                content = (message or {}).get("content")
+                tool_calls = (message or {}).get("tool_calls") or []
+                has_content = (isinstance(content, str) and bool(content.strip())) or (
+                    isinstance(content, list) and bool(content)
+                )
+                if not message or (not has_content and not tool_calls):
+                    raise ValueError("upstream returned an empty completion")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
