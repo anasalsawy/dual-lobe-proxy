@@ -400,8 +400,13 @@ async def chat_completions(
             except Exception:
                 LOG.warning("shared memory load failed run=%s; refusing a memory-backed request", run_id)
                 raise HTTPException(503, "Shared memory is unavailable; no model was invoked.") from None
-        result = await bidirectional_response({**payload, "stream": False}, run_id, principal.tenant_id, shared_text,
-                                              shared_space=memory_space, secure=secure_model)
+        try:
+            result = await bidirectional_response({**payload, "stream": False}, run_id, principal.tenant_id, shared_text,
+                                                  shared_space=memory_space, secure=secure_model)
+        except Exception as exc:
+            LOG.warning("bidirectional upstream failed model=%s error=%s", alias, type(exc).__name__)
+            return JSONResponse({"error": {"type": "upstream_error",
+                                             "message": "Upstream request failed."}}, status_code=502)
         data = json.loads(result.body)
         private_lobe_data = data.get("dual_lobe") or {}
         safe_memory_messages = private_lobe_data.pop("_memory_messages", None)
