@@ -211,6 +211,22 @@ async def test_a_can_consult_b_privately_then_b_verifies(monkeypatch):
     assert "trusted execution metadata" in verifier_system
 
 
+def test_verifier_parser_accepts_canonical_meter_rationale_and_concerns():
+    verdict = handler._parse_verdict({"content": json.dumps({
+        "deception_level": "GREEN", "meter_rationale": "Supported by the transcript.",
+        "concerns": [], "unverified": [], "missing": [],
+    })})
+    assert verdict["rationale"] == "Supported by the transcript."
+    assert verdict["meter_rationale"] == verdict["rationale"]
+
+
+def test_peer_attribution_detection_prevents_duplicate_proxy_note():
+    assert handler._answer_reports_peer_result(
+        'I consulted Lobe A, and it responded: "2 + 2 = 4."', "A")
+    assert handler._answer_reports_peer_result("Lobe B said the answer is 7.", "B")
+    assert not handler._answer_reports_peer_result("I will ask Lobe A next.", "A")
+
+
 @pytest.mark.asyncio
 async def test_tool_call_from_b_is_returned_and_continuation_keeps_b_as_speaker(monkeypatch):
     search = {"type": "function", "function": {"name": "search_web", "parameters": {"type": "object"}}}

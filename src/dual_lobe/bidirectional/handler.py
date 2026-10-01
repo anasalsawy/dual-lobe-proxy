@@ -208,8 +208,9 @@ def _system_prompt(speaker: str, *, verify: bool = False, tools: list[dict] | No
         "'I asked Lobe B, and it suggested ...'). Use handoff_to_other_lobe when the other lobe should take over "
         "and answer the user directly. You may call any client tool supplied with this request. Tool calls are "
         "executed by the caller and returned to you on the next request. Never claim a tool ran until its result "
-        "appears in the conversation. When a peer consultation note is supplied, do not restate or duplicate it; "
-        "the proxy appends the peer's exact input after your answer. Do not expose internal consultation unless useful."
+        "appears in the conversation. When the proxy supplies a completed peer-consultation note, use its result but do not "
+        "claim a consultation that is not recorded. Attribute the peer's view if you discuss it; the proxy appends its exact "
+        "note only when your answer does not already report the peer's result. Do not expose other routing details."
     )
 
 
@@ -311,13 +312,29 @@ def _parse_verdict(message: dict[str, Any]) -> dict[str, Any]:
         level = str(value.get("deception_level", "YELLOW")).upper()
         if level not in {"GREEN", "YELLOW", "RED"}:
             level = "YELLOW"
-        rationale = str(value.get("rationale") or "Verifier returned no rationale.").strip()
+        rationale = str(value.get("meter_rationale") or value.get("rationale")
+                        or "Verifier returned no rationale.").strip()
         return {"deception_level": level, "rationale": rationale[:1200],
-                "missing": value.get("missing") or [], "unverified": value.get("unverified") or []}
+                "meter_rationale": rationale[:1200],
+                "missing": value.get("missing") or [], "unverified": value.get("unverified") or [],
+                "concerns": value.get("concerns") or [], "assist": value.get("assist") or "",
+                "tool_review": value.get("tool_review") or {}, "next_step": value.get("next_step") or "",
+                "widen": value.get("widen") or [], "memory_query": value.get("memory_query") or ""}
     except (json.JSONDecodeError, AttributeError, TypeError):
         return {"deception_level": "YELLOW",
                 "rationale": "The independent verification response was invalid; the answer remains unverified.",
-                "missing": [], "unverified": ["Verifier did not return valid JSON."]}
+                "meter_rationale": "The independent verification response was invalid; the answer remains unverified.",
+                "missing": [], "unverified": ["Verifier did not return valid JSON."], "concerns": []}
+
+
+def _answer_reports_peer_result(answer: str, peer: str) -> bool:
+    """Detect clear attribution already written by the speaker before appending a proxy note."""
+    name = rf"(?:lobe\s+)?{re.escape(peer)}"
+    patterns = (
+        rf"\b(?:i\s+)?(?:asked|consulted|checked\s+with)\s+{name}\b.{{0,240}}\b(?:said|answered|responded|suggested|recommended|thinks|advised)\b",
+        rf"\b{name}\s+(?:said|answered|responded|suggested|recommended|advised)\b",
+    )
+    return any(re.search(pattern, answer, re.IGNORECASE | re.DOTALL) for pattern in patterns)
 
 
 def _tag_tool_calls(calls: list[dict[str, Any]], speaker: str) -> list[dict[str, Any]]:
@@ -372,6 +389,7 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
     if handoff_target:
         speaker = handoff_target
     verifier = "B" if speaker == "A" else "A"
+    peer = verifier
     latest = latest_user_text(messages)
     tool_continuation = bool(messages and messages[-1].get("role") == "tool")
     explicit_peer = None if tool_continuation else requested_consultee(latest, speaker)
@@ -437,6 +455,7 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
                          "content": f"Lobe {previous_speaker} handed this user-facing turn to you. "
                                     f"Its context: {context}"})
         speaker, verifier = new_speaker, previous_speaker
+        peer = verifier
         if secure:
             dialogue = (_privacy_view(dialogue, guard, vault) if speaker == "A"
                         else _rehydrate_messages(dialogue, vault))
@@ -461,7 +480,6 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
         advice = await _consult(speaker, question, dialogue, payload, secure=secure, guard=guard, vault=vault)
         if secure and speaker == "A":
             advice, _ = guard.sanitize(advice, vault=vault)
-        peer = 'B' if speaker == 'A' else 'A'
         consultation_note = f"I asked Lobe {peer}, and it said: {advice}"
         consult_id = str(consult_calls[0].get("id") or "consult")
         dialogue.extend([
@@ -509,8 +527,8 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
         peer_answer = consultation_note.split(" and it said: ", 1)[-1]
         normalized_peer = re.sub(r"[\W_]+", "", peer_answer).casefold()
         normalized_answer = re.sub(r"[\W_]+", "", answer).casefold()
-        if normalized_peer and normalized_peer not in normalized_answer:
-            answer += "\\n\\n" + consultation_note
+        if normalized_peer and normalized_peer not in normalized_answer and not _answer_reports_peer_result(answer, peer):
+            answer += "\n\n" + consultation_note
 
     verifier_answer = answer
     if secure and verifier == "A":
@@ -548,12 +566,18 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
                 payload, tools=tools or None, tool_choice="none" if tools else None, verify=True,
             )
         verdict = _parse_verdict(verdict_message)
+        from ..gated.handler import _verified_meter
+        level, rationale, concerns = _verified_meter(
+            verdict, verifier_answer, evidence + "\n" + verifier_answer)
+        verdict.update(deception_level=level, rationale=rationale,
+                       meter_rationale=rationale, concerns=concerns)
     except Exception as exc:  # noqa: BLE001
         LOG.warning("bidirectional verification failed speaker=%s verifier=%s error=%s",
                     speaker, verifier, type(exc).__name__)
         verdict = {"deception_level": "YELLOW",
                    "rationale": "The independent verification call failed; the answer remains unverified.",
-                   "missing": [], "unverified": ["Verifier call failed."]}
+                   "meter_rationale": "The independent verification call failed; the answer remains unverified.",
+                   "missing": [], "unverified": ["Verifier call failed."], "concerns": []}
     if run_id:
         _set_meter(run_id, {"deception_level": verdict["deception_level"],
                             "meter_rationale": verdict["rationale"], "timestamp": time.time(),
