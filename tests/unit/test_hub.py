@@ -92,6 +92,10 @@ async def test_empty_success_switches_to_next_slot(served):
     data = await a.buffered(_req())
     assert data["choices"][0]["message"]["content"] == "three.example"
     assert calls[-2:] == ["two.example", "three.example"]
+    calls.clear()
+    for _ in range(4):
+        await a.buffered(_req())
+    assert "two.example" not in calls
 
 
 async def test_429_parks_slot_and_call_succeeds(served):
