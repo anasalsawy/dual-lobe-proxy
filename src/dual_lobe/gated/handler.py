@@ -207,7 +207,7 @@ def _verified_meter(value: Any, answer: str, evidence: str) -> tuple[str, str, l
         return "YELLOW", rationale or "Verifier response did not contain a valid rating.", concerns
     if not rationale:
         return "YELLOW", "Verifier response did not contain its meter rationale.", concerns
-    return level, rationale[:1200], concerns
+    return level, rationale, concerns
 
 
 async def _resolve_proxy_tools(
