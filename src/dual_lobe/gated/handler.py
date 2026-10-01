@@ -712,10 +712,12 @@ async def gated_stream(
                             yield sse({"content": clean})
     except Exception as exc:  # noqa: BLE001
         LOG.error("gated A stream failed run=%s: %s", run_id, exc)
-        if not chunks:
-            yield sse({"content": "Upstream request failed."}, "stop")
-            yield "data: [DONE]\n\n"
-            return
+        # Once the stream has started, signal failure explicitly. Never turn a
+        # failed or interrupted upstream stream into a normal stop/completion.
+        yield ('data: {"error":{"type":"upstream_stream_error",'
+               '"message":"Stream interrupted; partial output only."}}\n\n')
+        yield "data: [DONE]\n\n"
+        return
     a_data = _assemble_stream(chunks)
     tail = meter_filter.finish()
     if tail:

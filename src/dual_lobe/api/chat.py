@@ -389,6 +389,7 @@ async def chat_completions(
                         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
                     }
                     return JSONResponse(suppressed, status_code=200, headers=_headers({
+                        "X-Dual-Lobe-Run-Id": run_id,
                         "X-Dual-Lobe-Group-Routing": "suppressed",
                         "X-Dual-Lobe-Routing-Reasoning": routing_analysis.reasoning[:200],
                         "X-Dual-Lobe-Routing-Confidence": str(routing_analysis.confidence),
@@ -416,7 +417,8 @@ async def chat_completions(
         except Exception as exc:
             LOG.warning("bidirectional upstream failed model=%s error=%s", alias, type(exc).__name__)
             return JSONResponse({"error": {"type": "upstream_error",
-                                             "message": "Upstream request failed."}}, status_code=502)
+                                             "message": "Upstream request failed."}}, status_code=502,
+                                headers={"X-Dual-Lobe-Run-Id": run_id})
         data = json.loads(result.body)
         private_lobe_data = data.get("dual_lobe") or {}
         safe_memory_messages = private_lobe_data.pop("_memory_messages", None)
@@ -454,6 +456,7 @@ async def chat_completions(
         background = _record_background(principal.tenant_id, memory_space, run_id, memory_messages,
                                         data_for_memory)
         headers = _headers(dict(result.headers))
+        headers["X-Dual-Lobe-Run-Id"] = run_id
         # The JSONResponse from the bidirectional handler has already been
         # decoded and its body is changed above (memory metadata is attached).
         # Never forward the old body's Content-Length to the new response.
@@ -506,7 +509,8 @@ async def chat_completions(
                 gated_stream(payload, run_id, principal.tenant_id, alias, shared_text=shared_text,
                              shared_space=memory_space, on_done=_record),
                 media_type="text/event-stream",
-                headers=_headers({"X-Dual-Lobe-Gated": "on", "X-Dual-Lobe-Streaming": "live",
+                headers=_headers({"X-Dual-Lobe-Run-Id": run_id,
+                                  "X-Dual-Lobe-Gated": "on", "X-Dual-Lobe-Streaming": "live",
                                   "X-Dual-Lobe-Memory-Space": memory_space or "off",
                                   "X-Dual-Lobe-Shared-Entries": shared_entries,
                                   "Cache-Control": "no-cache", "X-Accel-Buffering": "no"}),
@@ -519,6 +523,7 @@ async def chat_completions(
             data["dual_lobe"] = {**(data.get("dual_lobe") or {}), "calls": calltrace.snapshot(),
                                  "server_ms": calltrace.now_ms()}
         gate_headers = _headers(gate_headers)
+        gate_headers["X-Dual-Lobe-Run-Id"] = run_id
         gate_headers["X-Dual-Lobe-Memory-Space"] = memory_space or "off"
         gate_headers["X-Dual-Lobe-Shared-Entries"] = str(shared_entries)
         gate_background = _record_background(
@@ -540,6 +545,8 @@ async def chat_completions(
                 headers={**gate_headers, "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                 background=gate_background,
             )
+        if "error" in data:
+            return JSONResponse(data, status_code=502, headers=gate_headers)
         return JSONResponse(data, status_code=200, headers=gate_headers,
                             background=gate_background)
 

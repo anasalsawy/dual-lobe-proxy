@@ -11,6 +11,7 @@ from dual_lobe.api.auth import Principal
 from dual_lobe.api.schemas import ChatCompletionRequest
 from dual_lobe.b.channels import ObserverContext
 from dual_lobe.core.settings import Settings
+from dual_lobe.gated import handler as gated_handler
 
 
 @pytest.fixture
@@ -32,10 +33,12 @@ def request_path(monkeypatch):
     adapter = SimpleNamespace(buffered=AsyncMock(return_value={
         "choices": [{"message": {"role": "assistant", "content": "result"}, "finish_reason": "stop"}]
     }))
-    monkeypatch.setattr(chat, "get_registry", lambda: SimpleNamespace(
+    registry = SimpleNamespace(
         target=lambda _: SimpleNamespace(enabled=True, model="fake", kind="chat_completions"),
         adapter=lambda _: adapter,
-    ))
+    )
+    monkeypatch.setattr(chat, "get_registry", lambda: registry)
+    monkeypatch.setattr(gated_handler, "get_registry", lambda: registry)
     request = Request({"type": "http", "headers": [], "method": "POST", "path": "/"})
     return request, Principal(1, "tenant", frozenset()), None, adapter
 
