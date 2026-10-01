@@ -439,6 +439,11 @@ async def chat_completions(
         background = _record_background(principal.tenant_id, memory_space, run_id, memory_messages,
                                         data_for_memory)
         headers = _headers(dict(result.headers))
+        # The JSONResponse from the bidirectional handler has already been
+        # decoded and its body is changed above (memory metadata is attached).
+        # Never forward the old body's Content-Length to the new response.
+        headers.pop("content-length", None)
+        headers.pop("Content-Length", None)
         headers["X-Dual-Lobe-Memory-Space"] = memory_space or "off"
         headers["X-Dual-Lobe-Shared-Entries"] = str(shared_entries)
         if payload.get("stream", False):
@@ -447,8 +452,6 @@ async def chat_completions(
             # JSON body, not the newly generated event stream. Forwarding it
             # makes clients fail with “Response content shorter than
             # Content-Length”.
-            headers.pop("content-length", None)
-            headers.pop("Content-Length", None)
             async def _bidirectional_stream():
                 chunk = dict(data)
                 chunk["object"] = "chat.completion.chunk"
