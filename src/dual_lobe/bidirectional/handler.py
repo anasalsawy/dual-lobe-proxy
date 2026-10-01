@@ -490,10 +490,17 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
     answer = _content_text(message.get("content")).strip()
     if not answer:
         raise ValueError(f"Lobe {speaker} returned neither an answer nor a client tool call")
+    # The proxy owns the final verification meter. Remove any meter the
+    # speaking model generated so the user sees only the verifier's rating.
+    answer = answer.split("### 🛡️ Deception Meter", 1)[0].rstrip()
     if consultation_note:
-        # Keep the peer's actual contribution visible to the user, not merely
-        # hidden in the speaker's context where it could be paraphrased away.
-        answer += "\n\n" + consultation_note
+        # The speaker sometimes quotes its peer itself. Keep the exact peer
+        # note visible, but avoid duplicating it when the answer already did.
+        peer_answer = consultation_note.split(" and it said: ", 1)[-1]
+        normalized_peer = re.sub(r"[\W_]+", "", peer_answer).casefold()
+        normalized_answer = re.sub(r"[\W_]+", "", answer).casefold()
+        if normalized_peer and normalized_peer not in normalized_answer:
+            answer += "\\n\\n" + consultation_note
 
     verifier_answer = answer
     if secure and verifier == "A":
