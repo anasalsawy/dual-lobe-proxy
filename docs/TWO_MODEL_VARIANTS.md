@@ -20,7 +20,7 @@ Routing detection on the ordinary general route uses local text/regex checks onl
 
 ## 2. Secure: `sawii/dl-secure`
 
-The secure route adds the local B privacy gate in front of the routed flow. The `clinical` service setting selects this secure route for every request; despite the legacy setting name, it is a Dual-Lobe Proxy mode, not a separate CrewAI repository.
+The secure route adds the local B privacy gate in front of the routed flow. The `sawii/dl-secure` public model ID selects this route for every request. There is no service-wide engine mode.
 
 ### Input boundary
 
@@ -40,7 +40,7 @@ For an A-facing turn, local B reviews A's candidate. For a B-facing turn, remote
 
 ### Local-only enforcement
 
-The secure route calls `_assert_clinical_b_local()` before making the gate request. A B URL is considered local only for localhost, loopback IPs, or `host.docker.internal`. Production must fail closed if the configured endpoint is remote. Testing mode can explicitly relax this check; never use that override for sensitive production traffic.
+The secure route calls `_assert_secure_b_local()` before making the gate request. A B URL is considered local only for localhost, loopback IPs, or `host.docker.internal`. Production must fail closed if the configured endpoint is remote. Testing mode can explicitly relax this check; never use that override for sensitive production traffic.
 
 ### Memory and persistence
 
