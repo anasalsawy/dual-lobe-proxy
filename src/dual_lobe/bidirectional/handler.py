@@ -18,7 +18,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from ..core.settings import get_settings
 from ..core.meter_format import (
     format_deception_meter,
-    is_claim_free_greeting,
     strip_deception_meter,
 )
 from ..provider.adapters import NormalizedRequest, response_dict
@@ -634,7 +633,7 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
       verdict = _parse_verdict(verdict_message)
       from ..gated.handler import _verified_meter
       level, rationale, concerns = _verified_meter(
-          verdict, verifier_answer, evidence + "\\n" + verifier_answer)
+          verdict, verifier_answer, evidence + "\n" + verifier_answer)
       verdict.update(deception_level=level, rationale=rationale,
                      meter_rationale=rationale, concerns=concerns)
     except Exception as exc:  # noqa: BLE001
