@@ -68,23 +68,23 @@ class FakeRegistry:
 
 
 @pytest.mark.asyncio
-async def test_clinical_gate_masks_password_before_a_and_restores_answer(monkeypatch):
+async def test_secure_gate_masks_password_before_a_and_restores_answer(monkeypatch):
 
     gate = {"content": '{"needs_tokenization":true,"categories":["credential"],"rationale":"Secret detected."}'}
     a = {"content": "I can continue with the protected account."}
     review = {"content": '{"deception_level":"GREEN","rationale":"The answer is appropriate."}'}
     registry = FakeRegistry(a_messages=[a], b_messages=[gate, review])
-    registry.adapters["lobe-b-clinical"] = registry.adapters["lobe-b"]
+    registry.adapters["lobe-b-secure"] = registry.adapters["lobe-b"]
     monkeypatch.setattr(handler, "get_registry", lambda: registry)
-    monkeypatch.setattr(handler, "_assert_clinical_b_local", lambda: None)
+    monkeypatch.setattr(handler, "_assert_secure_b_local", lambda: None)
 
     response = await handler.bidirectional_response({
         "model": "sawii/dl-secure", "messages": [
             {"role": "user", "content": "My password is hunter2. Please sign in."}],
-    }, clinical=True)
+    }, secure=True)
     body = json.loads(response.body)
 
-    gate_text = registry.adapters["lobe-b-clinical"].requests[0].messages[-1]["content"]
+    gate_text = registry.adapters["lobe-b-secure"].requests[0].messages[-1]["content"]
     a_text = "\n".join(str(m.get("content")) for m in registry.adapters["lobe-a"].requests[0].messages)
     assert "hunter2" in gate_text  # only the local B gate receives the raw secret
     assert "hunter2" not in a_text
@@ -94,20 +94,20 @@ async def test_clinical_gate_masks_password_before_a_and_restores_answer(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_clinical_b_can_be_user_facing_and_a_verifies_only_tokenized_text(monkeypatch):
+async def test_secure_b_can_be_user_facing_and_a_verifies_only_tokenized_text(monkeypatch):
 
     gate = {"content": '{"needs_tokenization":true,"categories":["credential"],"rationale":"Secret detected."}'}
     b_answer = {"content": "I used password hunter2 for the sign in."}
     a_review = {"content": '{"deception_level":"GREEN","rationale":"The answer is supported."}'}
     registry = FakeRegistry(a_messages=[a_review], b_messages=[gate, b_answer])
-    registry.adapters["lobe-b-clinical"] = registry.adapters["lobe-b"]
+    registry.adapters["lobe-b-secure"] = registry.adapters["lobe-b"]
     monkeypatch.setattr(handler, "get_registry", lambda: registry)
-    monkeypatch.setattr(handler, "_assert_clinical_b_local", lambda: None)
+    monkeypatch.setattr(handler, "_assert_secure_b_local", lambda: None)
 
     response = await handler.bidirectional_response({
         "model": "sawii/dl-secure", "messages": [
             {"role": "user", "content": "Hey B, My password is hunter2. Please sign in."}],
-    }, clinical=True)
+    }, secure=True)
     body = json.loads(response.body)
 
     verifier_text = "\n".join(str(m.get("content")) for m in registry.adapters["lobe-a"].requests[0].messages)
@@ -118,7 +118,7 @@ async def test_clinical_b_can_be_user_facing_and_a_verifies_only_tokenized_text(
 
 
 @pytest.mark.asyncio
-async def test_clinical_a_tool_call_resolves_sensitive_token_at_proxy_boundary(monkeypatch):
+async def test_secure_a_tool_call_resolves_sensitive_token_at_proxy_boundary(monkeypatch):
 
     secret = "alphaSECRET"
     gate = {"content": json.dumps({"needs_tokenization": True, "categories": ["private value"],
@@ -133,15 +133,15 @@ async def test_clinical_a_tool_call_resolves_sensitive_token_at_proxy_boundary(m
             "function": {"name": "protected_action", "arguments": json.dumps({"reference": token})}}]}
 
     registry = FakeRegistry(a_messages=[a_tool_call], b_messages=[gate])
-    registry.adapters["lobe-b-clinical"] = registry.adapters["lobe-b"]
+    registry.adapters["lobe-b-secure"] = registry.adapters["lobe-b"]
     monkeypatch.setattr(handler, "get_registry", lambda: registry)
-    monkeypatch.setattr(handler, "_assert_clinical_b_local", lambda: None)
+    monkeypatch.setattr(handler, "_assert_secure_b_local", lambda: None)
     tools = [{"type": "function", "function": {"name": "protected_action", "parameters": {"type": "object"}}}]
 
     response = await handler.bidirectional_response({
         "model": "sawii/dl-secure", "tools": tools,
         "messages": [{"role": "user", "content": f"Use my private reference {secret}."}],
-    }, clinical=True)
+    }, secure=True)
     body = json.loads(response.body)
     call = body["choices"][0]["message"]["tool_calls"][0]
 
