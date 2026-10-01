@@ -22,6 +22,7 @@ from ..core import stage as stage_mod
 from ..core.engine import tenant_session
 from ..core.redact import redact_payload
 from ..core.settings import get_settings
+from ..core.meter_format import strip_assistant_history_meters
 from ..provider import calltrace
 from ..provider.adapters import resolve_request, response_dict
 from ..provider.registry import get_registry
@@ -290,6 +291,14 @@ async def chat_completions(
     calltrace.begin()
     payload = body.model_dump(exclude_none=True)
     messages = payload["messages"]
+    # Hermes and other clients resend prior assistant turns, including the
+    # proxy-appended meter. Remove those annotations before any model/router
+    # sees the transcript; keep the original user/system/tool content intact.
+    messages, removed_meters = strip_assistant_history_meters(messages)
+    payload["messages"] = messages
+    if removed_meters:
+        LOG.info("stripped proxy meter blocks from incoming assistant history count=%d",
+                 removed_meters)
     if not messages:
         raise HTTPException(status_code=400, detail="messages must be non-empty")
     if len(json.dumps(payload).encode()) > s.gateway_max_request_bytes:

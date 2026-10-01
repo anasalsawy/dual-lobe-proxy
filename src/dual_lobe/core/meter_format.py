@@ -23,6 +23,42 @@ def strip_deception_meter(text: Any) -> str:
     return value[:match.start()].rstrip() if match else value
 
 
+def strip_assistant_history_meters(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Remove old meter annotations from assistant turns received from a client.
+
+    The client transcript can contain meters appended by this proxy on earlier
+    turns. Feeding those annotations back to A encourages the answering model
+    to imitate them. User, system, developer, and tool messages are preserved.
+    Returns a cleaned copy and the number of assistant messages changed.
+    """
+    cleaned: list[dict[str, Any]] = []
+    removed = 0
+    for original in messages:
+        message = dict(original)
+        if message.get("role") == "assistant":
+            content = message.get("content")
+            if isinstance(content, str):
+                clean = strip_deception_meter(content)
+                if clean != content:
+                    message["content"] = clean
+                    removed += 1
+            elif isinstance(content, list):
+                parts = []
+                changed = False
+                for part in content:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        clean = strip_deception_meter(part["text"])
+                        if clean != part["text"]:
+                            part = {**part, "text": clean}
+                            changed = True
+                    parts.append(part)
+                if changed:
+                    message["content"] = parts
+                    removed += 1
+        cleaned.append(message)
+    return cleaned, removed
+
+
 def is_claim_free_greeting(user_text: Any, answer: Any) -> bool:
     """Identify only a plain greeting exchange with no factual content to verify."""
     def normalized(value: Any) -> str:
@@ -88,20 +124,27 @@ def format_deception_meter(
     rationale: str,
     concerns: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Render a prominent rating with a smaller rationale in Markdown clients."""
+    """Render the proxy-owned rating using portable, standard Markdown."""
     normalized = str(level or "YELLOW").upper()
     icon = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴"}.get(normalized, "⚪")
+
+    def md(value: Any) -> str:
+        # Escape untrusted verifier text so it cannot create headings, emphasis,
+        # lists, or HTML in clients with different Markdown implementations.
+        escaped = escape(str(value), quote=False)
+        return re.sub(r"([\\`*_{}\[\]()#+\-.!|>])", r"\\\1", escaped)
+
     lines = [
         "### 🛡️ Deception Meter",
-        f"**{icon} {escape(normalized)}**",
+        f"**{icon} {md(normalized)}**",
     ]
     if rationale:
-        lines.append(f"<small><strong>Rationale:</strong> {escape(str(rationale))}</small>")
+        lines.append(f"> *Rationale:* {md(rationale)}")
     for concern in (concerns or [])[:3]:
-        claim = escape(str(concern.get("claim_quote", "")))
-        reason = escape(str(concern.get("reason", "")))
-        evidence = escape(str(concern.get("evidence_quote", "")))
+        claim = md(concern.get("claim_quote", ""))
+        reason = md(concern.get("reason", ""))
+        evidence = md(concern.get("evidence_quote", ""))
         detail = " — ".join(part for part in (reason, f"Evidence: {evidence}" if evidence else "") if part)
         if claim or detail:
-            lines.append(f"<small>⚠️ {f'“{claim}” — ' if claim else ''}{detail}</small>")
+            lines.append(f"> - ⚠️ {f'“{claim}” — ' if claim else ''}{detail}")
     return "\n\n".join(lines)

@@ -171,7 +171,7 @@ async def test_b_can_speak_use_client_tools_and_a_verifies(monkeypatch):
     assert answer.startswith("My answer from B.\n\n")
     assert "### 🛡️ Deception Meter" in answer
     assert "**🟢 GREEN**" in answer
-    assert "<small><strong>Rationale:</strong> Matches the evidence.</small>" in answer
+    assert "> *Rationale:* Matches the evidence\\." in answer
     assert body["dual_lobe"]["speaker"] == "B"
     assert body["dual_lobe"]["verifier"] == "A"
     assert registry.adapters["lobe-b"].requests[0].tools[0]["function"]["name"] == "search_web"
