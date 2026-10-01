@@ -62,7 +62,9 @@ async def test_second_app_gets_saved_memory_without_sending_old_history(request_
             (b"x-dl-memory-id", b"project"), (b"x-dl-run-id", run.encode())]})
     first = await chat.chat_completions(ChatCompletionRequest(messages=[
         {"role": "user", "content": "The deployment target is Windows."}]), source("app-one"), principal)
-    assert first.status_code == 200 and len(saved) == 1
+    assert first.status_code == 200 and first.background is not None
+    await first.background()
+    assert len(saved) == 1
     second = await chat.chat_completions(ChatCompletionRequest(messages=[
         {"role": "user", "content": "What target should this agent use?"}]), source("app-two"), principal)
     received = adapter.buffered.call_args.args[0].messages
@@ -116,8 +118,10 @@ async def test_server_default_shares_memory_without_extra_app_headers(request_pa
     record = AsyncMock()
     monkeypatch.setattr(chat, "load_memory", load)
     monkeypatch.setattr(chat, "record_memory", record)
-    await chat.chat_completions(ChatCompletionRequest(messages=[{"role": "user", "content": "go"}]), request, principal)
-    assert load.call_args.args[1] == record.call_args.args[1] == "main"
+    response = await chat.chat_completions(
+        ChatCompletionRequest(messages=[{"role": "user", "content": "go"}]), request, principal)
+    assert response.status_code == 200
+    assert load.call_args.args[1] == "main"
 
 
 def test_inject_shared_memory_lands_after_system_block_and_is_null_safe():

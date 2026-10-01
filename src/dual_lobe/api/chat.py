@@ -267,9 +267,12 @@ async def _stream_body(adapter, req, public_model: str, audit: dict, save_memory
     except Exception as exc:
         audit["status"] = "INCOMPLETE"
         audit["error_type"] = type(exc).__name__
-        # Flush any buffered terminal chunks so the client sees finish_reason.
-        for wire in terminal:
-            yield wire
+        # If persistence was part of this response contract, withhold the
+        # buffered stop chunk when saving failed so the client does not treat
+        # an uncommitted turn as complete.
+        if collector is None:
+            for wire in terminal:
+                yield wire
         # Once SSE has started, HTTP status cannot change. Never fabricate stop.
         yield 'data: {"error":{"type":"upstream_stream_error","message":"Stream interrupted; partial output only."}}\n\n'
     finally:
@@ -396,7 +399,8 @@ async def chat_completions(
                 shared = await load_memory(principal.tenant_id, memory_space, messages)
                 shared_text, shared_entries = shared.text, len(shared.entry_ids)
             except Exception:
-                LOG.warning("shared memory load failed run=%s (fail-open)", run_id)
+                LOG.warning("shared memory load failed run=%s; refusing a memory-backed request", run_id)
+                raise HTTPException(503, "Shared memory is unavailable; no model was invoked.") from None
         result = await bidirectional_response({**payload, "stream": False}, run_id, principal.tenant_id, shared_text,
                                               shared_space=memory_space, clinical=clinical_secure)
         data = json.loads(result.body)
@@ -439,6 +443,13 @@ async def chat_completions(
         headers["X-Dual-Lobe-Memory-Space"] = memory_space or "off"
         headers["X-Dual-Lobe-Shared-Entries"] = str(shared_entries)
         if payload.get("stream", False):
+            # bidirectional_response returns a JSONResponse even when this
+            # outer endpoint must expose SSE. Its Content-Length describes the
+            # JSON body, not the newly generated event stream. Forwarding it
+            # makes clients fail with “Response content shorter than
+            # Content-Length”.
+            headers.pop("content-length", None)
+            headers.pop("Content-Length", None)
             async def _bidirectional_stream():
                 chunk = dict(data)
                 chunk["object"] = "chat.completion.chunk"
@@ -461,7 +472,8 @@ async def chat_completions(
                 shared = await load_memory(principal.tenant_id, memory_space, messages)
                 shared_text, shared_entries = shared.text, len(shared.entry_ids)
             except Exception:
-                LOG.warning("shared memory load failed run=%s (fail-open)", run_id)
+                LOG.warning("shared memory load failed run=%s; refusing a memory-backed request", run_id)
+                raise HTTPException(503, "Shared memory is unavailable; no model was invoked.") from None
         if payload.get("stream", False):
             # A's text streams as it is generated; B's meter arrives as the last chunk.
             async def _record(final):

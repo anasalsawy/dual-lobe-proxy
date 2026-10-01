@@ -125,9 +125,9 @@ async def test_memory_search_miss_returns_explicit_no_match(monkeypatch):
 async def test_delegate_and_consult_call_b_and_stay_inline(monkeypatch):
     seen = []
 
-    async def fake_b(system, user, max_tokens):
+    async def fake_b(system, user, max_tokens, alias="lobe-b"):
         seen.append((system, max_tokens, user))
-        return "B deliverable" if system == pt.DELEGATE_SYSTEM else "B advice"
+        return "B deliverable" if "DELEGATED TASK:" in user else "B advice"
 
     monkeypatch.setattr(pt, "_call_b_text", fake_b)
     messages = [{"role": "user", "content": "do the task"}]

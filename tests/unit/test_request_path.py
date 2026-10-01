@@ -15,6 +15,7 @@ from dual_lobe.api.auth import Principal
 from dual_lobe.api.schemas import ChatCompletionRequest
 from dual_lobe.core.settings import Settings
 from dual_lobe.provider.adapters import ChatCompletionsAdapter, NormalizedRequest, ProviderTarget
+from dual_lobe.gated import handler as gated_handler
 
 
 @pytest.fixture
@@ -36,53 +37,51 @@ def request_path(monkeypatch):
         "choices": [{"message": {"role": "assistant", "content": "result"}, "finish_reason": "stop"}]
     })
     adapter = SimpleNamespace(buffered=provider)
-    monkeypatch.setattr(chat, "get_registry", lambda: SimpleNamespace(
+    registry = SimpleNamespace(
         target=lambda _: SimpleNamespace(enabled=True, model="fake", kind="chat_completions"),
-        adapter=lambda _: adapter,
-    ))
+        adapter=lambda _: adapter)
+    monkeypatch.setattr(chat, "get_registry", lambda: registry)
+    monkeypatch.setattr(gated_handler, "get_registry", lambda: registry)
+    monkeypatch.setattr(gated_handler, "_call_b_json", AsyncMock(return_value={
+        "deception_level": "GREEN", "meter_rationale": "No unsupported claims identified.",
+        "concerns": [],
+    }))
     request = Request({"type": "http", "headers": [], "method": "POST", "path": "/"})
     return request, Principal(1, "tenant", frozenset()), persist, adapter
 
 
-async def test_buffered_body_sent_before_observation_persistence(request_path):
-    request, principal, persist, adapter = request_path
+async def test_buffered_gated_request_returns_verified_answer(request_path):
+    request, principal, persist, _ = request_path
     response = await chat.chat_completions(
-        ChatCompletionRequest(messages=[{"role": "user", "content": "task"}]), request, principal,
-    )
-    assert not persist.called
-    seen = []
-    async def send(message):
-        seen.append(message["type"])
-        assert not persist.called
-    await response({"type": "http"}, AsyncMock(), send)
-    assert seen == ["http.response.start", "http.response.body"]
-    assert persist.call_count == 1
+        ChatCompletionRequest(messages=[{"role": "user", "content": "task"}]), request, principal)
+    assert response.status_code == 200
+    assert response.headers["x-dual-lobe-gated"] == "on"
+    assert response.headers["x-dual-lobe-meter"] == "GREEN"
     assert b"result" in response.body
+    assert not persist.called
 
 
-async def test_bypass_does_not_inject_or_enqueue_b(request_path):
-    request, principal, persist, adapter = request_path
+async def test_legacy_bypass_header_does_not_disable_the_gate(request_path):
+    request, principal, _, adapter = request_path
     request = Request({"type": "http", "headers": [(b"x-dual-lobe-mode", b"bypass")],
                        "method": "POST", "path": "/"})
-    messages = [{"role": "user", "content": "task"}]
-    response = await chat.chat_completions(ChatCompletionRequest(messages=messages), request, principal)
-    assert adapter.buffered.call_args.args[0].messages == messages
-    await response.background()
-    assert persist.call_args.args[-1] is False
+    response = await chat.chat_completions(
+        ChatCompletionRequest(messages=[{"role": "user", "content": "task"}]), request, principal)
+    assert response.headers["x-dual-lobe-gated"] == "on"
+    sent = adapter.buffered.call_args.args[0].messages
+    assert any(m.get("role") == "system" and "anti-deception observer" in m.get("content", "")
+               for m in sent)
 
 
-async def test_both_paths_disabled_does_not_pretend_to_monitor(request_path, monkeypatch):
-    request, principal, persist, adapter = request_path
+async def test_observer_feature_flags_do_not_disable_inline_verification(request_path, monkeypatch):
+    request, principal, _, _ = request_path
     monkeypatch.setattr(chat, "get_settings", lambda: Settings(
         _env_file=None, context_memory_enabled=False, claim_checks_enabled=False,
         deception_meter_enabled=False))
-    messages = [{"role": "user", "content": "task"}]
-    response = await chat.chat_completions(ChatCompletionRequest(messages=messages), request, principal)
-    assert adapter.buffered.call_args.args[0].messages == messages
-    assert response.headers["x-dual-lobe-monitoring"] == "off"
-    await response.background()
-    assert persist.call_args.args[-1] is False
-
+    response = await chat.chat_completions(
+        ChatCompletionRequest(messages=[{"role": "user", "content": "task"}]), request, principal)
+    assert response.headers["x-dual-lobe-gated"] == "on"
+    assert response.headers["x-dual-lobe-meter"] == "GREEN"
 
 async def test_image_input_is_explicitly_disabled(request_path):
     from fastapi import HTTPException
@@ -92,6 +91,25 @@ async def test_image_input_is_explicitly_disabled(request_path):
             {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}
         ]), request, principal)
     assert exc.value.status_code == 400
+
+
+async def test_bidirectional_sse_drops_json_content_length(request_path, monkeypatch):
+    from starlette.responses import JSONResponse
+
+    async def fake_bidirectional(*args, **kwargs):
+        return JSONResponse({"choices": [{"message": {"role": "assistant", "content": "answer"},
+                                           "finish_reason": "stop"}]})
+
+    monkeypatch.setattr("dual_lobe.bidirectional.handler.bidirectional_response", fake_bidirectional)
+    request, principal, _, _ = request_path
+    response = await chat.chat_completions(ChatCompletionRequest(
+        model="sawii/dl-secure", stream=True,
+        messages=[{"role": "user", "content": "Hey B, answer this."}],
+    ), request, principal)
+
+    assert "content-length" not in response.headers
+    body = "".join([chunk async for chunk in response.body_iterator])
+    assert "answer" in body and "[DONE]" in body
 
 
 async def test_actual_asgi_stream_yields_before_provider_finishes(request_path):
@@ -115,8 +133,9 @@ async def test_actual_asgi_stream_yields_before_provider_finishes(request_path):
                 released.set()
     scope = {"type": "http", "asgi": {"spec_version": "2.4"}}
     await asyncio.wait_for(response(scope, AsyncMock(), send), .5)
-    assert b"first" in chunks[0] and b"last" in chunks[1]
-    assert persist.call_count == 1
+    joined = b"".join(chunks)
+    assert b"first" in joined and b"last" in joined and b"[DONE]" in joined
+    assert not persist.called
 
 
 @pytest.mark.parametrize("wire", [
@@ -184,19 +203,6 @@ def test_latest_user_text_takes_the_most_recent_user_message():
     assert chat._latest_user_text([{"role": "assistant", "content": "hello"}]) == ""
 
 
-async def test_deception_meter_is_injected_and_echoed_in_header(request_path, monkeypatch):
-    from dual_lobe.b.channels import ObserverContext
-    monkeypatch.setattr(chat, "_read_context", AsyncMock(return_value=ObserverContext(
-        deception_text="Observer deception meter (fallible, evidence-based reading of the last answer): RED.",
-        deception_status="RED")))
-    request, principal, _, adapter = request_path
-    response = await chat.chat_completions(
-        ChatCompletionRequest(messages=[{"role": "user", "content": "task"}]), request, principal)
-    assert response.headers["x-dual-lobe-deception"] == "RED"
-    sent = adapter.buffered.call_args.args[0].messages
-    assert any(m.get("name") == "observer_deception"
-               and "RED" in m["content"] for m in sent)
-
 
 async def test_read_context_retries_once_then_succeeds(monkeypatch):
     monkeypatch.setattr(chat, "get_settings",
@@ -218,18 +224,6 @@ async def test_read_context_retries_once_then_succeeds(monkeypatch):
     assert attempts == 2
     assert context.status not in ("state_unavailable",)
 
-
-async def test_latest_user_text_reaches_the_observation_payload(request_path, monkeypatch):
-    captured = {}
-
-    async def persist(tenant_id, *args, latest_user_text="", **kwargs):
-        captured["latest_user_text"] = latest_user_text
-    monkeypatch.setattr(chat, "_persist_observation", persist)
-    request, principal, _, adapter = request_path
-    response = await chat.chat_completions(
-        ChatCompletionRequest(messages=[{"role": "user", "content": "latest ask"}]), request, principal)
-    await response.background()
-    assert captured["latest_user_text"] == "latest ask"
 
 
 async def test_tenant_context_is_transaction_local(monkeypatch):

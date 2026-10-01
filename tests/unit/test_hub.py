@@ -150,7 +150,7 @@ def test_registry_exposes_only_the_two_supported_public_models(monkeypatch):
     assert {item["id"] for item in registry.models()} == {
         "sawii/dl-bidirectional", "sawii/dl-secure"
     }
-    assert "sawii/dl-bidirectional" not in targets
+    assert "sawii/dl-bidirectional" in targets
     assert registry.target().alias == "sawii/dl-bidirectional"
 
 
