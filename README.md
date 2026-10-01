@@ -9,7 +9,7 @@ An OpenAI-compatible inference proxy with two supported model variants. Both var
 | `sawii/dl-bidirectional` | General work | Configured provider model | Configured provider model; both lobes can speak and use caller tools; B verifies A by default |
 | `sawii/dl-secure` | Sensitive/private work | Configured provider model; receives tokenized sensitive values | Local-only model; checks input before A, can speak/use tools, and verifies A |
 
-The proxy exposes only these two public model IDs in `GET /v1/models` and rejects other model IDs at the chat endpoint. Internal lobe targets are implementation details, not public models.
+The proxy exposes only these two public model IDs in `GET /v1/models` and rejects every other model ID at the chat endpoint. Internal A/B provider targets are not separate products.
 
 ## Conversation routing
 
@@ -63,4 +63,4 @@ For database integration tests, run `uv run --locked pytest -q` with a permitted
 
 ## Design notes
 
-The implementation details, request-by-request routing matrix, privacy gate contract, token lifecycle, and test coverage are in [Two model variants](docs/TWO_MODEL_VARIANTS.md). Other design notes are historical and are not active model specifications.
+The implementation details, request-by-request routing matrix, privacy gate contract, token lifecycle, and test coverage are in [Two model variants](docs/TWO_MODEL_VARIANTS.md). The repository contains only the two variants documented here; group-chat routing and A/B conversation routing are separate features described in [Recipient routing](docs/RECIPIENT_ROUTING.md).

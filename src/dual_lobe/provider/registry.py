@@ -23,7 +23,7 @@ def env_targets() -> dict[str, ProviderTarget]:
 
     s = get_settings()
     base = ProviderTarget(
-        alias="sawii/dual-lobe-old",
+        alias="sawii/dl-bidirectional",
         base_url=s.a_base_url,
         api_key=s.a_api_key,
         model=s.a_model,
@@ -34,10 +34,7 @@ def env_targets() -> dict[str, ProviderTarget]:
     base_fields.pop("alias", None)
     bidirectional = ProviderTarget(alias="sawii/dl-bidirectional", **base_fields)
     secure = ProviderTarget(alias="sawii/dl-secure", **base_fields)
-    # Internal target retained for the director RPC; never listed as a model.
-    dual_lobe = ProviderTarget(alias="sawii/dual-lobe", **base_fields)
-    # Internal aliases for B-lobe shadow cycles and director mode.
-    # Not exposed in /v1/models (filtered out by user_facing_models set).
+    # Internal aliases for the two lobes; never listed as user-facing models.
     lobe_a = ProviderTarget(
         alias="lobe-a",
         base_url=s.a_base_url,
@@ -66,7 +63,6 @@ def env_targets() -> dict[str, ProviderTarget]:
     )
     return {
         "lobe-b-clinical": lobe_b_clinical,
-        "sawii/dual-lobe": dual_lobe,
         "sawii/dl-bidirectional": bidirectional,
         "sawii/dl-secure": secure,
         "lobe-a": lobe_a,
@@ -94,9 +90,7 @@ async def load_db_targets(session: AsyncSession) -> dict[str, ProviderTarget]:
 
 # Env-configured aliases go through the round-robin hub when hub slots exist;
 # lobe-b rotates over B's slots, every other env alias is lobe A.
-_HUB_ROLES = {alias: "a" for alias in ("sawii/dual-lobe", "lobe-a")}
-_HUB_ROLES["sawii/dl-bidirectional"] = "a"
-_HUB_ROLES["sawii/dl-secure"] = "a"
+_HUB_ROLES = {alias: "a" for alias in ("sawii/dl-bidirectional", "sawii/dl-secure", "lobe-a")}
 _HUB_ROLES["lobe-b"] = "b"
 
 

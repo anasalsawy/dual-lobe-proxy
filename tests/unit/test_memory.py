@@ -170,68 +170,6 @@ async def test_record_background_records_response_messages(monkeypatch):
     assert sent is messages and responses == [data["choices"][0]["message"]]
 
 
-async def test_dialogue_branch_loads_injects_and_records_memory(request_path, monkeypatch):
-    request, principal, _, _ = request_path
-    request = Request({"type": "http", "method": "POST", "path": "/",
-                       "headers": [(b"x-dl-memory-id", b"project")]})
-    monkeypatch.setattr(chat, "load_memory",
-                        AsyncMock(return_value=memory.LoadedMemory("project", "slice text", (7,))))
-    recorded = []
-
-    async def record(tenant, space, run_id, call_id, messages, responses):
-        recorded.append((space, responses))
-
-    monkeypatch.setattr(chat, "record_memory", record)
-    captured = {}
-
-    async def fake_coauthor(payload, run_id, tenant_id, alias, *, shared_text=None):
-        captured["shared_text"] = shared_text
-        return ({"id": "c", "choices": [{"message": {"role": "assistant", "content": "A: ok"},
-                                          "finish_reason": "stop"}]},
-                {"X-Dual-Lobe-Coauthor": "on"})
-
-    monkeypatch.setattr("dual_lobe.coauthor.handler.coauthor_response", fake_coauthor)
-    response = await chat.chat_completions(
-        ChatCompletionRequest(messages=[{"role": "user", "content": "task"}],
-                              model="sawii/dialogue"), request, principal)
-    assert captured["shared_text"] == "slice text"
-    assert response.headers["x-dual-lobe-memory-space"] == "project"
-    assert response.headers["x-dual-lobe-shared-entries"] == "1"
-    assert response.background is not None
-    await response.background()
-    assert recorded and recorded[0][0] == "project"
-    assert recorded[0][1][0]["content"] == "A: ok"
-
-
-async def test_dialogue_branch_load_failure_fails_open(request_path, monkeypatch):
-    request, principal, _, _ = request_path
-    request = Request({"type": "http", "method": "POST", "path": "/",
-                       "headers": [(b"x-dl-memory-id", b"project")]})
-    monkeypatch.setattr(chat, "load_memory", AsyncMock(side_effect=OSError("db down")))
-    recorded = []
-
-    async def record(*args):
-        recorded.append(args)
-
-    monkeypatch.setattr(chat, "record_memory", record)
-    captured = {}
-
-    async def fake_coauthor(payload, run_id, tenant_id, alias, *, shared_text=None):
-        captured["shared_text"] = shared_text
-        return ({"id": "c", "choices": [{"message": {"role": "assistant", "content": "ok"},
-                                          "finish_reason": "stop"}]}, {})
-
-    monkeypatch.setattr("dual_lobe.coauthor.handler.coauthor_response", fake_coauthor)
-    response = await chat.chat_completions(
-        ChatCompletionRequest(messages=[{"role": "user", "content": "task"}],
-                              model="sawii/dialogue"), request, principal)
-    assert response.status_code == 200
-    assert captured["shared_text"] is None
-    assert response.headers["x-dual-lobe-shared-entries"] == "0"
-    await response.background()
-    assert recorded and recorded[0][1] == "project"
-
-
 async def test_gated_branch_passes_shared_memory_and_records_in_background(request_path, monkeypatch):
     request, principal, _, _ = request_path
     request = Request({"type": "http", "method": "POST", "path": "/",
@@ -256,7 +194,7 @@ async def test_gated_branch_passes_shared_memory_and_records_in_background(reque
     monkeypatch.setattr("dual_lobe.gated.handler.gated_response", fake_gated)
     response = await chat.chat_completions(
         ChatCompletionRequest(messages=[{"role": "user", "content": "task"}],
-                              model="sawii/dl-gated"), request, principal)
+                              model="sawii/dl-bidirectional"), request, principal)
     assert captured == {"shared_text": "slice text", "shared_space": "project"}
     assert response.headers["x-dual-lobe-memory-space"] == "project"
     assert response.headers["x-dual-lobe-shared-entries"] == "1"
@@ -289,48 +227,7 @@ async def test_gated_branch_streams_with_record_background(request_path, monkeyp
     monkeypatch.setattr("dual_lobe.gated.handler.gated_stream", fake_stream)
     response = await chat.chat_completions(
         ChatCompletionRequest(messages=[{"role": "user", "content": "task"}],
-                              model="sawii/dl-gated", stream=True), request, principal)
+                              model="sawii/dl-bidirectional", stream=True), request, principal)
     body = "".join([chunk async for chunk in response.body_iterator])
     assert "[DONE]" in body
     assert recorded    # memory is recorded once the live stream has finished
-
-
-async def test_coauthor_injects_shared_memory_without_mutating_canonical(monkeypatch):
-    from dual_lobe.coauthor import handler as coauthor
-    from dual_lobe.core.settings import Settings
-    monkeypatch.setattr(coauthor, "get_settings", lambda: Settings(_env_file=None))
-    prompts: list[str] = []
-
-    async def fake_call_b(system, user, *, max_tokens=None):
-        prompts.append(user)
-        if len(prompts) == 1:
-            return {"user_for_a": "task", "to_a": "", "b_only": ""}
-        return {"action": "PASS", "reply_to_a": "", "reply_to_user": "",
-                "coauthor_to_a": "", "coauthor_to_user": "",
-                "verification": {"level": "GREEN", "to_a": "",
-                                 "to_user": "checked", "rationale": "",
-                                 "concerns": []}}
-
-    monkeypatch.setattr(coauthor, "_call_b", fake_call_b)
-    a_messages_seen = {}
-
-    async def fake_buffered(req):
-        a_messages_seen["messages"] = req.messages
-        return {"choices": [{"message": {"role": "assistant", "content": "draft"}}]}
-
-    monkeypatch.setattr(coauthor, "get_registry",
-                        lambda: SimpleNamespace(adapter=lambda _: SimpleNamespace(buffered=fake_buffered)))
-    canonical = [{"role": "system", "content": "rules"},
-                 {"role": "user", "content": "task"}]
-    payload = {"messages": canonical, "temperature": 0}
-    out, headers = await coauthor.coauthor_response(
-        payload, "run-1", 1, "sawii/dialogue", shared_text="slice text")
-    assert "choices" in out and headers["X-Dual-Lobe-Coauthor"] == "on"
-    assert canonical == [{"role": "system", "content": "rules"},
-                         {"role": "user", "content": "task"}]
-    assert "shared_memory" in prompts[0]
-    assert "slice text" in prompts[0]
-    injected = next(m for m in a_messages_seen["messages"]
-                    if m.get("name") == "shared_memory")
-    assert injected["content"] == "slice text"
-    assert a_messages_seen["messages"][-1]["content"] == "task"

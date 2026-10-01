@@ -52,7 +52,6 @@ class FakeRegistry:
             "sawii/dl-bidirectional": fake_target("sawii/dl-bidirectional"),
             "sawii/dl-secure": fake_target("sawii/dl-secure"),
             "lobe-a": fake_target("lobe-a"), "lobe-b": fake_target("lobe-b"),
-            "sawii/dual-lobe": fake_target("sawii/dual-lobe"),
         }
 
     def target(self, alias: str | None = None):

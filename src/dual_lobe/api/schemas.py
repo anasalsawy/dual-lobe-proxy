@@ -1,7 +1,7 @@
 """Pydantic wire contracts (OpenAI-compatible + dual-lobe extension endpoints)."""
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -27,13 +27,6 @@ class ChatCompletionRequest(BaseModel):
     parallel_tool_calls: bool | None = None
     stream_options: dict[str, Any] | None = None
     max_completion_tokens: int | None = None
-    # Dual-lobe transport controls. These are ignored by ordinary model paths.
-    dual_lobe_inline_exchange: bool | None = None
-    dual_lobe_live_events: bool | None = None
-    dual_lobe_three_way: bool | None = None
-    dual_lobe_three_way_grace_ms: int | None = Field(default=None, ge=0, le=30000)
-
-
 class EventIngest(BaseModel):
     kind: str = Field(min_length=1, max_length=64)
     run_id: str | None = None
@@ -64,9 +57,3 @@ class HealthResponse(BaseModel):
     status: str
     ledger: str
     registry: str
-
-
-class ThreeWayIntervention(BaseModel):
-    content: str = Field(min_length=1, max_length=8000)
-    to: Literal["A", "B", "both"] | None = None
-    idempotency_key: str | None = Field(default=None, max_length=256)

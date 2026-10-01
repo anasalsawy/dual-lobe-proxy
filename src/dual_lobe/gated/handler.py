@@ -38,7 +38,6 @@ from ..proxy.tools import (
     proxy_tool_schemas,
     strip_proxy_calls,
 )
-from ..roles import get_role_persona
 from ..state.memory import inject_shared_memory, search_memory
 from .prompts import (
     DOWNSTREAM_CONTRACT,
@@ -168,10 +167,43 @@ async def _call_b_json(system_prompt: str, user_prompt: str, contract: str) -> d
                 content = content[:-3]
             content = content.strip()
         try:
-            return json.loads(content)
+            parsed = json.loads(content)
+            if not isinstance(parsed, dict):
+                last_error = ValueError("B returned JSON that was not an object")
+                continue
+            return parsed
         except json.JSONDecodeError as exc:
             last_error = exc
     raise last_error
+
+
+def _verified_meter(value: Any, answer: str, evidence: str) -> tuple[str, str, list[dict[str, Any]]]:
+    """Validate B's rating against its contract; incomplete verification is YELLOW."""
+    if not isinstance(value, dict):
+        return "YELLOW", "Verifier returned no valid rating; the answer remains unverified.", []
+    level = str(value.get("deception_level") or "").strip().upper()
+    rationale = str(value.get("meter_rationale") or "").strip()
+    raw_concerns = value.get("concerns")
+    concerns = [c for c in raw_concerns if isinstance(c, dict)] if isinstance(raw_concerns, list) else []
+    unverified = value.get("unverified") or []
+    missing = value.get("missing") or []
+
+    if level not in {"GREEN", "YELLOW", "RED"} or not rationale:
+        return "YELLOW", "Verifier returned an incomplete rating; the answer remains unverified.", concerns
+    if level == "GREEN" and (concerns or unverified or missing):
+        return "YELLOW", "Verifier reported unresolved claims or evidence gaps; the answer remains unverified.", concerns
+    if level == "RED":
+        grounded = any(
+            bool(str(c.get("claim_quote") or "").strip())
+            and bool(str(c.get("evidence_quote") or "").strip())
+            and str(c.get("claim_quote") or "").strip() in answer
+            and str(c.get("evidence_quote") or "").strip() in evidence
+            and bool(str(c.get("reason") or "").strip())
+            for c in concerns
+        )
+        if not grounded:
+            return "YELLOW", "RED was returned without a claim and supporting evidence quote; the answer remains unverified.", concerns
+    return level, rationale[:1200], concerns
 
 
 async def _resolve_proxy_tools(
@@ -530,11 +562,6 @@ def _prepare(payload: dict[str, Any], run_id: str, public_model: str,
     last_meter = _get_meter(run_id)
     injections = [OBSERVATION_DISCLAIMER]
 
-    # Inject hierarchy role persona if this is a dl-dialogue alias
-    role_persona = get_role_persona(public_model)
-    if role_persona:
-        injections.append(role_persona)
-
     if last_meter:
         warning = _build_meter_warning(last_meter)
         if warning:
@@ -761,13 +788,6 @@ async def _complete(
             f"{json.dumps(a_tool_calls, ensure_ascii=False)[:2000]}\n\n"
         )
 
-    # Check if agent name is detectable from the system prompt
-    # Only warn for multi-agent modes (dl-dialogue, dl-dialogue1/2/3)
-    multi_agent_aliases = {"sawii/dl-dialogue", "sawii/dl-dialogue1", "sawii/dl-dialogue2", "sawii/dl-dialogue3"}
-    agent_name_known = True  # default for single-agent modes
-    if public_model in multi_agent_aliases:
-        agent_name_known = _detect_agent_name(messages) is not None
-
     b_downstream: dict = {}
     handoff: dict[str, Any] = {}
     b_tool_calls: list[dict[str, Any]] = []
@@ -777,17 +797,20 @@ async def _complete(
                 _call_b_json(b_system, downstream_prompt, b_contract),
                 timeout=s.b_timeout,
             )
-        deception_level = b_downstream.get("deception_level", "GREEN").upper()
-        meter_rationale = b_downstream.get("meter_rationale", "No deception detected.")
-        concerns = b_downstream.get("concerns", [])
+        evidence_text = _messages_to_text(messages) + "\n" + _extract_tool_evidence(messages)
+        deception_level, meter_rationale, concerns = _verified_meter(
+            b_downstream, str(a_content or ""), evidence_text)
+        b_downstream["deception_level"] = deception_level
+        b_downstream["meter_rationale"] = meter_rationale
+        b_downstream["concerns"] = concerns
         if handoff_on:
             handoff = _extract_handoff(b_downstream)
         LOG.info("gated downstream B rated run=%s level=%s handoff=%s",
                  run_id, deception_level, handoff or "off")
     except Exception as exc:
-        LOG.warning("gated downstream B failed run=%s: %s — failing open (GREEN)", run_id, exc)
-        deception_level = "GREEN"
-        meter_rationale = "verification unavailable"
+        LOG.warning("gated downstream B failed run=%s: %s — marking unverified (YELLOW)", run_id, exc)
+        deception_level = "YELLOW"
+        meter_rationale = "Independent verification was unavailable; the answer remains unverified."
         concerns = []
         handoff = {}
 
@@ -876,9 +899,12 @@ async def _complete(
                     _call_b_json(b_system, recheck_prompt, b_contract),
                     timeout=s.b_timeout,
                 )
-                deception_level = b_recheck.get("deception_level", "GREEN").upper()
-                meter_rationale = b_recheck.get("meter_rationale", "")
-                concerns = b_recheck.get("concerns", [])
+                evidence_text = _messages_to_text(messages) + "\n" + _extract_tool_evidence(messages)
+                deception_level, meter_rationale, concerns = _verified_meter(
+                    b_recheck, str(a_content2 or ""), evidence_text)
+                b_recheck["deception_level"] = deception_level
+                b_recheck["meter_rationale"] = meter_rationale
+                b_recheck["concerns"] = concerns
                 if handoff_on:
                     handoff = _extract_handoff(b_recheck)
                     await _memory_search_into(run_id, tenant_id, shared_space, handoff)
@@ -891,7 +917,12 @@ async def _complete(
                 headers["X-Dual-Lobe-Flip-Back"] = "applied"
                 _handoff_headers(headers, handoff)
             except Exception as exc:
-                LOG.warning("gated recheck failed run=%s: %s", run_id, exc)
+                LOG.warning("gated recheck failed run=%s: %s — marking revised answer unverified", run_id, exc)
+                deception_level = "YELLOW"
+                meter_rationale = "Revised answer could not be independently verified."
+                concerns = []
+                headers["X-Dual-Lobe-Meter"] = deception_level
+                headers["X-Dual-Lobe-Meter-Rationale"] = meter_rationale[:300]
         except Exception as exc:
             LOG.warning("gated flip-back failed run=%s: %s — forwarding original", run_id, exc)
 
@@ -931,14 +962,6 @@ async def _complete(
                 meter_line += (f"\n> ⚠️ \"{c.get('claim_quote', '')}\" — "
                                f"{c.get('reason', '')} — evidence: "
                                f"\"{c.get('evidence_quote', '')}\"")
-
-        # Warn if agent name not found in multi-agent mode
-        if not agent_name_known:
-            meter_line += (
-                "\n> \n> ⚠️ **Setup Warning:** Agent name not found in system prompt. "
-                "Set agent names in the system prompt (e.g. 'You are Alice') for "
-                "proper addressing and task assignment in multi-agent mode."
-            )
 
         for choice in a_data.get("choices", []):
             msg = choice.get("message", {})

@@ -1,6 +1,6 @@
 # Two model variants: routing and privacy contract
 
-This document is the current implementation contract for the two public variants in the Dual-Lobe Proxy. The chat endpoint accepts only `sawii/dl-bidirectional` and `sawii/dl-secure`, aside from the separately enabled director RPC. Other branch/engine descriptions are historical and do not define the public model surface.
+This document is the current implementation contract for the two public variants in the Dual-Lobe Proxy. The chat endpoint accepts only `sawii/dl-bidirectional` and `sawii/dl-secure`. Internal A/B provider targets are implementation details and cannot be called as models.
 
 ## 1. General: `sawii/dl-bidirectional`
 
@@ -62,4 +62,14 @@ A/B provider slots configured in the provider hub can round-robin general lobe c
 
 ## 4. Tests
 
-`tests/unit/test_bidirectional.py` covers default/direct speaker selection, both consultation directions, both handoff directions, tagged tool continuations, both lobes' caller-tool access, secure input masking, B-as-speaker with sanitized A verification, and proxy token resolution for a protected A tool call. `tests/unit/test_engines.py` covers the separately callable legacy clinical engine; it is not the public secure route.
+`tests/unit/test_bidirectional.py` covers default/direct speaker selection, both consultation directions, both handoff directions, tagged tool continuations, both lobes' caller-tool access, secure input masking, B-as-speaker with sanitized A verification, and proxy token resolution for a protected A tool call. The public-model contract tests assert that only these two IDs are listed and accepted.
+
+## 5. Deception meter
+
+B reviews A's candidate against the supplied conversation, tool requests/results, and any evidence gathered for that run. The review checks whether action and completion claims match tool evidence, whether claims are unsupported or contradict the record, whether certainty or framing misleads, and whether relevant limits or failures were omitted. B returns a level, rationale, concerns, unverified claims, and quote-level evidence where applicable.
+
+- `GREEN`: no material concern detected in the supplied record. This does not prove truth or successful execution.
+- `YELLOW`: a material claim is unsupported, evidence is missing or uncertain, or B's review could not be validated.
+- `RED`: a material claim conflicts with the supplied evidence; the rating must include claim and evidence quotes.
+
+The proxy validates the output before displaying the meter. Missing, malformed, or unavailable verification cannot produce GREEN; it degrades to YELLOW. The meter is a fallible evidence-based assessment, not a claim about intent.

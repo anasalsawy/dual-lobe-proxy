@@ -69,7 +69,6 @@ class FakeRegistry:
 
 @pytest.mark.asyncio
 async def test_clinical_gate_masks_password_before_a_and_restores_answer(monkeypatch):
-    from dual_lobe.engines import respond
 
     gate = {"content": '{"needs_tokenization":true,"categories":["credential"],"rationale":"Secret detected."}'}
     a = {"content": "I can continue with the protected account."}
@@ -77,7 +76,7 @@ async def test_clinical_gate_masks_password_before_a_and_restores_answer(monkeyp
     registry = FakeRegistry(a_messages=[a], b_messages=[gate, review])
     registry.adapters["lobe-b-clinical"] = registry.adapters["lobe-b"]
     monkeypatch.setattr(handler, "get_registry", lambda: registry)
-    monkeypatch.setattr(respond, "_assert_clinical_b_local", lambda: None)
+    monkeypatch.setattr(handler, "_assert_clinical_b_local", lambda: None)
 
     response = await handler.bidirectional_response({
         "model": "sawii/dl-secure", "messages": [
@@ -96,7 +95,6 @@ async def test_clinical_gate_masks_password_before_a_and_restores_answer(monkeyp
 
 @pytest.mark.asyncio
 async def test_clinical_b_can_be_user_facing_and_a_verifies_only_tokenized_text(monkeypatch):
-    from dual_lobe.engines import respond
 
     gate = {"content": '{"needs_tokenization":true,"categories":["credential"],"rationale":"Secret detected."}'}
     b_answer = {"content": "I used password hunter2 for the sign in."}
@@ -104,7 +102,7 @@ async def test_clinical_b_can_be_user_facing_and_a_verifies_only_tokenized_text(
     registry = FakeRegistry(a_messages=[a_review], b_messages=[gate, b_answer])
     registry.adapters["lobe-b-clinical"] = registry.adapters["lobe-b"]
     monkeypatch.setattr(handler, "get_registry", lambda: registry)
-    monkeypatch.setattr(respond, "_assert_clinical_b_local", lambda: None)
+    monkeypatch.setattr(handler, "_assert_clinical_b_local", lambda: None)
 
     response = await handler.bidirectional_response({
         "model": "sawii/dl-secure", "messages": [
@@ -121,7 +119,6 @@ async def test_clinical_b_can_be_user_facing_and_a_verifies_only_tokenized_text(
 
 @pytest.mark.asyncio
 async def test_clinical_a_tool_call_resolves_sensitive_token_at_proxy_boundary(monkeypatch):
-    from dual_lobe.engines import respond
 
     secret = "alphaSECRET"
     gate = {"content": json.dumps({"needs_tokenization": True, "categories": ["private value"],
@@ -138,7 +135,7 @@ async def test_clinical_a_tool_call_resolves_sensitive_token_at_proxy_boundary(m
     registry = FakeRegistry(a_messages=[a_tool_call], b_messages=[gate])
     registry.adapters["lobe-b-clinical"] = registry.adapters["lobe-b"]
     monkeypatch.setattr(handler, "get_registry", lambda: registry)
-    monkeypatch.setattr(respond, "_assert_clinical_b_local", lambda: None)
+    monkeypatch.setattr(handler, "_assert_clinical_b_local", lambda: None)
     tools = [{"type": "function", "function": {"name": "protected_action", "parameters": {"type": "object"}}}]
 
     response = await handler.bidirectional_response({
@@ -250,7 +247,7 @@ async def test_handoff_changes_user_facing_lobe_and_gives_new_speaker_tools(monk
     registry = FakeRegistry(scripted["A"], scripted["B"])
     monkeypatch.setattr(handler, "get_registry", lambda: registry)
     response = await handler.bidirectional_response({
-        "model": "sawii/dl-gated", "tools": [client_tool],
+        "model": "sawii/dl-bidirectional", "tools": [client_tool],
         "messages": [{"role": "user", "content": f"Hey {from_lobe}, please hand this to the other lobe."}],
     })
     body = json.loads(response.body)
@@ -274,7 +271,7 @@ async def test_a_consults_b_privately_and_b_consults_a_privately(monkeypatch):
         )
         monkeypatch.setattr(handler, "get_registry", lambda registry=registry: registry)
         response = await handler.bidirectional_response({
-            "model": "sawii/dl-gated",
+            "model": "sawii/dl-bidirectional",
             "messages": [{"role": "user", "content": f"{speaker}, ask {peer} what it thinks."}],
         })
         body = json.loads(response.body)
@@ -298,13 +295,13 @@ async def test_a_client_tool_continuation_exposes_client_tools_only(monkeypatch)
     )
     monkeypatch.setattr(handler, "get_registry", lambda: registry)
     first = await handler.bidirectional_response({
-        "model": "sawii/dl-gated", "tools": [search],
+        "model": "sawii/dl-bidirectional", "tools": [search],
         "messages": [{"role": "user", "content": "Hey A, search for this."}],
     })
     first_body = json.loads(first.body)
     call_id = first_body["choices"][0]["message"]["tool_calls"][0]["id"]
     second = await handler.bidirectional_response({
-        "model": "sawii/dl-gated", "tools": [search],
+        "model": "sawii/dl-bidirectional", "tools": [search],
         "messages": [
             {"role": "user", "content": "Hey A, search for this."},
             first_body["choices"][0]["message"],

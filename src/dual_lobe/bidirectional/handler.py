@@ -104,6 +104,23 @@ def _role_alias(speaker: str, *, clinical: bool) -> str:
     return "lobe-b-clinical" if clinical and speaker == "B" else _ROLES[speaker]
 
 
+def _assert_clinical_b_local() -> None:
+    """Fail closed if the secure variant's raw-data B endpoint is remote."""
+    from urllib.parse import urlparse
+    from fastapi import HTTPException
+
+    s = get_settings()
+    if s.testing_mode and not s.clinical_b_local_only:
+        return
+    target = get_registry().target("lobe-b-clinical")
+    host = (urlparse(target.base_url or "").hostname or "").lower()
+    local = host in {"localhost", "::1", "host.docker.internal"} or host.startswith("127.")
+    if not local:
+        raise HTTPException(503, "Secure B is local-only unless testing mode is explicitly enabled with "
+                                "DUAL_LOBE_TESTING_MODE=true and "
+                                "DUAL_LOBE_CLINICAL_B_LOCAL_ONLY=false.")
+
+
 def _content_text(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -250,8 +267,6 @@ async def _consult(speaker: str, question: str, messages: list[dict[str, Any]],
 
 async def _clinical_gate(messages: list[dict[str, Any]], payload: dict[str, Any]) -> dict[str, Any]:
     """Run local B's privacy check before any clinical input reaches provider A."""
-    from ..engines.respond import _assert_clinical_b_local
-
     _assert_clinical_b_local()
     raw = "\n\n".join(f"{m.get('role', '?')}: {_content_text(m.get('content'))[:5000]}"
                        for m in messages[-12:])
@@ -322,7 +337,7 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
     guard = vault = None
     gate_result = None
     if clinical:
-        from ..engines.clinical.privacy import PrivacyGuard
+        from .privacy import PrivacyGuard
 
         guard = PrivacyGuard()
         vault = guard.new_vault()

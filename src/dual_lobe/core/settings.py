@@ -50,7 +50,7 @@ class Settings(BaseSettings):
 
     # Service-wide mode. "clinical" selects the secure bidirectional route: a
     # local B privacy gate wraps the normal routed speaker/verifier flow.
-    engine: str = Field(default="gated", pattern=r"^(gated|split|clinical)$", validation_alias="DUAL_LOBE_ENGINE")
+    engine: str = Field(default="gated", pattern=r"^(gated|clinical)$", validation_alias="DUAL_LOBE_ENGINE")
     clinical_b_model: str | None = Field(default=None, validation_alias="DUAL_LOBE_CLINICAL_B_MODEL")
     clinical_b_base_url: str | None = Field(default=None, validation_alias="DUAL_LOBE_CLINICAL_B_BASE_URL")
     clinical_b_api_key: str | None = Field(default=None, validation_alias="DUAL_LOBE_CLINICAL_B_API_KEY")
@@ -102,14 +102,6 @@ class Settings(BaseSettings):
                                           validation_alias="DUAL_LOBE_UPSTREAM_RATE_MAX_WAIT")
     upstream_rate_overrides: str = Field(default="", validation_alias="DUAL_LOBE_UPSTREAM_RATE_OVERRIDES")
 
-    # Opt-in by model alias/header; these budgets are per director invocation,
-    # including resumed tool segments. Normal lobe-a remains asynchronous.
-    director_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_DIRECTOR_ENABLED")
-    director_max_a_calls: int = Field(default=8, ge=1, le=40, validation_alias="DUAL_LOBE_DIRECTOR_MAX_A_CALLS")
-    director_max_seconds: float = Field(default=300, gt=0, le=3600, validation_alias="DUAL_LOBE_DIRECTOR_MAX_SECONDS")
-    director_a_max_tokens: int = Field(default=4096, ge=64, le=32768, validation_alias="DUAL_LOBE_DIRECTOR_A_MAX_TOKENS")
-    director_b_max_tokens: int = Field(default=1000, ge=64, le=4000, validation_alias="DUAL_LOBE_DIRECTOR_B_MAX_TOKENS")
-    director_max_state_bytes: int = Field(default=1048576, ge=16384, le=8388608, validation_alias="DUAL_LOBE_DIRECTOR_MAX_STATE_BYTES")
     shared_memory_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_SHARED_MEMORY_ENABLED")
     default_memory_id: str = Field(default="main", pattern=r"^([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})?$", validation_alias="DUAL_LOBE_DEFAULT_MEMORY_ID")
     shared_memory_max_chars: int = Field(default=10000, ge=6000, le=40000, validation_alias="DUAL_LOBE_SHARED_MEMORY_MAX_CHARS")
@@ -145,25 +137,6 @@ class Settings(BaseSettings):
                                     validation_alias="DUAL_LOBE_PROXY_DELEGATE_CAP")
     proxy_consult_cap: int = Field(default=1, ge=0, le=4,
                                    validation_alias="DUAL_LOBE_PROXY_CONSULT_CAP")
-
-    # Dual-lobe mode: isolated. Answers as usual, then A and B keep working in a
-    # private background exchange whose summary is stored and re-injected on the
-    # next request. On by default; every bound is caller-configurable.
-    dual_lobe_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_MODE_ENABLED")
-    dual_lobe_rounds: int = Field(default=4, ge=0, le=20, validation_alias="DUAL_LOBE_MODE_ROUNDS")
-    dual_lobe_summarize: bool = Field(default=True, validation_alias="DUAL_LOBE_MODE_SUMMARIZE")
-    dual_lobe_store_cap: int = Field(default=256, ge=16, le=100000, validation_alias="DUAL_LOBE_MODE_STORE_CAP")
-    dual_lobe_bound_by: str = Field(default="turns", pattern=r"^(run|session|time|turns|consumed)$",
-                                    validation_alias="DUAL_LOBE_MODE_BOUND_BY")
-    dual_lobe_bound_value: int = Field(default=50, ge=1, validation_alias="DUAL_LOBE_MODE_BOUND_VALUE")
-    dual_lobe_slice_entries: int = Field(default=12, ge=1, le=200, validation_alias="DUAL_LOBE_MODE_SLICE_ENTRIES")
-    dual_lobe_read_chars: int = Field(default=12000, ge=1000, le=200000, validation_alias="DUAL_LOBE_MODE_READ_CHARS")
-    dual_lobe_a_max_tokens: int = Field(default=2048, ge=64, le=32768, validation_alias="DUAL_LOBE_MODE_A_MAX_TOKENS")
-    dual_lobe_b_max_tokens: int = Field(default=1200, ge=64, le=4000, validation_alias="DUAL_LOBE_MODE_B_MAX_TOKENS")
-    dual_lobe_summary_max_tokens: int = Field(default=2000, ge=64, le=8000, validation_alias="DUAL_LOBE_MODE_SUMMARY_MAX_TOKENS")
-    dl_max_seconds: float = Field(default=120.0, gt=0, le=1800, validation_alias="DUAL_LOBE_MODE_MAX_SECONDS")
-    dual_lobe_memory_tool: bool = Field(default=True, validation_alias="DUAL_LOBE_MODE_MEMORY_TOOL")
-    dual_lobe_tenant_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_MODE_TENANT_ENABLED")
 
     # Implementation-auditor: static checks that catch UI/mock substitution, simulated
     # progress, missing backends, deleted integrations, and unsubstantiated completion.

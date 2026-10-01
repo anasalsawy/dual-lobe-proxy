@@ -25,13 +25,12 @@ from ..core.settings import get_settings
 from ..provider import calltrace
 from ..provider.adapters import resolve_request, response_dict
 from ..provider.registry import get_registry
-from ..roles import get_role_persona
 from ..state import repositories as repo
 from ..state.memory import load_memory, record_memory, validate_space
-from ..director.protocol import Completion
+from ..provider.streaming import Completion
 from ..bidirectional.routing import routing_requested
 from . import auth, correlation, limits
-from .schemas import ChatCompletionRequest, ThreeWayIntervention
+from .schemas import ChatCompletionRequest
 
 LOG = logging.getLogger("dual_lobe.api.chat")
 router = APIRouter()
@@ -75,14 +74,6 @@ def _latest_user_text(messages: list[dict]) -> str:
             content = "\n".join(str(p.get("text", "")) for p in content)
         return head_tail(str(content or ""), 1600)
     return ""
-
-
-def _insert_role_persona(messages: list[dict], persona: str) -> list[dict]:
-    """Insert hierarchy role persona as a system message after existing system messages."""
-    index = 0
-    while index < len(messages) and messages[index].get("role") in ("system", "developer"):
-        index += 1
-    return messages[:index] + [{"role": "system", "content": persona}] + messages[index:]
 
 
 def _effective_messages(messages: list[dict], context: ObserverContext, reminder: bool,
@@ -287,40 +278,6 @@ async def _stream_body(adapter, req, public_model: str, audit: dict, save_memory
     yield "data: [DONE]\n\n"
 
 
-@router.post("/v1/dual-lobe/runs/{run_ref}/intervene")
-async def dual_lobe_threeway_intervene(
-    run_ref: str,
-    body: ThreeWayIntervention,
-    principal: auth.Principal = Depends(auth.require_scope(auth.SCOPE_INFERENCE_INVOKE)),
-):
-    """Inject a real-user message into an active three-way A/B exchange.
-
-    ``run_ref`` may be the external X-DL-Run-ID or the internal run UUID.
-    Delivery is persistent in the event ledger and is observed at the next model
-    turn boundary, so it works even when the live SSE stream is served elsewhere.
-    """
-    from ..dl.threeway import append_intervention
-
-    async with tenant_session(principal.tenant_id) as session:
-        run = await repo._get_run_or_none(session, principal.tenant_id, run_ref)
-    if run is None:
-        raise HTTPException(status_code=404, detail="dual-lobe run not found")
-    try:
-        event = await append_intervention(
-            principal.tenant_id, str(run.id),
-            content=body.content, recipient=body.to,
-            idempotency_key=body.idempotency_key,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
-    return JSONResponse({
-        "status": "accepted",
-        "run_id": run.external_run_id or str(run.id),
-        "internal_run_id": str(run.id),
-        "intervention": event,
-    })
-
-
 @router.post("/v1/chat/completions")
 async def chat_completions(
     body: ChatCompletionRequest, request: Request,
@@ -342,14 +299,9 @@ async def chat_completions(
             raise HTTPException(status_code=400, detail="image/audio input is disabled; text only")
     alias = payload["model"]
     corr = correlation.parse_headers(request.headers)
-    director_mode = alias == "lobe-a-director" or corr.get("mode") == "director"
-    if director_mode and (not s.director_enabled or correlation.is_bypass(corr)):
-        raise HTTPException(400, "Director mode is disabled or conflicts with bypass.")
-    if director_mode and alias not in ("sawii/dual-lobe", "sawii/dl-bidirectional", "lobe-a", "lobe-a-director"):
-        raise HTTPException(400, "Use a supported model or lobe-a-director with director mode.")
-    if not director_mode and alias not in {"sawii/dl-bidirectional", "sawii/dl-secure"}:
-        raise HTTPException(400, detail=f"unsupported model: {alias}")
-    target_alias = "sawii/dual-lobe" if director_mode else alias
+    if alias not in {"sawii/dl-bidirectional", "sawii/dl-secure"}:
+        raise HTTPException(status_code=400, detail=f"unsupported model: {alias}")
+    target_alias = alias
     requested_space = request.headers.get("X-DL-Memory-ID")
     selected_space = requested_space if requested_space is not None else (s.default_memory_id if s.shared_memory_enabled else None)
     try:
@@ -369,19 +321,10 @@ async def chat_completions(
     if alias == "lobe-b":
         raise HTTPException(status_code=400, detail="lobe-b is internal; use lobe-a")
 
-    # Map routing model aliases to modes for recipient routing.
-    alias_to_mode = {
-        "sawii/dual-lobe-old": "off",
-        "sawii/dl-dialogue": "flat",
-        "sawii/dl-dialogue1": "hierarchy",
-        "sawii/dl-dialogue2": "hierarchy",
-        "sawii/dl-dialogue3": "hierarchy",
-    }
-    routing_mode = alias_to_mode.get(alias)
-    if routing_mode:
-        # Ensure routing is enabled for flat/hierarchy aliases; off alias ignores global toggle.
-        if routing_mode != "off" and not s.recipient_routing_enabled:
-            raise HTTPException(status_code=400, detail=f"{alias} requires recipient routing enabled")
+    # The existing B recipient router uses the service's configured group-chat
+    # mode. It is independent of the local A/B addressee detector below.
+    routing_mode = (s.routing_mode if s.recipient_routing_enabled
+                    and alias in {"sawii/dl-bidirectional", "sawii/dl-secure"} else None)
 
     limit = await limits.check_limits(principal.tenant_id, _token_estimate(messages))
     if not limit.allowed:
@@ -400,11 +343,51 @@ async def chat_completions(
         run_id = str(run.id)
         await session.commit()
 
+    # Reuse B's existing group-chat recipient router on the two public model
+    # IDs. Explicit A/B conversational addresses go straight to that router's
+    # separate local detector and do not incur this extra B routing call.
+    clinical_secure = s.engine == "clinical" or alias == "sawii/dl-secure"
+    if (routing_mode and routing_mode != "off" and s.recipient_routing_enabled
+            and not correlation.is_bypass(corr) and not routing_requested(messages)):
+        latest_user_text = _latest_user_text(messages)
+        if latest_user_text:
+            try:
+                from ..gated.handler import _detect_agent_name
+
+                async with tenant_session(principal.tenant_id) as session:
+                    routing_analysis, _ = await _route_message(
+                        session,
+                        agent_name=_detect_agent_name(messages) or s.agent_name or alias,
+                        message=latest_user_text,
+                        tenant_id=principal.tenant_id,
+                        run_id=run_id,
+                        mode=routing_mode,
+                        model_alias="lobe-b-clinical" if clinical_secure else "lobe-b",
+                        context_for_memory={"messages": messages},
+                    )
+                    await session.commit()
+                if not routing_analysis.should_respond:
+                    suppressed = {
+                        "id": f"chatcmpl-suppressed-{uuid.uuid4().hex[:24]}",
+                        "object": "chat.completion", "created": int(time.time()),
+                        "model": alias,
+                        "choices": [{"index": 0, "message": {"role": "assistant", "content": ""},
+                                     "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                    }
+                    return JSONResponse(suppressed, status_code=200, headers=_headers({
+                        "X-Dual-Lobe-Group-Routing": "suppressed",
+                        "X-Dual-Lobe-Routing-Reasoning": routing_analysis.reasoning[:200],
+                        "X-Dual-Lobe-Routing-Confidence": str(routing_analysis.confidence),
+                    }))
+            except Exception as exc:
+                LOG.warning("B group recipient routing failed for %s: %s; proceeding with request",
+                            alias, type(exc).__name__)
+
     # General bidirectional model: gated conversation plus explicit peer routing.
     # Clinical service: same conversational routing, with a local B privacy gate
     # before any A-facing call and token restoration at the response boundary.
     # Default general gated traffic remains on its existing zero-extra-call path.
-    clinical_secure = s.engine == "clinical" or alias == "sawii/dl-secure"
     if clinical_secure or routing_requested(messages):
         from ..bidirectional.handler import bidirectional_response
         shared_text, shared_entries = None, 0
@@ -469,330 +452,6 @@ async def chat_completions(
                                                "X-Accel-Buffering": "no"}, background=background)
         return JSONResponse(data, status_code=200, headers=headers, background=background)
 
-    # Per-service engine (model 1 "split", model 2 "clinical"); "gated" continues below.
-    if s.engine != "gated" and alias != "sawii/dl-bidirectional":
-        from ..engines.respond import engine_response
-
-        return await engine_response(s.engine, payload)
-
-    # Dual-lobe mode: pre-final A/B collaboration. For streaming requests,
-    # bridge the handler's event sink into the HTTP response so the client can
-    # watch A/B turns as they complete rather than waiting for finalization.
-    if alias == "sawii/dual-lobe":
-        from ..dl import handler as dl_handler
-
-        # Experimental interleaved mode: A streams to the user immediately while
-        # B shadows semantic snapshots in parallel. No approval gate is placed in
-        # A's normal path; only material B interventions cause resynchronization.
-        if payload.get("stream", False) and payload.get("dual_lobe_interleaved", False):
-            try:
-                from ..dl.interleaved import interleaved_event_stream
-            except ImportError:
-                raise HTTPException(
-                    status_code=400,
-                    detail="interleaved mode is not available in this build",
-                ) from None
-            inline_flags = payload.get("dual_lobe_interleaved_inline_flags")
-            if inline_flags is None:
-                inline_flags = True
-            live_events = payload.get("dual_lobe_live_events")
-            if live_events is None:
-                live_events = True
-
-            async def _dl_interleaved_stream():
-                completion_id = f"chatcmpl-dl-shadow-{run_id}"
-                created = int(time.time())
-                role_sent = False
-                terminal_seen = False
-
-                def _event_chunk(event):
-                    return {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": alias,
-                        "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
-                        "dual_lobe_event": event,
-                    }
-
-                async for item in interleaved_event_stream(
-                    payload, run_id, principal.tenant_id, alias, task=str(run.goal or "")
-                ):
-                    if item["kind"] == "chunk":
-                        chunk = item["data"]
-                        chunk["id"] = chunk.get("id") or completion_id
-                        chunk["model"] = alias
-                        # The provider may omit role in its first delta; make sure
-                        # generic clients still receive a valid assistant opener.
-                        choices = chunk.get("choices") or []
-                        if choices and not role_sent:
-                            delta = choices[0].get("delta") or {}
-                            if not delta.get("role"):
-                                opener = {
-                                    "id": completion_id, "object": "chat.completion.chunk",
-                                    "created": created, "model": alias,
-                                    "choices": [{"index": 0, "delta": {"role": "assistant"},
-                                                 "finish_reason": None}],
-                                }
-                                yield "data: " + json.dumps(opener, ensure_ascii=False) + "\n\n"
-                            role_sent = True
-                        for choice in choices:
-                            if choice.get("finish_reason") is not None:
-                                terminal_seen = True
-                        yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
-                        continue
-
-                    if item["kind"] == "event":
-                        event = item["event"]
-                        if live_events:
-                            yield "data: " + json.dumps(_event_chunk(event), ensure_ascii=False) + "\n\n"
-                        if inline_flags and event.get("type") == "shadow_intervention":
-                            action = str(event.get("action", "FLAG")).replace("_", " ")
-                            content = str(event.get("message", "") or "").strip()
-                            if content:
-                                text = f"\n\n🅱️ B — {action}\n{content}\n\n🅰️ A\n"
-                                visible = {
-                                    "id": completion_id, "object": "chat.completion.chunk",
-                                    "created": created, "model": alias,
-                                    "choices": [{"index": 0, "delta": {"content": text},
-                                                 "finish_reason": None}],
-                                }
-                                yield "data: " + json.dumps(visible, ensure_ascii=False) + "\n\n"
-                        if event.get("type") == "shadow_tool_request":
-                            # B has the same host tool definitions as A. Surface its
-                            # request through the canonical OpenAI tool-call channel so
-                            # the existing host executes it normally. On the next turn
-                            # both lobes receive the exact tool result from conversation
-                            # history/shared reality.
-                            tool_calls = event.get("tool_calls") or []
-                            if inline_flags and event.get("message"):
-                                notice = {
-                                    "id": completion_id, "object": "chat.completion.chunk",
-                                    "created": created, "model": alias,
-                                    "choices": [{"index": 0, "delta": {
-                                        "content": f"\n\n🅱️ B — TOOL REQUEST\n{str(event.get('message'))}\n"
-                                    }, "finish_reason": None}],
-                                }
-                                yield "data: " + json.dumps(notice, ensure_ascii=False) + "\n\n"
-                            if tool_calls:
-                                tool_delta = {
-                                    "id": completion_id, "object": "chat.completion.chunk",
-                                    "created": created, "model": alias,
-                                    "choices": [{"index": 0, "delta": {
-                                        "tool_calls": [dict({"index": i}, **call) for i, call in enumerate(tool_calls)]
-                                    }, "finish_reason": None}],
-                                }
-                                yield "data: " + json.dumps(tool_delta, ensure_ascii=False) + "\n\n"
-                                terminal = {
-                                    "id": completion_id, "object": "chat.completion.chunk",
-                                    "created": created, "model": alias,
-                                    "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
-                                }
-                                yield "data: " + json.dumps(terminal, ensure_ascii=False) + "\n\n"
-                                terminal_seen = True
-                        continue
-
-                    if item["kind"] == "meta":
-                        if live_events:
-                            yield "data: " + json.dumps(
-                                _event_chunk({"type": "shadow_meta", **item["data"]}),
-                                ensure_ascii=False
-                            ) + "\n\n"
-
-                # The upstream A stream may already have emitted a terminal choice.
-                # We still terminate the multiplexed SSE exactly once.
-                if not terminal_seen:
-                    final = {
-                        "id": completion_id, "object": "chat.completion.chunk",
-                        "created": created, "model": alias,
-                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                    }
-                    yield "data: " + json.dumps(final, ensure_ascii=False) + "\n\n"
-                yield "data: [DONE]\n\n"
-
-            return StreamingResponse(
-                _dl_interleaved_stream(), media_type="text/event-stream",
-                headers=_headers({
-                    "X-Dual-Lobe-Mode": "interleaved-shadow",
-                    "X-Dual-Lobe-Meter": "LIVE",
-                    "X-Dual-Lobe-Wait-Policy": "no-wait-unless-intervention",
-                    "X-Dual-Lobe-Tool-Mode": str(payload.get("dual_lobe_tool_mode") or "shared"),
-                    "X-DL-Run-ID": external_run,
-                    "X-DL-Internal-Run-ID": run_id,
-                    "Cache-Control": "no-cache",
-                    "X-Accel-Buffering": "no",
-                }),
-            )
-
-        if payload.get("stream", False):
-            inline_exchange = payload.get("dual_lobe_inline_exchange")
-            if inline_exchange is None:
-                inline_exchange = True
-            live_events = payload.get("dual_lobe_live_events")
-            if live_events is None:
-                live_events = True
-
-            async def _dl_live_stream():
-                completion_id = f"chatcmpl-dl-{run_id}"
-                created = int(time.time())
-                inline_started = False
-
-                def _chunk(*, delta=None, finish_reason=None, event=None, usage=None, index=0):
-                    item = {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": alias,
-                        "choices": [{
-                            "index": index,
-                            "delta": delta or {},
-                            "finish_reason": finish_reason,
-                        }],
-                    }
-                    if event is not None:
-                        item["dual_lobe_event"] = event
-                    if usage is not None:
-                        item["usage"] = usage
-                    return item
-
-                try:
-                    # Standard OpenAI-style stream opener. Generic clients can
-                    # establish the assistant role before any collaboration text.
-                    yield "data: " + json.dumps(
-                        _chunk(delta={"role": "assistant"}), ensure_ascii=False
-                    ) + "\n\n"
-
-                    async for item in dl_handler.dual_lobe_event_stream(
-                        payload, run_id, principal.tenant_id, alias,
-                        task=str(run.goal or ""),
-                    ):
-                        if item["kind"] == "event":
-                            event = item["event"]
-
-                            # Structured event: safe for custom clients and does
-                            # not alter the canonical assistant text. Unknown
-                            # extension fields are ignorable by generic clients.
-                            if live_events:
-                                yield "data: " + json.dumps(
-                                    _chunk(event=event), ensure_ascii=False
-                                ) + "\n\n"
-
-                            # Compatibility view: stream a human-readable A/B
-                            # transcript as normal content. The next request strips
-                            # this display-only prefix back out of history.
-                            if inline_exchange and event.get("type") == "exchange_message":
-                                actor = str(event.get("actor", "?")).upper()
-                                label = "🅰️ A" if actor == "A" else "🅱️ B" if actor == "B" else "👤 YOU" if actor == "USER" else actor
-                                content = str(event.get("content", "") or "").strip()
-                                if content:
-                                    prefix = ""
-                                    if not inline_started:
-                                        prefix = "Dual-Lobe collaboration\n\n"
-                                        inline_started = True
-                                    text = prefix + label + "\n" + content + "\n\n"
-                                    yield "data: " + json.dumps(
-                                        _chunk(delta={"content": text}), ensure_ascii=False
-                                    ) + "\n\n"
-                            continue
-
-                        data = item["data"]
-                        # ``dual_lobe_event_stream`` forces the buffered handler
-                        # to keep message.content clean. If we streamed an inline
-                        # transcript, add the final marker here exactly once.
-                        choices = data.get("choices") or []
-                        for choice in choices:
-                            message = dict(choice.get("message") or {})
-                            finish = choice.get("finish_reason")
-                            if finish is None:
-                                finish = "tool_calls" if message.get("tool_calls") else "stop"
-                            if inline_started and isinstance(message.get("content"), str):
-                                message["content"] = (
-                                    "──────── FINAL ANSWER ────────\n" + message["content"]
-                                )
-                            out = _chunk(
-                                delta=message,
-                                finish_reason=finish,
-                                index=int(choice.get("index", 0) or 0),
-                                event={
-                                    "type": "exchange_result",
-                                    "dual_lobe": data.get("dual_lobe"),
-                                } if live_events and data.get("dual_lobe") else None,
-                                usage=data.get("usage"),
-                            )
-                            yield "data: " + json.dumps(out, ensure_ascii=False) + "\n\n"
-                        yield "data: [DONE]\n\n"
-                        return
-                except asyncio.CancelledError:
-                    # Cancelling the response cancels the queue bridge, which in
-                    # turn cancels in-flight dual-lobe inference.
-                    raise
-
-            return StreamingResponse(
-                _dl_live_stream(), media_type="text/event-stream",
-                headers={
-                    "X-Dual-Lobe-Mode": "pre-final-live",
-                    "X-Dual-Lobe-Meter": "PENDING",
-                    "X-Dual-Lobe-Three-Way": "on" if payload.get("dual_lobe_three_way") else "off",
-                    "X-DL-Run-ID": external_run,
-                    "X-DL-Internal-Run-ID": run_id,
-                    "Cache-Control": "no-cache",
-                    "X-Accel-Buffering": "no",
-                },
-            )
-
-        try:
-            data, dl_headers, dl_background = await dl_handler.dual_lobe_response(
-                payload, run_id, principal.tenant_id, alias, task=str(run.goal or ""),
-            )
-        except RuntimeError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from None
-        background = BackgroundTask(dl_background) if dl_background else None
-        dl_headers = _headers(dl_headers)
-        dl_headers["X-DL-Run-ID"] = external_run
-        dl_headers["X-DL-Internal-Run-ID"] = run_id
-        return JSONResponse(data, status_code=200, headers=dl_headers, background=background)
-
-    # Dialogue co-author mode: B wraps A on both upstream and downstream.
-    # This is intentionally separate from the verifier/gated model so both can
-    # be tested side-by-side.
-    if alias == "sawii/dialogue":
-        from ..coauthor.handler import coauthor_response
-        shared_text, shared_entries = None, 0
-        if memory_space:
-            try:
-                shared = await load_memory(principal.tenant_id, memory_space, messages)
-                shared_text, shared_entries = shared.text, len(shared.entry_ids)
-            except Exception:
-                LOG.warning("shared memory load failed run=%s (fail-open)", run_id)
-        data, co_headers = await coauthor_response(
-            payload, run_id, principal.tenant_id, alias, shared_text=shared_text
-        )
-        co_headers = _headers(co_headers)
-        co_headers["X-Dual-Lobe-Memory-Space"] = memory_space or "off"
-        co_headers["X-Dual-Lobe-Shared-Entries"] = str(shared_entries)
-        co_background = _record_background(
-            principal.tenant_id, memory_space, run_id, messages, data)
-        if payload.get("stream", False):
-            import json as _json
-
-            async def _coauthor_stream():
-                chunk = dict(data)
-                chunk["object"] = "chat.completion.chunk"
-                for c in chunk.get("choices", []):
-                    c["delta"] = c.pop("message", {})
-                    c.pop("finish_reason", None)
-                    c["finish_reason"] = "stop"
-                yield f"data: {_json.dumps(chunk, ensure_ascii=False)}\n\n"
-                yield "data: [DONE]\n\n"
-
-            return StreamingResponse(
-                _coauthor_stream(), media_type="text/event-stream",
-                headers={**co_headers, "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-                background=co_background,
-            )
-        return JSONResponse(data, status_code=200, headers=co_headers,
-                            background=co_background)
-
     # Gated mode: B sits inline.  Completely separate code path.
     if alias == "sawii/dl-bidirectional":
         from ..gated.handler import gated_response, gated_stream
@@ -850,63 +509,6 @@ async def chat_completions(
         return JSONResponse(data, status_code=200, headers=gate_headers,
                             background=gate_background)
 
-    # Pre-emptive routing check: if routing is enabled for this alias, ask the
-    # router LLM (lobe-b) whether this agent should respond BEFORE calling the
-    # upstream model. If the rules say "don't respond", return a suppressed
-    # response immediately — no upstream tokens spent, no response generated.
-    if routing_mode and routing_mode != "off" and s.recipient_routing_enabled:
-        LOG.info("Pre-emptive routing check starting for %s mode=%s", alias, routing_mode)
-        latest_user_text = _latest_user_text(messages)
-        if latest_user_text:
-            try:
-                async with tenant_session(principal.tenant_id) as session:
-                    routing_analysis, _ = await _route_message(
-                        session,
-                        agent_name=alias,
-                        message=latest_user_text,
-                        tenant_id=principal.tenant_id,
-                        run_id=run_id,
-                        mode=routing_mode,
-                        context_for_memory={"messages": messages},
-                    )
-                    await session.commit()
-                should_respond = routing_analysis.should_respond
-                if not should_respond:
-                    LOG.info("Pre-emptive routing suppressed response for %s (confidence=%.2f, reasoning=%s)",
-                             alias, routing_analysis.confidence, routing_analysis.reasoning)
-                    # Return a minimal "suppressed" response — no upstream call made.
-                    suppressed = {
-                        "id": f"chatcmpl-suppressed-{uuid.uuid4().hex[:24]}",
-                        "object": "chat.completion",
-                        "created": int(time.time()),
-                        "model": alias,
-                        "choices": [{
-                            "index": 0,
-                            "message": {
-                                "role": "assistant",
-                                "content": "",
-                            },
-                            "finish_reason": "stop",
-                        }],
-                        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-                    }
-                    return JSONResponse(
-                        suppressed,
-                        status_code=200,
-                        headers=_headers({
-                            "X-Dual-Lobe-Routing": "suppressed",
-                            "X-Dual-Lobe-Routing-Reasoning": routing_analysis.reasoning[:200],
-                            "X-Dual-Lobe-Routing-Confidence": str(routing_analysis.confidence),
-                        }),
-                    )
-            except Exception as exc:
-                LOG.warning("Pre-emptive routing check failed for %s: %s; proceeding with request",
-                            alias, type(exc).__name__)
-                # On routing failure, fail open — let the request through.
-    if director_mode:
-        from . import director
-        return await director.response(payload, request, principal, run_id, external_run, corr,
-                                       target, get_registry(), s, memory_space, observe)
     # No transaction or B model call is held across A's provider operation.
     context = ObserverContext(memory_status="disabled", claim_status="disabled", status="disabled")
     if observe and stage_mod.injection_enabled(s.rollout_stage):
@@ -920,10 +522,6 @@ async def chat_completions(
     except Exception:
         raise HTTPException(503, "Shared memory is unavailable; no model was invoked.") from None
     req.messages = _effective_messages(messages, context, monitoring, s.monitoring_role, shared_text=shared.text)
-    # Inject hierarchy role persona as a system message for dl-dialogue aliases
-    role_persona = get_role_persona(alias)
-    if role_persona:
-        req.messages = _insert_role_persona(req.messages, role_persona)
     req.timeout = s.a_timeout
     adapter = get_registry().adapter(alias)
     context_text = head_tail(
