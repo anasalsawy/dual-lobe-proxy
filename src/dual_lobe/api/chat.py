@@ -452,6 +452,11 @@ async def chat_completions(
         headers["X-Dual-Lobe-Memory-Space"] = memory_space or "off"
         headers["X-Dual-Lobe-Shared-Entries"] = str(shared_entries)
         if payload.get("stream", False):
+            # The wrapped response carries application/json from the inner
+            # buffered handler. The outer response is SSE and must advertise
+            # its own media type to streaming clients.
+            headers.pop("content-type", None)
+            headers.pop("Content-Type", None)
             # bidirectional_response returns a JSONResponse even when this
             # outer endpoint must expose SSE. Its Content-Length describes the
             # JSON body, not the newly generated event stream. Forwarding it
