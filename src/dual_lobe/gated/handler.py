@@ -44,12 +44,6 @@ from ..proxy.tools import (
     strip_proxy_calls,
 )
 from ..state.memory import inject_shared_memory, search_memory
-from .prompts import (
-    DOWNSTREAM_CONTRACT,
-    DOWNSTREAM_CONTRACT_HANDOFF,
-    GATED_B_SYSTEM_DOWNSTREAM,
-    HANDOFF_SYSTEM_ADDENDUM,
-)
 
 LOG = logging.getLogger("dual_lobe.gated")
 
@@ -64,7 +58,10 @@ OBSERVATION_DISCLAIMER = (
     "Distinguish intended, attempted, observed, and confirmed work. "
     "Do not invent execution, tests, citations, or completion. "
     "Support completion claims with relevant evidence in the conversation. "
-    "Correct earlier claims when newer evidence contradicts them."
+    "Correct earlier claims when newer evidence contradicts them. "
+    "This observer note does not remove or narrow Hermes's native tools. "
+    "Preserve the host application's identity, voice, and tool-use behavior, "
+    "and use relevant client-supplied tools normally."
 )
 
 
@@ -248,8 +245,11 @@ async def _resolve_proxy_tools(
          "content": results[i]}
         for i, tc in enumerate(proxy_calls)
     ]
+    # Keep the exact proxy call/result exchange in the evidence passed to B.
+    # The assistant continuation and the verifier must share the same trace.
+    enriched_messages.extend(exchange)
     cont_req = NormalizedRequest(
-        messages=enriched_messages + exchange,
+        messages=enriched_messages,
         temperature=payload.get("temperature"),
         max_tokens=payload.get("max_tokens"),
         top_p=payload.get("top_p"),
@@ -783,38 +783,41 @@ async def _complete(
 
     # ── 3. DOWNSTREAM: B rates A's response ──────────────────────
     handoff_on = bool(getattr(s, "gated_b_handoff", True))
-    b_system = GATED_B_SYSTEM_DOWNSTREAM + (("\n\n" + HANDOFF_SYSTEM_ADDENDUM) if handoff_on else "")
-    b_contract = DOWNSTREAM_CONTRACT_HANDOFF if handoff_on else DOWNSTREAM_CONTRACT
-
-    downstream_prompt = (
-        f"CONVERSATION MESSAGES:\n{_messages_to_text(messages)}\n\n"
-        f"TOOL EVIDENCE IN CONVERSATION:\n{_extract_tool_evidence(messages)}\n\n"
-        f"A's OUTPUT TO VERIFY:\n{_for_b(a_content)}\n\n"
-    )
     a_tool_calls = a_message.get("tool_calls") or []
+    tool_events = "COMPLETE TOOL HISTORY (JSON):\n" + json.dumps(
+        messages, ensure_ascii=False, separators=(",", ":"))
     if a_tool_calls:
-        downstream_prompt += (
-            "A's TOOL CALLS THIS TURN (review arguments and side effects too):\n"
-            f"{json.dumps(a_tool_calls, ensure_ascii=False)}\n\n"
-        )
+        tool_events += "\nA's TOOL CALLS THIS TURN: " + json.dumps(a_tool_calls, ensure_ascii=False)
+    if proxy_used:
+        tool_events += "\nProxy tool execution counts: " + json.dumps(proxy_used, sort_keys=True)
+    review_context = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
 
     b_downstream: dict = {}
     handoff: dict[str, Any] = {}
     b_tool_calls: list[dict[str, Any]] = []
     try:
         with calltrace.stage("B-verify"):
-            b_downstream = await asyncio.wait_for(
-                _call_b_json(b_system, downstream_prompt, b_contract),
-                timeout=s.b_timeout,
+            from ..b.verification import as_meter_input, verify_output
+            review, _verification_prompt = await verify_output(
+                candidate_lobe="A",
+                target_alias="lobe-b",
+                context=review_context,
+                output=a_content,
+                events=tool_events,
+                latest_request=_latest_user_text(messages),
+                prior_review=json.dumps(_get_meter(run_id) or {}, ensure_ascii=False),
             )
-        evidence_text = _messages_to_text(messages) + "\n" + _extract_tool_evidence(messages)
+        b_downstream = as_meter_input(review)
+        assistance = [*review.questions, *review.context_notes]
+        if assistance:
+            b_downstream["assist"] = "\n".join(assistance[:4])
+        evidence_text = review_context + "\n" + tool_events + "\n" + _latest_user_text(messages)
         deception_level, meter_rationale, concerns = _verified_meter(
             b_downstream, str(a_content or ""), evidence_text)
         b_downstream["deception_level"] = deception_level
         b_downstream["meter_rationale"] = meter_rationale
         b_downstream["concerns"] = concerns
-        if handoff_on:
-            handoff = _extract_handoff(b_downstream)
+        handoff = _extract_handoff(b_downstream)
         LOG.info("gated downstream B rated run=%s level=%s handoff=%s",
                  run_id, deception_level, handoff or "off")
     except Exception as exc:
@@ -901,24 +904,28 @@ async def _complete(
             a_content2 = strip_deception_meter(revised_message.get("content", "") or "")
             revised_message["content"] = a_content2
             try:
-                recheck_prompt = (
-                    f"CONVERSATION MESSAGES:\n{_messages_to_text(messages)}\n\n"
-                    f"TOOL EVIDENCE:\n{_extract_tool_evidence(messages)}\n\n"
-                    f"A's REVISED OUTPUT:\n{_for_b(a_content2)}\n\n"
-                )
                 with calltrace.stage("B-recheck"):
-                  b_recheck = await asyncio.wait_for(
-                    _call_b_json(b_system, recheck_prompt, b_contract),
-                    timeout=s.b_timeout,
-                )
-                evidence_text = _messages_to_text(messages) + "\n" + _extract_tool_evidence(messages)
+                    from ..b.verification import as_meter_input, verify_output
+                    review, _ = await verify_output(
+                        candidate_lobe="A", target_alias="lobe-b",
+                        context=json.dumps(messages, ensure_ascii=False, separators=(",", ":")),
+                        output=a_content2,
+                        events=("COMPLETE TOOL HISTORY (JSON):\n" +
+                                json.dumps(messages, ensure_ascii=False, separators=(",", ":"))),
+                        latest_request=_latest_user_text(messages),
+                        prior_review=json.dumps(b_downstream, ensure_ascii=False),
+                    )
+                b_recheck = as_meter_input(review)
+                evidence_text = (_messages_to_text(messages) + "\n" +
+                                 _extract_tool_evidence(messages) + "\n" +
+                                 _latest_user_text(messages))
                 deception_level, meter_rationale, concerns = _verified_meter(
                     b_recheck, str(a_content2 or ""), evidence_text)
                 b_recheck["deception_level"] = deception_level
                 b_recheck["meter_rationale"] = meter_rationale
                 b_recheck["concerns"] = concerns
+                handoff = _extract_handoff(b_recheck)
                 if handoff_on:
-                    handoff = _extract_handoff(b_recheck)
                     await _memory_search_into(run_id, tenant_id, shared_space, handoff)
                 # Recheck supersedes the first verdict's tool requests.
                 b_tool_calls = _extract_b_tool_calls(

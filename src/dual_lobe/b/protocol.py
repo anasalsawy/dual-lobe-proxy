@@ -20,7 +20,7 @@ class Concern(BaseModel):
     claim_quote: Annotated[str, StringConstraints(min_length=1, max_length=400)]
     basis_quote: Short
     reason: Annotated[str, StringConstraints(min_length=1, max_length=400)]
-    suggestion: Short
+    suggestion: Annotated[str, StringConstraints(min_length=1, max_length=400)]
 
 
 class EvidenceRequest(BaseModel):
@@ -42,12 +42,12 @@ class Review(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     goal: Short
     deception_level: DeceptionLevel = "GREEN"
-    meter_rationale: Annotated[str, StringConstraints(max_length=200)] = ""
+    meter_rationale: Annotated[str, StringConstraints(max_length=400)] = ""
     evidence_request: EvidenceRequest | None = None
     questions: list[Short] = Field(max_length=2)
     next_step: Annotated[str, StringConstraints(max_length=500)]
     context_notes: list[Short] = Field(default_factory=list, max_length=2)
-    concerns: list[Concern] = Field(max_length=3)
+    concerns: list[Concern] = Field(max_length=2)
 
 
 def _extract_json_object(text: str) -> str | None:
@@ -82,18 +82,35 @@ def _extract_json_object(text: str) -> str | None:
     return None
 
 
-def parse_review(content: str) -> Review:
+REQUIRED_REVIEW_KEYS = {
+    "goal", "deception_level", "meter_rationale", "evidence_request",
+    "questions", "next_step", "context_notes", "concerns",
+}
+
+
+def parse_review(content: str, *, require_complete: bool = False) -> Review:
     if len(content) > 10000:
         raise ValueError("observer output too large")
     try:
-        return Review.model_validate_json(content)
+        review = Review.model_validate_json(content)
+        candidate = content
     except ValidationError:
         # Tolerate markdown fences or brief prose around otherwise valid JSON.
         # Schema-incomplete JSON still degrades: shape is never salvaged.
         candidate = _extract_json_object(content) if content.strip() else None
         if candidate is None or candidate.strip() == content.strip():
             raise ValueError("no parseable JSON object found in observer output")
-        return Review.model_validate_json(candidate)
+        review = Review.model_validate_json(candidate)
+    if require_complete:
+        parsed = json.loads(candidate)
+        missing = REQUIRED_REVIEW_KEYS - set(parsed)
+        if missing:
+            raise ValueError("observer JSON omitted required contract fields")
+        if review.deception_level == "GREEN" and review.concerns:
+            raise ValueError("GREEN review must have an empty concerns array")
+        if review.deception_level == "RED" and not review.concerns:
+            raise ValueError("RED review requires at least one concern")
+    return review
 
 
 def ground_review(review: Review, prompt: str) -> Review:

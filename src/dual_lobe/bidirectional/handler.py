@@ -196,8 +196,8 @@ def requested_handoff(text: str, speaker: str) -> str | None:
 
 def _system_prompt(speaker: str, *, verify: bool = False, tools: list[dict] | None = None) -> str:
     if verify:
-        from ..gated.prompts import GATED_B_SYSTEM_DOWNSTREAM
-        return _role_specific_verifier_text(GATED_B_SYSTEM_DOWNSTREAM, speaker)
+        from ..b.verification import verifier_system
+        return verifier_system("B" if speaker == "A" else "A")
     names = ", ".join(
         str((tool.get("function") or {}).get("name", ""))
         for tool in (tools or [])
@@ -598,7 +598,11 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
         verifier_answer, _ = guard.sanitize(answer, vault=vault)
     # Give the verifier the complete request history, including structured tool
     # calls and every tool result. Do not drop older messages or truncate evidence.
-    evidence_messages = deepcopy(messages)
+    # Verify against the live exchange, including proxy tool arguments/results
+    # and internal consultation/handoff records, not only the client's input
+    # snapshot from before the model calls.
+    evidence_messages = deepcopy(dialogue)
+    evidence_messages.append({"role": "assistant", "content": answer})
     if consultation_note:
         evidence_messages.append({
             "role": "system",
@@ -610,29 +614,25 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
     if secure and verifier == "A":
         user_text, _ = guard.sanitize(user_text, vault=vault)
         evidence, _ = guard.sanitize(evidence, vault=vault)
-    verify_prompt = (
-        f"USER REQUEST (latest):\n{user_text}\n\n"
-        f"COMPLETE CONVERSATION AND TOOL TRACE (JSON; includes tool calls and results):\n{evidence}\n\n"
-        f"CANDIDATE ANSWER FROM LOBE {speaker} (preserve exactly):\n{verifier_answer}"
-    )
+    concerns: list[dict[str, Any]] = []
     try:
       with calltrace.stage(f"{verifier}-verify"):
-        verifier_system = _system_prompt(verifier, verify=True, tools=tools)
-        from ..gated.prompts import DOWNSTREAM_CONTRACT_HANDOFF, HANDOFF_SYSTEM_ADDENDUM
-        if getattr(get_settings(), "gated_b_handoff", True):
-            verifier_system += "\\n\\n" + _role_specific_verifier_text(HANDOFF_SYSTEM_ADDENDUM, verifier)
-            verify_prompt += "\\n\\n" + _role_specific_verifier_text(DOWNSTREAM_CONTRACT_HANDOFF, verifier)
-        else:
-            from ..gated.prompts import DOWNSTREAM_CONTRACT
-            verify_prompt += "\\n\\n" + _role_specific_verifier_text(DOWNSTREAM_CONTRACT, verifier)
+        from ..b.verification import as_meter_input, verify_output
+        context_text = evidence
+        events_text = "COMPLETE TOOL TRACE (caller-reported, preserved verbatim):\n" + evidence
+        if consultation_note:
+            events_text += "\n[Internal consultation completed by proxy] " + consultation_note
         if secure and verifier == "A":
-            verifier_system += " Private-value tokens are opaque; preserve them and do not infer their contents."
-        verdict_message = await _call(
-            _role_alias(verifier, secure=secure), [{"role": "system", "content": verifier_system},
-                               {"role": "user", "content": verify_prompt}],
-            payload, tools=tools or None, tool_choice="none" if tools else None, verify=True,
+            events_text += "\nPrivate-value tokens are opaque; do not infer their contents."
+        review, _ = await verify_output(
+            candidate_lobe=speaker,
+            target_alias=_role_alias(verifier, secure=secure),
+            context=context_text,
+            output=verifier_answer,
+            events=events_text,
+            latest_request=user_text,
         )
-      verdict = _parse_verdict(verdict_message)
+      verdict = as_meter_input(review)
       from ..gated.handler import _verified_meter
       level, rationale, concerns = _verified_meter(
           verdict, verifier_answer, evidence + "\n" + verifier_answer)

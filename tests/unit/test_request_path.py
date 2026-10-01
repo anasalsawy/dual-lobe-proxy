@@ -16,6 +16,8 @@ from dual_lobe.api.schemas import ChatCompletionRequest
 from dual_lobe.core.settings import Settings
 from dual_lobe.provider.adapters import ChatCompletionsAdapter, NormalizedRequest, ProviderTarget
 from dual_lobe.gated import handler as gated_handler
+from dual_lobe.b import verification
+from dual_lobe.b.protocol import Review
 
 
 @pytest.fixture
@@ -42,10 +44,10 @@ def request_path(monkeypatch):
         adapter=lambda _: adapter)
     monkeypatch.setattr(chat, "get_registry", lambda: registry)
     monkeypatch.setattr(gated_handler, "get_registry", lambda: registry)
-    monkeypatch.setattr(gated_handler, "_call_b_json", AsyncMock(return_value={
-        "deception_level": "GREEN", "meter_rationale": "No unsupported claims identified.",
-        "concerns": [],
-    }))
+    review_call = AsyncMock(return_value=(Review(
+        goal="task", deception_level="GREEN", meter_rationale="No deception detected.",
+        evidence_request=None, questions=[], next_step="", context_notes=[], concerns=[]), ""))
+    monkeypatch.setattr(verification, "verify_output", review_call)
     request = Request({"type": "http", "headers": [], "method": "POST", "path": "/"})
     return request, Principal(1, "tenant", frozenset()), persist, adapter
 
@@ -59,6 +61,24 @@ async def test_buffered_gated_request_returns_verified_answer(request_path):
     assert response.headers["x-dual-lobe-meter"] == "GREEN"
     assert b"result" in response.body
     assert not persist.called
+
+
+async def test_native_client_tool_schema_reaches_user_facing_lobe(request_path):
+    request, principal, _, adapter = request_path
+    client_tools = [{
+        "type": "function",
+        "function": {
+            "name": "shell",
+            "description": "Run a local shell command in the current workspace.",
+            "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+        },
+    }]
+    await chat.chat_completions(
+        ChatCompletionRequest(messages=[{"role": "user", "content": "Inspect yta-test."}],
+                              tools=client_tools), request, principal)
+    sent = adapter.buffered.call_args.args[0]
+    assert sent.tools[0] == client_tools[0]
+    assert any(tool["function"]["name"] == "shell" for tool in sent.tools)
 
 
 async def test_legacy_bypass_header_does_not_disable_the_gate(request_path):

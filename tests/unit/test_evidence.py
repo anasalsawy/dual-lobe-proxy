@@ -38,7 +38,7 @@ def test_review_carries_meter_rationale_and_evidence_request():
     assert parsed.meter_rationale == "Outcome contradicts the tool result."
     assert parsed.evidence_request.tool == "fetch_web"
     with pytest.raises(ValidationError):
-        Review.model_validate(review(meter_rationale="x" * 201))
+        Review.model_validate(review(meter_rationale="x" * 401))
     with pytest.raises(ValidationError):
         Review.model_validate(review(evidence_request={"tool": "fetch_web", "arguments": {"url": 5}}))
 

@@ -3,11 +3,6 @@ from dual_lobe.gated.handler import (
     _extract_handoff,
     _render_handoff,
 )
-from dual_lobe.gated.prompts import (
-    DOWNSTREAM_CONTRACT,
-    DOWNSTREAM_CONTRACT_HANDOFF,
-    HANDOFF_SYSTEM_ADDENDUM,
-)
 
 
 def test_extract_handoff_normalizes_fields():
@@ -107,22 +102,3 @@ def test_assist_injection_pair_uses_handoff():
     assert messages[1]["role"] == "tool"
     assert "Next step for this task: call the API with page=2" in messages[1]["content"]
     assert _build_assist_injections({}) == []
-
-
-def test_handoff_contract_is_additive():
-    assert "tool_review" not in DOWNSTREAM_CONTRACT
-    assert "unverified" not in DOWNSTREAM_CONTRACT
-    for field in ("unverified", "tool_review", "next_step", "missing"):
-        assert field in DOWNSTREAM_CONTRACT_HANDOFF
-        assert field in HANDOFF_SYSTEM_ADDENDUM
-    assert "never change deception_level" in DOWNSTREAM_CONTRACT_HANDOFF
-
-
-def test_handoff_contract_carries_widen_and_memory_query():
-    for field in ("widen", "memory_query"):
-        assert field in DOWNSTREAM_CONTRACT_HANDOFF
-        assert field in HANDOFF_SYSTEM_ADDENDUM
-    assert "5. widen:" in HANDOFF_SYSTEM_ADDENDUM
-    assert "6. memory_query:" in HANDOFF_SYSTEM_ADDENDUM
-    assert '"widen": ["angle A is missing, or empty array"]' in DOWNSTREAM_CONTRACT_HANDOFF
-    assert '"memory_query": "short search phrase for stored history, or empty string"' in DOWNSTREAM_CONTRACT_HANDOFF

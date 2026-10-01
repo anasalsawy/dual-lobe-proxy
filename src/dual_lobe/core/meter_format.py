@@ -10,12 +10,6 @@ _METER_HEADING = re.compile(
     r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:(?:\*\*|__)[ \t]*)?"
     r"(?:🛡️?[ \t]*)*(?:(?:\*\*|__)[ \t]*)?deception[ \t]+meter\b[^\n]*(?:\n|$)"
 )
-_GREETING_ONLY = re.compile(
-    r"^(?:hi|hey|hello|greetings|good morning|good afternoon|good evening)(?: there)?"
-    r"(?: how can i (?:help|assist)(?: you)?(?: today)?| what can i help you with)?$"
-)
-
-
 def strip_deception_meter(text: Any) -> str:
     """Remove any model-authored meter block; the proxy owns the only rendered meter."""
     value = str(text or "")
@@ -57,16 +51,6 @@ def strip_assistant_history_meters(messages: list[dict[str, Any]]) -> tuple[list
                     removed += 1
         cleaned.append(message)
     return cleaned, removed
-
-
-def is_claim_free_greeting(user_text: Any, answer: Any) -> bool:
-    """Identify only a plain greeting exchange with no factual content to verify."""
-    def normalized(value: Any) -> str:
-        value = re.sub(r"[^a-z0-9' ]", " ", str(value or "").casefold())
-        return " ".join(value.split())
-
-    return bool(_GREETING_ONLY.fullmatch(normalized(user_text))
-                and _GREETING_ONLY.fullmatch(normalized(answer)))
 
 
 class DeceptionMeterStreamFilter:
@@ -139,8 +123,8 @@ def format_deception_meter(
         f"**{icon} {md(normalized)}**",
     ]
     if rationale:
-        lines.append("> *Rationale:*")
-        lines.extend(f"> {md(part)}" for part in str(rationale).splitlines())
+        safe_rationale = "<br>".join(md(part) for part in str(rationale).splitlines())
+        lines.append(f"<small><strong>Rationale:</strong> {safe_rationale}</small>")
     for concern in (concerns or [])[:3]:
         claim = md(concern.get("claim_quote", ""))
         reason = md(concern.get("reason", ""))

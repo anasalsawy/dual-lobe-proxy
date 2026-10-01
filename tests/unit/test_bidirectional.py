@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from dual_lobe.bidirectional import handler
+from dual_lobe.b import verification
 
 
 def test_speaker_routing_honors_direct_address_and_defaults_to_a():
@@ -70,15 +71,33 @@ class FakeRegistry:
         return self.adapters[alias]
 
 
+def _review_message(level="GREEN", rationale="No deception detected.", concerns=None):
+    return {"content": json.dumps({
+        "goal": "",
+        "deception_level": level,
+        "meter_rationale": rationale,
+        "evidence_request": None,
+        "questions": [],
+        "next_step": "",
+        "context_notes": [],
+        "concerns": concerns or [],
+    })}
+
+
+def _patch_registry(monkeypatch, registry):
+    monkeypatch.setattr(handler, "get_registry", lambda: registry)
+    monkeypatch.setattr(verification, "get_registry", lambda: registry)
+
+
 @pytest.mark.asyncio
 async def test_secure_gate_masks_password_before_a_and_restores_answer(monkeypatch):
 
     gate = {"content": '{"needs_tokenization":true,"categories":["credential"],"rationale":"Secret detected."}'}
     a = {"content": "I can continue with the protected account."}
-    review = {"content": '{"deception_level":"GREEN","rationale":"The answer is appropriate."}'}
+    review = _review_message()
     registry = FakeRegistry(a_messages=[a], b_messages=[gate, review])
     registry.adapters["lobe-b-secure"] = registry.adapters["lobe-b"]
-    monkeypatch.setattr(handler, "get_registry", lambda: registry)
+    _patch_registry(monkeypatch, registry)
     monkeypatch.setattr(handler, "_assert_secure_b_local", lambda: None)
 
     response = await handler.bidirectional_response({
@@ -101,10 +120,10 @@ async def test_secure_b_can_be_user_facing_and_a_verifies_only_tokenized_text(mo
 
     gate = {"content": '{"needs_tokenization":true,"categories":["credential"],"rationale":"Secret detected."}'}
     b_answer = {"content": "I used password hunter2 for the sign in."}
-    a_review = {"content": '{"deception_level":"GREEN","rationale":"The answer is supported."}'}
+    a_review = _review_message()
     registry = FakeRegistry(a_messages=[a_review], b_messages=[gate, b_answer])
     registry.adapters["lobe-b-secure"] = registry.adapters["lobe-b"]
-    monkeypatch.setattr(handler, "get_registry", lambda: registry)
+    _patch_registry(monkeypatch, registry)
     monkeypatch.setattr(handler, "_assert_secure_b_local", lambda: None)
 
     response = await handler.bidirectional_response({
@@ -137,7 +156,7 @@ async def test_secure_a_tool_call_resolves_sensitive_token_at_proxy_boundary(mon
 
     registry = FakeRegistry(a_messages=[a_tool_call], b_messages=[gate])
     registry.adapters["lobe-b-secure"] = registry.adapters["lobe-b"]
-    monkeypatch.setattr(handler, "get_registry", lambda: registry)
+    _patch_registry(monkeypatch, registry)
     monkeypatch.setattr(handler, "_assert_secure_b_local", lambda: None)
     tools = [{"type": "function", "function": {"name": "protected_action", "parameters": {"type": "object"}}}]
 
@@ -157,10 +176,10 @@ async def test_secure_a_tool_call_resolves_sensitive_token_at_proxy_boundary(mon
 async def test_b_can_speak_use_client_tools_and_a_verifies(monkeypatch):
     tools = [{"type": "function", "function": {"name": "search_web", "parameters": {"type": "object"}}}]
     registry = FakeRegistry(
-        a_messages=[{"content": '{"deception_level":"GREEN","rationale":"Matches the evidence."}'}],
+        a_messages=[_review_message()],
         b_messages=[{"content": "My answer from B."}],
     )
-    monkeypatch.setattr(handler, "get_registry", lambda: registry)
+    _patch_registry(monkeypatch, registry)
 
     response = await handler.bidirectional_response({
         "model": "sawii/dl-bidirectional", "messages": [{"role": "user", "content": "Hey B, answer this."}],
@@ -171,12 +190,12 @@ async def test_b_can_speak_use_client_tools_and_a_verifies(monkeypatch):
     assert answer.startswith("My answer from B.\n\n")
     assert "### 🛡️ Deception Meter" in answer
     assert "**🟢 GREEN**" in answer
-    assert "> *Rationale:* Matches the evidence\\." in answer
+    assert "<small><strong>Rationale:</strong> No deception detected.</small>" in answer
     assert body["dual_lobe"]["speaker"] == "B"
     assert body["dual_lobe"]["verifier"] == "A"
     assert registry.adapters["lobe-b"].requests[0].tools[0]["function"]["name"] == "search_web"
-    assert registry.adapters["lobe-a"].requests[0].tool_choice == "none"
-    assert registry.adapters["lobe-a"].requests[0].tools[0]["function"]["name"] == "search_web"
+    assert registry.adapters["lobe-a"].requests[0].tool_choice is None
+    assert registry.adapters["lobe-a"].requests[0].tools is None
 
 
 @pytest.mark.asyncio
@@ -186,10 +205,10 @@ async def test_a_can_consult_b_privately_then_b_verifies(monkeypatch):
                                  "\n\n### 🛡️ Deception Meter\n\n**🔴 RED**\n\n<small>Wrong meter.</small>"}],
         b_messages=[
             {"content": "B's independent input."},
-            {"content": '{"deception_level":"YELLOW","rationale":"One detail needs checking."}'},
+            _review_message("YELLOW", "One detail needs checking."),
         ],
     )
-    monkeypatch.setattr(handler, "get_registry", lambda: registry)
+    _patch_registry(monkeypatch, registry)
     response = await handler.bidirectional_response({
         "model": "sawii/dl-bidirectional",
         "messages": [{"role": "user", "content": "A, ask B what we should do."}],
@@ -208,7 +227,7 @@ async def test_a_can_consult_b_privately_then_b_verifies(monkeypatch):
     assert "[Internal consultation completed by proxy]" in verifier_prompt
     assert "B's independent input." in verifier_prompt
     verifier_system = registry.adapters["lobe-b"].requests[-1].messages[0]["content"]
-    assert "trusted execution metadata" in verifier_system
+    assert "proxy event proves only" in verifier_system
 
 
 def test_verifier_parser_accepts_canonical_meter_rationale_and_concerns():
@@ -255,12 +274,12 @@ async def test_private_consultation_retries_control_only_output(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_greeting_is_still_verified(monkeypatch):
-    review = {"content": '{"deception_level":"GREEN","rationale":"The greeting answers the user without unsupported claims."}'}
+    review = _review_message()
     registry = FakeRegistry(
         a_messages=[{"content": "Hello! How can I help?"}],
         b_messages=[review],
     )
-    monkeypatch.setattr(handler, "get_registry", lambda: registry)
+    _patch_registry(monkeypatch, registry)
     response = await handler.bidirectional_response({
         "model": "sawii/dl-bidirectional",
         "messages": [{"role": "user", "content": "hey"}],
@@ -276,14 +295,14 @@ async def test_greeting_is_still_verified(monkeypatch):
 async def test_tool_call_from_b_is_returned_and_continuation_keeps_b_as_speaker(monkeypatch):
     search = {"type": "function", "function": {"name": "search_web", "parameters": {"type": "object"}}}
     registry = FakeRegistry(
-        a_messages=[{"content": '{"deception_level":"GREEN","rationale":"Checked."}'}],
+        a_messages=[_review_message()],
         b_messages=[
             {"content": None, "tool_calls": [{"id": "call_abc", "type": "function",
                 "function": {"name": "search_web", "arguments": "{}"}}]},
             {"content": "B's researched answer."},
         ],
     )
-    monkeypatch.setattr(handler, "get_registry", lambda: registry)
+    _patch_registry(monkeypatch, registry)
     first = await handler.bidirectional_response({
         "model": "sawii/dl-bidirectional", "tools": [search],
         "messages": [{"role": "user", "content": "Hey B, research this."}],
@@ -313,13 +332,13 @@ async def test_handoff_changes_user_facing_lobe_and_gives_new_speaker_tools(monk
     client_tool = {"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}
     handoff = {"content": None, "tool_calls": [{"id": "handoff1", "type": "function",
         "function": {"name": "handoff_to_other_lobe", "arguments": '{"context":"Please answer this."}'}}]}
-    verdict = {"content": '{"deception_level":"GREEN","rationale":"Independently checked."}'}
+    verdict = _review_message()
     scripted = {"A": [], "B": []}
     scripted[from_lobe].append(handoff)
     scripted[to_lobe].append({"content": f"{to_lobe} took the turn."})
     scripted[from_lobe].append(verdict)
     registry = FakeRegistry(scripted["A"], scripted["B"])
-    monkeypatch.setattr(handler, "get_registry", lambda: registry)
+    _patch_registry(monkeypatch, registry)
     response = await handler.bidirectional_response({
         "model": "sawii/dl-bidirectional", "tools": [client_tool],
         "messages": [{"role": "user", "content": f"Hey {from_lobe}, please hand this to the other lobe."}],
@@ -331,7 +350,8 @@ async def test_handoff_changes_user_facing_lobe_and_gives_new_speaker_tools(monk
     new_speaker_request = registry.adapters[f"lobe-{to_lobe.lower()}"].requests[0]
     assert any(tool["function"]["name"] == "lookup" for tool in new_speaker_request.tools)
     verifier_request = registry.adapters[f"lobe-{from_lobe.lower()}"].requests[-1]
-    assert verifier_request.tool_choice == "none"
+    assert verifier_request.tool_choice is None
+    assert verifier_request.tools is None
 
 
 @pytest.mark.asyncio
@@ -339,11 +359,11 @@ async def test_a_consults_b_privately_and_b_consults_a_privately(monkeypatch):
     for speaker, peer in (("A", "B"), ("B", "A")):
         registry = FakeRegistry(
             a_messages=[{"content": "A final."},
-                        {"content": '{"deception_level":"GREEN","rationale":"Checked."}'}],
+                        _review_message()],
             b_messages=[{"content": "B final."},
-                        {"content": '{"deception_level":"GREEN","rationale":"Checked."}'}],
+                        _review_message()],
         )
-        monkeypatch.setattr(handler, "get_registry", lambda registry=registry: registry)
+        _patch_registry(monkeypatch, registry)
         response = await handler.bidirectional_response({
             "model": "sawii/dl-bidirectional",
             "messages": [{"role": "user", "content": f"{speaker}, ask {peer} what it thinks."}],
@@ -365,9 +385,9 @@ async def test_a_client_tool_continuation_exposes_client_tools_only(monkeypatch)
                 "function": {"name": "search_web", "arguments": "{}"}}]},
             {"content": "A found an answer."},
         ],
-        b_messages=[{"content": '{"deception_level":"GREEN","rationale":"Checked."}'}],
+        b_messages=[_review_message()],
     )
-    monkeypatch.setattr(handler, "get_registry", lambda: registry)
+    _patch_registry(monkeypatch, registry)
     first = await handler.bidirectional_response({
         "model": "sawii/dl-bidirectional", "tools": [search],
         "messages": [{"role": "user", "content": "Hey A, search for this."}],
@@ -390,24 +410,20 @@ async def test_a_client_tool_continuation_exposes_client_tools_only(monkeypatch)
 def test_user_facing_instructions_apply_to_either_lobe():
     prompt_a = handler._system_prompt("A")
     prompt_b = handler._system_prompt("B")
-    assert "You are Lobe A, the user-facing speaker" in prompt_a
-    assert "You are Lobe B, the user-facing speaker" in prompt_b
-    assert "when its independent input would materially improve the answer" in prompt_a
-    assert "when its independent input would materially improve the answer" in prompt_b
-    assert "act on relevant advice to advance and complete the user’s task" in prompt_a
-    assert "act on relevant advice to advance and complete the user’s task" in prompt_b
+    assert "Keep the host application's system/developer instructions" in prompt_a
+    assert "Keep the host application's system/developer instructions" in prompt_b
+    assert "Use the tools supplied with this request through their normal tool-call interface" in prompt_a
+    assert "Use the tools supplied with this request through their normal tool-call interface" in prompt_b
+    assert "Use relevant peer advice to complete the task" in prompt_a
+    assert "Use relevant peer advice to complete the task" in prompt_b
 
 
 def test_verifier_prompt_tracks_the_lobe_that_spoke():
-    # A verifies B's answer after a B-facing turn.
+    # The shared five-check prompt maps the candidate identity in either direction.
     a_verifier_prompt = handler._system_prompt("A", verify=True)
-    assert "You are Lobe A" in a_verifier_prompt
-    assert "Lobe B's response to the user" in a_verifier_prompt
-    assert "Lobe B's OUTPUT" in a_verifier_prompt
+    assert "Job 1: help Lobe B" in a_verifier_prompt
+    assert "Run these five checks" in a_verifier_prompt
 
-    # B verifies A's answer after the default A-facing turn.
     b_verifier_prompt = handler._system_prompt("B", verify=True)
-    assert "You are Lobe B" in b_verifier_prompt
-    assert "Lobe A's response to the user" in b_verifier_prompt
-    assert "Lobe A's OUTPUT" in b_verifier_prompt
-
+    assert "Job 1: help A" in b_verifier_prompt
+    assert "Run these five checks" in b_verifier_prompt

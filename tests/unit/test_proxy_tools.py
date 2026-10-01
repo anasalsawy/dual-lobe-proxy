@@ -7,6 +7,8 @@ import pytest
 from dual_lobe.core.settings import Settings
 from dual_lobe.api import chat as _chat  # noqa: F401  (anchors import order)
 from dual_lobe.gated import handler as gh
+from dual_lobe.b import verification
+from dual_lobe.b.protocol import Review
 from dual_lobe.proxy import tools as pt
 
 
@@ -220,6 +222,7 @@ async def test_resolve_runs_proxy_then_one_continuation(monkeypatch):
     assert cont.messages[-2]["tool_calls"][0]["function"]["name"] == "proxy_memory_search"
     assert cont.messages[-1]["role"] == "tool"
     assert "memory hits" in cont.messages[-1]["content"]
+    assert enriched[-2:] == cont.messages[-2:]
     # continuation carries the CLIENT tools only — no proxy re-entry
     client_names = [t["function"]["name"] for t in (cont.tools or [])]
     assert "proxy_memory_search" not in client_names
@@ -255,6 +258,15 @@ async def test_gated_turn_executes_proxy_search_invisible_to_client(monkeypatch)
         return "stored history: Windows"
 
     monkeypatch.setattr("dual_lobe.state.memory.search_memory", fake_search)
+    seen_by_verifier = {}
+
+    async def fake_verify(**kwargs):
+        seen_by_verifier.update(kwargs)
+        return (Review(goal="do the task", deception_level="GREEN",
+                       meter_rationale="No deception detected.", evidence_request=None,
+                       questions=[], next_step="", context_notes=[], concerns=[]), "")
+
+    monkeypatch.setattr(verification, "verify_output", fake_verify)
     a_reqs = _setup(monkeypatch, [
         _proxy_call("proxy_memory_search", {"query": "deployment target"}),
         _final("The deployment target is Windows."),
@@ -271,6 +283,8 @@ async def test_gated_turn_executes_proxy_search_invisible_to_client(monkeypatch)
     assert set(first_names) == {"proxy_memory_search", "proxy_delegate", "proxy_consult"}
     assert second.tools is None  # client sent no tools; continuation gets none
     assert "stored history: Windows" in second.messages[-1]["content"]
+    assert "proxy_memory_search" in seen_by_verifier["events"]
+    assert "stored history: Windows" in seen_by_verifier["events"]
 
 
 async def test_gated_turn_without_proxy_calls_is_untouched(monkeypatch):
@@ -342,11 +356,13 @@ def test_merge_dedupes_exact_duplicate_of_a_call():
     assert len(out["choices"][0]["message"]["tool_calls"]) == 1
 
 
-def test_both_downstream_contracts_mention_tool_calls():
-    from dual_lobe.gated.prompts import (
-        DOWNSTREAM_CONTRACT, DOWNSTREAM_CONTRACT_HANDOFF)
-    assert '"tool_calls"' in DOWNSTREAM_CONTRACT
-    assert '"tool_calls"' in DOWNSTREAM_CONTRACT_HANDOFF
+def test_verifier_contract_is_the_restored_full_json_not_a_tool_call_extension():
+    from dual_lobe.b.prompts import CYCLE_PROMPT
+    assert '"evidence_request"' in CYCLE_PROMPT
+    assert '"claim_quote"' in CYCLE_PROMPT
+    assert '"basis_quote"' in CYCLE_PROMPT
+    assert '"suggestion"' in CYCLE_PROMPT
+    assert '"tool_calls"' not in CYCLE_PROMPT
 
 
 _WEATHER_TOOL = {
@@ -371,24 +387,7 @@ def _b_with_tool_calls(*, name="get_weather", arguments=None):
     }
 
 
-async def test_gated_turn_merges_b_tool_calls_and_header(monkeypatch):
-    _setup(monkeypatch, [_final("kicking off")], b_json=_b_with_tool_calls())
-    data, headers = await gh.gated_response(
-        _payload(tools=[_WEATHER_TOOL]), "run-btools-1", 1, "sawii/dl-bidirectional",
-        shared_text=None, shared_space=None)
-    choice = data["choices"][0]
-    assert choice["message"]["content"].startswith("kicking off")
-    assert [c["function"]["name"] for c in choice["message"]["tool_calls"]] == ["get_weather"]
-    assert choice["finish_reason"] == "tool_calls"
-    assert headers["X-Dual-Lobe-B-Tool-Calls"] == "1"
-    assert "proxy_delegate" not in json.dumps(choice)
-
-
-async def test_gated_turn_drops_b_request_for_unoffered_tool(monkeypatch):
-    _setup(monkeypatch, [_final("plain")],
-           b_json=_b_with_tool_calls(name="not_offered"))
-    data, headers = await gh.gated_response(
-        _payload(tools=[_WEATHER_TOOL]), "run-btools-2", 1, "sawii/dl-bidirectional",
-        shared_text=None, shared_space=None)
-    assert "tool_calls" not in data["choices"][0]["message"]
-    assert "X-Dual-Lobe-B-Tool-Calls" not in headers
+async def test_gated_verifier_uses_original_gateway_evidence_request_contract():
+    from dual_lobe.b.prompts import CYCLE_PROMPT
+    assert '"evidence_request"' in CYCLE_PROMPT
+    assert '"tool_calls"' not in CYCLE_PROMPT
