@@ -349,7 +349,7 @@ async def chat_completions(
     # Reuse B's existing group-chat recipient router on the two public model
     # IDs. Explicit A/B conversational addresses go straight to that router's
     # separate local detector and do not incur this extra B routing call.
-    clinical_secure = s.engine == "clinical" or alias == "sawii/dl-secure"
+    secure_model = alias == "sawii/dl-secure"
     if (routing_mode and routing_mode != "off" and s.recipient_routing_enabled
             and not correlation.is_bypass(corr) and not routing_requested(messages)):
         latest_user_text = _latest_user_text(messages)
@@ -365,7 +365,7 @@ async def chat_completions(
                         tenant_id=principal.tenant_id,
                         run_id=run_id,
                         mode=routing_mode,
-                        model_alias="lobe-b-clinical" if clinical_secure else "lobe-b",
+                        model_alias="lobe-b-secure" if secure_model else "lobe-b",
                         context_for_memory={"messages": messages},
                     )
                     await session.commit()
@@ -388,10 +388,9 @@ async def chat_completions(
                             alias, type(exc).__name__)
 
     # General bidirectional model: gated conversation plus explicit peer routing.
-    # Clinical service: same conversational routing, with a local B privacy gate
-    # before any A-facing call and token restoration at the response boundary.
-    # Default general gated traffic remains on its existing zero-extra-call path.
-    if clinical_secure or routing_requested(messages):
+    # The secure public model adds a local B privacy gate before A-facing calls.
+    # The general model keeps its existing zero-extra-call path unless routed.
+    if secure_model or routing_requested(messages):
         from ..bidirectional.handler import bidirectional_response
         shared_text, shared_entries = None, 0
         if memory_space:
@@ -402,7 +401,7 @@ async def chat_completions(
                 LOG.warning("shared memory load failed run=%s; refusing a memory-backed request", run_id)
                 raise HTTPException(503, "Shared memory is unavailable; no model was invoked.") from None
         result = await bidirectional_response({**payload, "stream": False}, run_id, principal.tenant_id, shared_text,
-                                              shared_space=memory_space, clinical=clinical_secure)
+                                              shared_space=memory_space, secure=secure_model)
         data = json.loads(result.body)
         private_lobe_data = data.get("dual_lobe") or {}
         safe_memory_messages = private_lobe_data.pop("_memory_messages", None)
@@ -411,7 +410,7 @@ async def chat_completions(
         data["dual_lobe"] = {**(data.get("dual_lobe") or {}), "memory_space": memory_space or "off",
                              "shared_entries": shared_entries}
         memory_messages = messages
-        if clinical_secure and memory_space:
+        if secure_model and memory_space:
             # Persist only the already gated request snapshot. Strip ephemeral
             # tokens too: their vault keys are request-scoped and cannot be
             # recovered on later turns.
