@@ -224,7 +224,7 @@ def _system_prompt(speaker: str, *, verify: bool = False, tools: list[dict] | No
 def _role_specific_verifier_text(text: str, verifier: str) -> str:
     """Adapt the shared A-facing verifier rubric to whichever lobe spoke."""
     speaker = "B" if verifier == "A" else "A"
-    return re.sub(r"\bA\b", f"Lobe {speaker}", text)
+    text = re.sub(r"\bA\b", f"Lobe {speaker}", text)
     return text.replace("Gate-B", f"Lobe {verifier}")
 
 async def _call(alias: str, messages: list[dict[str, Any]], payload: dict[str, Any], *,
