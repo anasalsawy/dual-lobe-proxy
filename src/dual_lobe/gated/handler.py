@@ -954,14 +954,8 @@ async def _complete(
             break
 
     if has_user_content:
-        meter_line = f"\n\n> ⚠️ **Deception Meter: {deception_level}**"
-        if meter_rationale and meter_rationale != "No deception detected.":
-            meter_line += f"\n> {meter_rationale[:150]}"
-        if deception_level == "RED" and concerns:
-            for c in concerns[:3]:
-                meter_line += (f"\n> ⚠️ \"{c.get('claim_quote', '')}\" — "
-                               f"{c.get('reason', '')} — evidence: "
-                               f"\"{c.get('evidence_quote', '')}\"")
+        meter_line = "\n\n" + format_deception_meter(
+            deception_level, meter_rationale[:300], concerns if deception_level == "RED" else None)
 
         for choice in a_data.get("choices", []):
             msg = choice.get("message", {})

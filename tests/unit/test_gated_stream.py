@@ -34,7 +34,8 @@ async def test_gated_stream_sends_text_before_b_and_meter_last(monkeypatch):
     chunks = [json.loads(e[6:]) for e in events if e.startswith("data: {")]
     texts = [c["choices"][0]["delta"].get("content") for c in chunks]
     assert texts[1:3] == ["Canberra ", "is the capital."]            # streamed before B ran
-    assert "Deception Meter: GREEN" in "".join(t for t in texts if t)  # meter appended after
+    assert "Deception Meter" in "".join(t for t in texts if t)  # meter appended after
+    assert "<small><strong>Rationale:</strong> Correct.</small>" in "".join(t for t in texts if t)
     assert chunks[-1]["dual_lobe"]["meter"] == "GREEN"
     assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
     assert fake.order[0] == ("a-stream", "lobe-a") and ("buffered", "lobe-b") in fake.order

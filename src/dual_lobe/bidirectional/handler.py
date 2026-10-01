@@ -540,7 +540,7 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
         answer = vault.rehydrate_text(answer)
         meter = vault.rehydrate_text(meter)
         vault.destroy_key()
-    return f"{answer}\n\nDual-Lobe meter: {meter}", [], {
+    return f"{answer}\n\n{meter}", [], {
         "mode": "bidirectional", "speaker": speaker, "verifier": verifier,
         "verdict": verdict, "consulted": consulted or bool(consult_calls),
         "privacy_gate": gate_result,

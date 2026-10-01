@@ -164,9 +164,11 @@ async def test_b_can_speak_use_client_tools_and_a_verifies(monkeypatch):
         "tools": tools,
     })
     body = json.loads(response.body)
-    assert body["choices"][0]["message"]["content"] == (
-        "My answer from B.\n\nDual-Lobe meter: [GREEN] Matches the evidence."
-    )
+    answer = body["choices"][0]["message"]["content"]
+    assert answer.startswith("My answer from B.\n\n")
+    assert "### 🛡️ Deception Meter" in answer
+    assert "**🟢 GREEN**" in answer
+    assert "<small><strong>Rationale:</strong> Matches the evidence.</small>" in answer
     assert body["dual_lobe"]["speaker"] == "B"
     assert body["dual_lobe"]["verifier"] == "A"
     assert registry.adapters["lobe-b"].requests[0].tools[0]["function"]["name"] == "search_web"
