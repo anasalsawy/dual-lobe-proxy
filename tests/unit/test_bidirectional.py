@@ -204,6 +204,8 @@ async def test_a_can_consult_b_privately_then_b_verifies(monkeypatch):
     verifier_prompt = registry.adapters["lobe-b"].requests[-1].messages[-1]["content"]
     assert "[Internal consultation completed by proxy]" in verifier_prompt
     assert "B's independent input." in verifier_prompt
+    verifier_system = registry.adapters["lobe-b"].requests[-1].messages[0]["content"]
+    assert "trusted execution metadata" in verifier_system
 
 
 @pytest.mark.asyncio
