@@ -29,6 +29,7 @@ from ..core.settings import get_settings
 from ..provider.adapters import NormalizedRequest, response_dict
 from ..provider.registry import get_registry
 from ..state import repositories as repo
+from ..bidirectional.routing import lobe_address
 from .rules import parse_rule_command, add_rule, get_active_rules, normalize_agent_name
 
 LOG = logging.getLogger("dual_lobe.b.recipient_router")
@@ -89,6 +90,11 @@ _DIRECT_REQUEST_VERB = r"(?:please|can|could|would|will|do|tell|ask|consult|mess
 def explicit_addressee(message: str) -> str | None:
     """Recognize only clear lexical addresses; leave ordinary mentions semantic."""
     text = message.strip()
+    # Lobe-letter addresses ("hey B", "lobe A", "@b", "B:", re-addresses) use the
+    # shared strengthened detector so the two models never drift.
+    lobe = lobe_address(text)
+    if lobe is not None:
+        return lobe
     match = re.match(r"^@([A-Za-z][A-Za-z0-9_-]{0,39})\b", text)
     if match:
         return match.group(1)

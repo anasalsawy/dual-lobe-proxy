@@ -27,7 +27,7 @@ from ..provider import calltrace
 from ..proxy.tools import (CONSULT, DELEGATE, MEMORY_SEARCH, execute_proxy_call,
                            is_proxy_tool, proxy_tool_schemas)
 from ..state.memory import inject_shared_memory
-from .routing import routing_requested
+from .routing import lobe_address, routing_requested
 
 LOG = logging.getLogger("dual_lobe.bidirectional")
 
@@ -166,13 +166,11 @@ def select_speaker(messages: list[dict[str, Any]]) -> str:
         if resolved and len(set(resolved)) == 1:
             return resolved[0]
 
-    text = latest_user_text(messages).lstrip()
-    match = re.match(
-        r"(?i)^(?:(?:hey|hi|hello|yo)\s+(?:lobe\s+)?([ab])\b|"
-        r"(?:lobe\s+)?([ab])\s*(?:[,!:]|\b(?:ask|please|what|help|answer|respond)\b))",
-        text,
-    )
-    return next((group.upper() for group in match.groups() if group), "A") if match else "A"
+    text = latest_user_text(messages)
+    addressed = lobe_address(text)
+    if addressed:
+        return addressed
+    return "A"
 
 
 def requested_consultee(text: str, speaker: str) -> str | None:
