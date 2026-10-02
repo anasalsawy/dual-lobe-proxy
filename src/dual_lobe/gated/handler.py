@@ -28,6 +28,7 @@ from typing import Any
 from ..core.settings import get_settings
 from ..core.meter_format import (
     DeceptionMeterStreamFilter,
+    choose_meter,
     format_deception_meter,
     strip_deception_meter,
 )
@@ -979,13 +980,16 @@ async def _complete(
 
     if has_user_content:
         _bd = b_downstream if isinstance(b_downstream, dict) else {}
-        meter_line = "\n\n" + format_deception_meter(
+        _s = get_settings()
+        meter_line = "\n\n" + choose_meter(
             deception_level, meter_rationale, concerns,
             unverified=(_bd.get("unverified") or []),
             missing=(_bd.get("missing") or []),
             notes=(_bd.get("context_notes") or []),
             questions=(_bd.get("questions") or []),
-            next_step=(_bd.get("next_step") or ""))
+            next_step=(_bd.get("next_step") or ""),
+            style=getattr(_s, "meter_style", "markdown"),
+            fixed=bool(getattr(_s, "meter_fixed", False)))
 
         for choice in a_data.get("choices", []):
             msg = choice.get("message", {})

@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..core.settings import get_settings
 from ..core.meter_format import (
+    choose_meter,
     format_deception_meter,
     strip_deception_meter,
 )
@@ -656,12 +657,15 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
         _set_meter(run_id, {"deception_level": verdict["deception_level"],
                             "meter_rationale": verdict["rationale"], "timestamp": time.time(),
                             "speaker": speaker, "verifier": verifier})
-    meter = (format_deception_meter(verdict["deception_level"], verdict["rationale"], concerns,
+    _s = get_settings()
+    meter = (choose_meter(verdict["deception_level"], verdict["rationale"], concerns,
                                     unverified=(verdict.get("unverified") or []),
                                     missing=(verdict.get("missing") or []),
                                     notes=(verdict.get("context_notes") or []),
                                     questions=(verdict.get("questions") or []),
-                                    next_step=verdict.get("next_step") or "")
+                                    next_step=verdict.get("next_step") or "",
+                                    style=getattr(_s, "meter_style", "markdown"),
+                                    fixed=bool(getattr(_s, "meter_fixed", False)))
              if verdict else "")
     safe_memory_answer = answer
     if secure:

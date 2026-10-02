@@ -127,6 +127,14 @@ class Settings(BaseSettings):
     # facts). No extra B call, no extra latency hop.
     gated_b_handoff: bool = Field(default=True, validation_alias="DUAL_LOBE_GATED_B_HANDOFF")
 
+    # Meter presentation: "markdown" (default, portable) or "html" (styled —
+    # small text, level colour + tinted background, right-aligned). The HTML
+    # form is a client-rendered fragment; flip only when the client renders HTML.
+    meter_style: str = Field(default="markdown", validation_alias="DUAL_LOBE_METER_STYLE")
+    # With meter_style=html: pin the meter as a bottom-right fixed badge
+    # (position:fixed) instead of an inline right-aligned block.
+    meter_fixed: bool = Field(default=False, validation_alias="DUAL_LOBE_METER_FIXED")
+
     # Proxy-owned server-side tools for A (gated path only): inline execution,
     # one same-turn continuation, never visible to the client.
     proxy_tools_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_PROXY_TOOLS")
