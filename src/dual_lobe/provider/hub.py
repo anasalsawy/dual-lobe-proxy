@@ -164,7 +164,15 @@ def _classify(exc: BaseException) -> tuple[float, str]:
             daily = _daily_cool(exc.response)
             if daily is not None:
                 return daily, "429 daily quota used up"
-            return 0.0, "429"  # the slot's gate already parked itself for Retry-After
+            # A per-minute 429 still means *this slot cannot serve right now*.
+            # The slot's pacing gate parks itself for Retry-After, and we mirror
+            # that here: without a cool-down the hub keeps this slot "healthy",
+            # keeps selecting it, and every call burns a retry on a throttled
+            # provider instead of rotating to one that can serve.
+            retry = ratelimit._seconds(
+                {str(k).lower(): str(v) for k, v in dict(exc.response.headers).items()}.get("retry-after")
+            ) or ratelimit._retry_from_body(_body(exc.response)) or 5.0
+            return max(1.0, min(ratelimit.MAX_BACKOFF, float(retry))), "429"
         if code == 402:
             return COOL_AUTH, "provider credit or payment required"
         if code in (401, 403, 404):
@@ -206,19 +214,33 @@ class HubAdapter:
     def _order(self, req: Any) -> list[tuple]:
         order = _rotation(self._own)
         tokens = ratelimit.estimate_request_tokens(req)
-        # Healthy slots that can serve right now keep their rotation order; slots
-        # that are cooling or would make the caller wait on pacing go last,
-        # soonest-available first, so the call never parks while another slot is free.
-        ready, later = [], []
+        # Split slots into those that can serve right now and those that are
+        # cooling (recently failed) or would park the caller on pacing. Healthy
+        # slots always come first and, crucially, cooling slots are only tried
+        # when NO healthy slot exists — otherwise a call keeps re-hitting a
+        # throttled provider, re-triggering its cool-down, and the rotation
+        # never heals. Slots that merely need to *wait* (pacing, but not
+        # failed) stay in the rotation, soonest-available first.
+        ready, waiting, cooling = [], [], []
         for ident in order:
-            wait = max(_cooling(ident), ratelimit.gate_for(self._adapters[ident].target).estimate_wait(tokens))
-            (ready if wait <= 0 else later).append((wait, ident))
-        later.sort(key=lambda item: item[0])
+            cool = _cooling(ident)
+            if cool > 0:
+                cooling.append((cool, ident))
+                continue
+            wait = ratelimit.gate_for(self._adapters[ident].target).estimate_wait(tokens)
+            (waiting if wait > 0 else ready).append((wait, ident))
         if _strategy() == "fastest":
             # Fastest healthy slot first (measured speed, rotation order breaks ties;
             # unmeasured slots count as fast so each gets tried).
             ready.sort(key=lambda item: _HEALTH[item[1]].get("speed") or 0.0)
-        return [ident for _, ident in ready] + [ident for _, ident in later]
+        waiting.sort(key=lambda item: item[0])
+        cooling.sort(key=lambda item: item[0])
+        if ready:
+            # A healthy slot exists: never touch a cooling one this call.
+            return [i for _, i in ready] + [i for _, i in waiting]
+        # Everything is cold or pacing; try the soonest-recovering cooling slot
+        # last so a partial outage still degrades gracefully instead of failing.
+        return [i for _, i in waiting] + [i for _, i in cooling]
 
     async def buffered(self, req: Any):
         last: BaseException | None = None

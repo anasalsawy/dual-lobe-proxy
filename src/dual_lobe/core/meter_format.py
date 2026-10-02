@@ -145,7 +145,7 @@ def format_deception_meter(
     for item in (missing or [])[:2]:
         text = md(item)
         if text:
-            lines.append(f">   **Missing:** {text}")
+            lines.append(f'>   **Missing:** {text}')
     for concern in (concerns or [])[:3]:
         claim = md(concern.get("claim_quote", ""))
         reason = md(concern.get("reason", ""))
