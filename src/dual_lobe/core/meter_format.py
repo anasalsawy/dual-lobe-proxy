@@ -199,8 +199,8 @@ METER_CSS = """
 .dl-meter summary{cursor:pointer;list-style:none;display:inline;user-select:none}
 .dl-meter summary::-webkit-details-marker{display:none}
 .dl-meter summary:hover{text-decoration:underline dotted}
-.dl-meter .dl-body{margin:6px 0 0 0;padding:6px 0 0 0;text-align:left;
-  border-top:1px solid var(--dl-c);white-space:pre-wrap;word-break:break-word}
+.dl-meter .dl-body{margin:4px 0 0 0;padding:6px 8px;text-align:left;
+  border-left:2px solid var(--dl-c);white-space:pre-wrap;word-break:break-word}
 .dl-meter.dl-fixed{position:fixed;right:12px;bottom:10px;left:auto;top:auto;
   z-index:2147483000;margin:0;max-width:min(64ch,46vw);
   box-shadow:0 2px 10px rgba(0,0,0,.18)}
