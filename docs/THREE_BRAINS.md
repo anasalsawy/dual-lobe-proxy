@@ -66,13 +66,27 @@ changing configuration, with no rewrite of the pipeline. Build the seam first;
 the expensive part (the parallel pair) waits until the divergence question is
 answered.
 
+## Decided
+
+- **The two non-emotional brains are different from each other, and both reason
+  about DATA - facts and structure - not emotions.** Their divergence is over the
+  substance of the answer, not over how it feels.
+- **The emotional brain is the separate affect line** (the episodic notebook). It
+  does not reason about data and never touches the meter.
+
+The payoff ties directly into dual-perspective memory: because both non-emotional
+brains reason about data, **recall carries valuable data too** - when A recalls a
+moment he gets his own memory, the *other data-brain's angle* on the same moment,
+and the observer's affect fragment. Recall is therefore a source of new *facts*,
+not only new feeling.
+
 ## Decisions still open
 
-1. The two non-emotional brains: **different models** (strongest, costliest) or
-   **same model, sampled differently** (ensemble)?
+1. Convergence: **agreement vote**, **one adjudicating**, or **surface the
+   disagreement to the user**?
 2. Does B *become* the observer, or is the observer a new brain with B staying as
    verifier?
-3. Does the pair converge by **agreement vote**, by **one adjudicating**, or by
-   **surfacing the disagreement to the user**?
+3. Which models back the two data reasoners (they must differ - different model,
+   temperature, or reasoning path - for divergence to be real).
 
 Until these are answered, only the config seam should be built.

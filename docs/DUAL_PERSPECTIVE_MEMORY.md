@@ -45,6 +45,14 @@ The B-fragment is framed explicitly as *what the other line was thinking* - a
 perspective, not a fact, not an instruction. It never becomes a verified claim and
 never touches the meter.
 
+## Recall carries data, not only feeling
+
+The two non-emotional brains (see docs/THREE_BRAINS.md) both reason about **data**
+and are deliberately different from each other. So the "other line" A recovers at
+recall is not only an affect fragment - it is a **second data angle** on the same
+moment. Recall becomes a genuine source of new *facts*: A gets his own memory, the
+other reasoner's conclusion about the same event, and how it felt.
+
 ## Why this is good (and what it buys)
 
 - **Context broadening.** A narrow recall becomes rich: the answer carries an
