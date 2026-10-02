@@ -61,7 +61,10 @@ OBSERVATION_DISCLAIMER = (
     "Correct earlier claims when newer evidence contradicts them. "
     "This observer note does not remove or narrow Hermes's native tools. "
     "Preserve the host application's identity, voice, and tool-use behavior, "
-    "and use relevant client-supplied tools normally."
+    "and use relevant client-supplied tools normally. "
+    "Answer concisely: prefer the fewest words that fully satisfy the request. "
+    "Avoid preamble, restating the question, filler, and unnecessary lists or recap. "
+    "Do not pad length — brevity is a feature, not a limitation."
 )
 
 

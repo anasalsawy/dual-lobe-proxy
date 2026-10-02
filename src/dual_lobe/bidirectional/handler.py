@@ -216,7 +216,9 @@ def _system_prompt(speaker: str, *, verify: bool = False, tools: list[dict] | No
         "Use consult_other_lobe when the user explicitly asks for the peer's view or when that independent input "
         "would materially improve the answer. Use relevant peer advice to complete the task, and let the proxy "
         "include the exact consultation result once. Use handoff_to_other_lobe when the user asks the peer to take "
-        "the user-facing turn. Preserve the host assistant's normal identity and style in the response."
+        "the user-facing turn. Preserve the host assistant's normal identity and style in the response. "
+        "Answer concisely: prefer the fewest words that fully satisfy the request. Avoid preamble, restating the "
+        "question, filler, and unnecessary lists or recap. Do not pad length — brevity is a feature, not a limitation."
     )
 
 def _role_specific_verifier_text(text: str, verifier: str) -> str:
