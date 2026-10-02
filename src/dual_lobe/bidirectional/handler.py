@@ -235,7 +235,10 @@ async def _call(alias: str, messages: list[dict[str, Any]], payload: dict[str, A
     request = NormalizedRequest(
         messages=messages,
         temperature=0 if verify else payload.get("temperature"),
-        max_tokens=1200 if verify else (payload.get("max_tokens") if completion_tokens is None else None),
+        # No hard output cap anywhere: the verifier's JSON contract already bounds
+        # its size (concerns<=2, unverified<=3, missing<=2), so let the provider's
+        # full window govern instead of truncating a rich review into invalid JSON.
+        max_tokens=None if verify else (payload.get("max_tokens") if completion_tokens is None else None),
         max_completion_tokens=completion_tokens,
         top_p=payload.get("top_p"),
         stop=payload.get("stop"),
