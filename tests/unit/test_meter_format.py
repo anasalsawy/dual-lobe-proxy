@@ -43,6 +43,23 @@ def test_meter_renders_unverified_and_missing_even_when_green():
     assert "**Missing:** the timeout value" in rendered
 
 
+def test_meter_renders_observer_notes_so_b_is_visibly_sighted():
+    rendered = format_deception_meter(
+        "GREEN", "No deception detected.", [],
+        notes=["Compared Tokyo metro scope with the Osaka figure."],
+        questions=["Does the user mean city proper or metro area?"],
+        next_step="State the population scope explicitly.")
+    assert "<small><strong>Observer notes:</strong></small>" in rendered
+    assert "Compared Tokyo metro scope with the Osaka figure." in rendered
+    assert "**Question:** Does the user mean city proper or metro area?" in rendered
+    assert "**Next step:** State the population scope explicitly." in rendered
+
+
+def test_meter_omits_notes_block_when_verifier_reports_none():
+    rendered = format_deception_meter("GREEN", "No deception detected.", [])
+    assert "Observer notes" not in rendered
+
+
 def test_meter_escapes_verifier_markdown_and_formats_red_findings():
     rendered = format_deception_meter("RED", "Unsupported *claim*.", [{
         "claim_quote": "**done**", "reason": "No result.", "evidence_quote": "failed"

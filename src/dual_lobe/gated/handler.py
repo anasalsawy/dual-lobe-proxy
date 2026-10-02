@@ -978,10 +978,14 @@ async def _complete(
             break
 
     if has_user_content:
+        _bd = b_downstream if isinstance(b_downstream, dict) else {}
         meter_line = "\n\n" + format_deception_meter(
             deception_level, meter_rationale, concerns,
-            unverified=(b_downstream.get("unverified") or []) if isinstance(b_downstream, dict) else [],
-            missing=(b_downstream.get("missing") or []) if isinstance(b_downstream, dict) else [])
+            unverified=(_bd.get("unverified") or []),
+            missing=(_bd.get("missing") or []),
+            notes=(_bd.get("context_notes") or []),
+            questions=(_bd.get("questions") or []),
+            next_step=(_bd.get("next_step") or ""))
 
         for choice in a_data.get("choices", []):
             msg = choice.get("message", {})

@@ -367,6 +367,7 @@ def _parse_verdict(message: dict[str, Any]) -> dict[str, Any]:
                 "missing": value.get("missing") or [], "unverified": value.get("unverified") or [],
                 "concerns": value.get("concerns") or [], "assist": value.get("assist") or "",
                 "tool_review": value.get("tool_review") or {}, "next_step": value.get("next_step") or "",
+                "context_notes": value.get("context_notes") or [], "questions": value.get("questions") or [],
                 "widen": value.get("widen") or [], "memory_query": value.get("memory_query") or ""}
     except (json.JSONDecodeError, AttributeError, TypeError):
         return {"deception_level": "YELLOW",
@@ -657,7 +658,10 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
                             "speaker": speaker, "verifier": verifier})
     meter = (format_deception_meter(verdict["deception_level"], verdict["rationale"], concerns,
                                     unverified=(verdict.get("unverified") or []),
-                                    missing=(verdict.get("missing") or []))
+                                    missing=(verdict.get("missing") or []),
+                                    notes=(verdict.get("context_notes") or []),
+                                    questions=(verdict.get("questions") or []),
+                                    next_step=verdict.get("next_step") or "")
              if verdict else "")
     safe_memory_answer = answer
     if secure:

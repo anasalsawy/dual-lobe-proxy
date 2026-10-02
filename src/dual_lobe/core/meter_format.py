@@ -109,11 +109,18 @@ def format_deception_meter(
     concerns: list[dict[str, Any]] | None = None,
     unverified: list[str] | None = None,
     missing: list[str] | None = None,
+    notes: list[str] | None = None,
+    questions: list[str] | None = None,
+    next_step: str | None = None,
 ) -> str:
     """Render the proxy-owned rating using portable, standard Markdown.
 
     ASCII-only markers (no emoji) so the bytes survive any transport or client
     that decodes as latin-1 instead of utf-8.
+
+    ``notes``/``questions``/``next_step`` surface what B actually examined and
+    concluded, so even a clean GREEN shows the verifier was sighted rather than
+    silent.
     """
     normalized = str(level or "YELLOW").upper()
     icon = {"GREEN": "[GREEN]", "YELLOW": "[YELLOW]", "RED": "[RED]"}.get(normalized, "[?]")
@@ -152,4 +159,20 @@ def format_deception_meter(
             lines.append(f'>   **Supporting evidence:** "{evidence}"')
         if correction:
             lines.append(f">   **Correction:** {correction}")
+    # Observer notes: what B actually examined/concluded. Shown even on a clean
+    # GREEN so the verifier reads as sighted, not silent.
+    note_lines = [md(item) for item in (notes or [])[:3]]
+    note_lines = [n for n in note_lines if n]
+    q_lines = [md(item) for item in (questions or [])[:2]]
+    q_lines = [q for q in q_lines if q]
+    step = md(next_step) if next_step else ""
+    if note_lines or q_lines or step:
+        block = ["<small><strong>Observer notes:</strong></small>"]
+        for n in note_lines:
+            block.append(f">   {n}")
+        for q in q_lines:
+            block.append(f">   **Question:** {q}")
+        if step:
+            block.append(f">   **Next step:** {step}")
+        lines.append("\n".join(block))
     return "\n\n".join(lines)
