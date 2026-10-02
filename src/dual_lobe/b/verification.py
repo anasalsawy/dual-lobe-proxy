@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from typing import Any
 
@@ -17,6 +18,8 @@ from .protocol import Review, ground_review, parse_review
 from ..core.settings import get_settings
 from ..provider.adapters import NormalizedRequest, response_dict
 from ..provider.registry import get_registry
+
+LOG = logging.getLogger("dual_lobe.b.verification")
 
 
 def verifier_system(candidate_lobe: str) -> str:
@@ -52,10 +55,17 @@ def build_prompt(*, candidate_lobe: str, context: str, output: str, events: str,
 
 
 async def _call_review(target_alias: str, system: str, prompt: str) -> Review:
-    """Run the fixed JSON verifier and retry once only for invalid/ungrounded JSON."""
+    """Run the fixed JSON verifier and retry once only for invalid/ungrounded JSON.
+
+    Guard for reasoning-model fallbacks: a model that spends its whole budget on
+    hidden reasoning returns ``finish_reason="length"`` with ``content=None``.
+    That is not a contract violation the model can fix by "trying harder", so the
+    retry raises the output budget and asks for the JSON directly instead.
+    """
     s = get_settings()
     adapter = get_registry().adapter(target_alias)
     correction = ""
+    max_tokens = s.b_max_output_tokens
     last_error: Exception | None = None
     for attempt in range(2):
         async with asyncio.timeout(s.b_timeout if target_alias.startswith("lobe-b") else s.a_timeout):
@@ -63,12 +73,32 @@ async def _call_review(target_alias: str, system: str, prompt: str) -> Review:
                 messages=[{"role": "system", "content": system},
                           {"role": "user", "content": prompt + correction}],
                 temperature=0,
-                max_tokens=s.b_max_output_tokens,
+                max_tokens=max_tokens,
                 response_format={"type": "json_object"},
                 timeout=s.b_timeout if target_alias.startswith("lobe-b") else s.a_timeout,
             ))
         data = response_dict(response)
-        content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        choices = data.get("choices") or [{}]
+        choice = choices[0] if choices else {}
+        content = (choice.get("message") or {}).get("content") or ""
+        finish_reason = choice.get("finish_reason")
+        if not str(content).strip():
+            # Empty content: the model truncated inside its reasoning channel.
+            # Give it room and tell it to answer without narrating.
+            last_error = ValueError(
+                f"observer returned empty content (finish_reason={finish_reason})"
+            )
+            LOG.warning(
+                "verifier empty content alias=%s finish_reason=%s attempt=%s",
+                target_alias, finish_reason, attempt,
+            )
+            if attempt == 0:
+                max_tokens = max(max_tokens, 8000)
+                correction = (
+                    "\n\nReturn ONLY the JSON object. Do not narrate your reasoning. "
+                    "Output the complete contract immediately as valid JSON."
+                )
+            continue
         try:
             review = parse_review(str(content), require_complete=True)
             return ground_review(review, prompt)
