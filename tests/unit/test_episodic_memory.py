@@ -74,3 +74,23 @@ def test_callbacks_shrink_when_over_budget():
     notes = [{"kind": "detail", "quote": "x" * 300} for _ in range(3)]
     text = compose_callbacks("main", notes, 600)
     assert text is not None and len(text) <= 600
+
+
+def test_note_query_terms_drops_stopwords_and_short_words():
+    """A generic message must not produce terms that spuriously match a note."""
+    from dual_lobe.state.memory import note_query_terms
+    terms = note_query_terms([{"role": "user", "content": "help me pick a hex color for the button"}])
+    assert "the" not in terms and "for" not in terms and "help" not in terms
+    assert "color" in terms and "button" in terms and "pick" in terms
+
+
+def test_note_query_terms_keeps_meaningful_topic_words():
+    from dual_lobe.state.memory import note_query_terms
+    terms = note_query_terms([{"role": "user", "content": "back to the retry loop bug"}])
+    assert "retry" in terms and "loop" in terms
+    assert "back" not in terms and "the" not in terms
+
+
+def test_note_query_terms_empty_for_pure_stopwords():
+    from dual_lobe.state.memory import note_query_terms
+    assert note_query_terms([{"role": "user", "content": "help me with that the back"}]) == []

@@ -41,6 +41,31 @@ def query_text(messages: list[dict]) -> str:
     return " OR ".join(dict.fromkeys(words[-12:]))
 
 
+# Common words that must not, on their own, pull a personal note back into the
+# conversation. Without this, "help me pick a color for the button" matches a
+# note whose search_text contains the word "the" and resurfaces an unrelated
+# memory. Notes use a stricter, meaningful-terms-only query.
+_NOTE_STOPWORDS = {
+    "the", "and", "for", "you", "your", "with", "this", "that", "what", "when",
+    "have", "has", "was", "were", "are", "can", "could", "would", "should",
+    "please", "help", "just", "like", "some", "any", "our", "out", "not",
+    "but", "all", "get", "got", "how", "why", "who", "let", "now", "new",
+    "one", "two", "use", "using", "make", "made", "want", "need", "back",
+}
+
+
+def note_query_terms(messages: list[dict]) -> list[str]:
+    """Meaningful terms (>=4 chars, no stopwords) of the latest user message.
+
+    A personal note is only eligible to resurface when one of its meaningful
+    terms appears in the current topic. This is deliberately conservative: a
+    missed callback is harmless, a spurious one feels wrong.
+    """
+    recent = [m.get("content") for m in messages if m.get("role") == "user"][-1:]
+    raw = re.findall(r"[^\W_]{4,64}", json.dumps(recent, ensure_ascii=False).lower())
+    return list(dict.fromkeys(w for w in raw if w not in _NOTE_STOPWORDS))[:12]
+
+
 def query_words(query: str) -> list[str]:
     """Keyword extraction for explicit queries (e.g. one chosen by B)."""
     words = re.findall(r"[^\W_]{3,64}", str(query or "").lower())
@@ -136,10 +161,13 @@ class MemoryStore:
             selected = {e.id: e for e in [*recent, *relevant, *([first] if first else [])]}
             entries = [{"id": e.id, "run_id": str(e.run_id), "at": e.created_at.isoformat(),
                         "excerpt": e.search_text} for e in sorted(selected.values(), key=lambda e: e.id, reverse=True)]
-            # Personal/emotional notes: rank by the same topic query so a memory
-            # resurfaces exactly when the topic it was anchored to returns.
+            # Personal/emotional notes: eligible only when a MEANINGFUL term of
+            # the current message (no stopwords, >=4 chars) appears in the note.
+            # This keeps an unrelated turn from dredging up a past memory.
             note_rows = []
-            if query:
+            terms = note_query_terms(messages)
+            if terms:
+                note_query = " OR ".join(terms)
                 note_rows = list((await session.execute(
                     select(MemoryNote.id, MemoryNote.kind, MemoryNote.anchor, MemoryNote.quote,
                            MemoryNote.feeling, MemoryNote.created_at, MemoryNote.salience)
@@ -148,7 +176,7 @@ class MemoryStore:
                     .order_by(text("ts_rank_cd(to_tsvector('simple', search_text), "
                                    "websearch_to_tsquery('simple', :memory_query)) "
                                    "+ salience * 0.2 DESC"), MemoryNote.id.desc())
-                    .limit(3), {"memory_query": query})).all())
+                    .limit(3), {"memory_query": note_query})).all())
         rendered = compose(self.space, notes, entries, budget)
         injected_ids = tuple(e["id"] for e in json.loads(rendered.split("\n", 1)[1])["entries"])
         callbacks = compose_callbacks(self.space, [

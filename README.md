@@ -61,6 +61,14 @@ uv run --locked pytest tests/unit -q
 
 For database integration tests, run `uv run --locked pytest -q` with a permitted Docker daemon. Local tests use scripted model replies and do not prove model quality or provider compatibility. A live provider test requires configured provider credentials and a running proxy.
 
+## Episodic memory
+
+At the end of a turn, B also acts as a quiet observer: it records small, personal
+things the user said that nobody followed up on, each carrying the user's own
+verbatim words, and A can recall them when the same topic returns. Notes are
+quotable and auditable - B cannot manufacture a memory. Disable with
+`DUAL_LOBE_EPISODIC_MEMORY=false`. See [Episodic memory](docs/EPISODIC_MEMORY.md).
+
 ## Design notes
 
 The implementation details, request-by-request routing matrix, privacy gate contract, token lifecycle, and test coverage are in [Two model variants](docs/TWO_MODEL_VARIANTS.md). The repository contains only the two variants documented here; group-chat routing and A/B conversation routing are separate features described in [Recipient routing](docs/RECIPIENT_ROUTING.md).
