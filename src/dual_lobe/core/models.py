@@ -56,6 +56,10 @@ class ApiKey(Base):
     key_hash: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     label: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     scopes: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    # Companion identity: any surface presenting this key is the same persona and
+    # therefore shares one memory. Empty string means "no companion scope" - the
+    # key behaves as before and memory falls back to the caller-chosen space.
+    persona: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

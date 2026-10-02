@@ -27,6 +27,9 @@ class Principal:
     tenant_id: int
     tenant_slug: str
     scopes: frozenset[str]
+    # Companion identity: surfaces presenting the same key share this persona and
+    # therefore one memory. Empty when the key has no persona assigned.
+    persona: str = ""
 
     def has(self, scope: str) -> bool:
         return scope in self.scopes
@@ -53,7 +56,8 @@ async def load_principal(raw_key: str) -> Principal | None:
         tenant = res.scalar_one_or_none()
     if tenant is None:
         return None
-    return Principal(tenant_id=k.tenant_id, tenant_slug=tenant.slug, scopes=frozenset(k.scopes or []))
+    return Principal(tenant_id=k.tenant_id, tenant_slug=tenant.slug,
+                     scopes=frozenset(k.scopes or []), persona=(k.persona or ""))
 
 
 async def _extract_token(request: Request) -> str | None:

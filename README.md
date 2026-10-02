@@ -61,6 +61,16 @@ uv run --locked pytest tests/unit -q
 
 For database integration tests, run `uv run --locked pytest -q` with a permitted Docker daemon. Local tests use scripted model replies and do not prove model quality or provider compatibility. A live provider test requires configured provider credentials and a running proxy.
 
+## Companion and multi-brain (proposals)
+
+- **docs/COMPANION.md** - one persona, many surfaces. Persona = API key: any
+  surface presenting the key shares one memory. Phase 1 (persona column +
+  scope) is implemented.
+- **docs/DUAL_PERSPECTIVE_MEMORY.md** - one event, two memory lines: A's journal
+  plus B's contemporaneous observation, so recall carries a second perspective.
+- **docs/THREE_BRAINS.md** - two parallel non-emotional reasoners + one emotional
+  observer; builds on the existing A/B seam via configuration.
+
 ## Episodic memory
 
 At the end of a turn, B also acts as a quiet observer: it records small, personal

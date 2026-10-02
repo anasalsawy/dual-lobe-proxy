@@ -336,6 +336,11 @@ async def chat_completions(
     target_alias = alias
     requested_space = request.headers.get("X-DL-Memory-ID")
     selected_space = requested_space if requested_space is not None else (s.default_memory_id if s.shared_memory_enabled else None)
+    # Companion identity: when the key carries a persona, it is the memory scope.
+    # Every surface presenting that key is the same persona and therefore shares
+    # one memory, regardless of any per-request X-DL-Memory-ID.
+    if principal.persona:
+        selected_space = f"persona:{principal.persona}"
     try:
         memory_space = validate_space(selected_space) if selected_space and selected_space != "off" else None
     except ValueError as exc:
