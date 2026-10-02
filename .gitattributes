@@ -1,0 +1,10 @@
+# Normalize line endings so shell scripts and Dockerfiles never ship CRLF.
+# Railway's Docker build runs start.sh under dash, where a CRLF turns
+# "set -e" into "set -e\r" -> "set: Illegal option -".
+* text=auto eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.py text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
