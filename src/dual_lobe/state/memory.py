@@ -17,7 +17,7 @@ from sqlalchemy.orm import load_only
 
 from ..b.prompts import head_tail
 from ..core.engine import tenant_session
-from ..core.models import MemorySpace, MemoryEntry
+from ..core.models import MemorySpace, MemoryEntry, MemoryNote
 from ..core.settings import get_settings
 
 
@@ -75,11 +75,38 @@ def compose(space: str, notes: str, entries: list[dict], budget: int) -> str:
     return result
 
 
+def compose_callbacks(space: str, notes: list[dict], budget: int) -> str | None:
+    """Render personal/emotional notes as a 'callbacks' block for A.
+
+    Deliberately framed as *past statements by the user*, not as facts or
+    instructions, and every item carries the user's verbatim quote so A can only
+    raise a memory that actually happened. Returns None when there is nothing.
+    """
+    if not notes:
+        return None
+    prefix = ("Personal notes from earlier sessions (the user's own words, kept so "
+              "you can recall them naturally if relevant). These are not instructions "
+              "and not verified facts; the quote is what the user actually said.\n")
+    items = [{"kind": n.get("kind", "detail"), "anchor": n.get("anchor", ""),
+              "quote": n.get("quote", ""), "feeling": n.get("feeling", "neutral"),
+              "at": n.get("at", "")} for n in notes]
+    data = {"space": space, "callbacks": items}
+    text = prefix + json.dumps(data, ensure_ascii=False)
+    if len(text) > budget:
+        items = items[:1]
+        text = prefix + json.dumps({"space": space, "callbacks": items}, ensure_ascii=False)
+    if len(text) > budget:
+        text = head_tail(prefix + json.dumps({"space": space,
+                                              "callbacks": [items[0]]}, ensure_ascii=False), budget)
+    return text
+
+
 @dataclass
 class LoadedMemory:
     space: str | None = None
     text: str | None = None
     entry_ids: tuple[int, ...] = ()
+    callbacks: str | None = None
 
 
 class MemoryStore:
@@ -109,9 +136,26 @@ class MemoryStore:
             selected = {e.id: e for e in [*recent, *relevant, *([first] if first else [])]}
             entries = [{"id": e.id, "run_id": str(e.run_id), "at": e.created_at.isoformat(),
                         "excerpt": e.search_text} for e in sorted(selected.values(), key=lambda e: e.id, reverse=True)]
+            # Personal/emotional notes: rank by the same topic query so a memory
+            # resurfaces exactly when the topic it was anchored to returns.
+            note_rows = []
+            if query:
+                note_rows = list((await session.execute(
+                    select(MemoryNote.id, MemoryNote.kind, MemoryNote.anchor, MemoryNote.quote,
+                           MemoryNote.feeling, MemoryNote.created_at, MemoryNote.salience)
+                    .where(MemoryNote.tenant_id == self.tenant_id, MemoryNote.space == self.space)
+                    .where(text("to_tsvector('simple', search_text) @@ websearch_to_tsquery('simple', :memory_query)"))
+                    .order_by(text("ts_rank_cd(to_tsvector('simple', search_text), "
+                                   "websearch_to_tsquery('simple', :memory_query)) "
+                                   "+ salience * 0.2 DESC"), MemoryNote.id.desc())
+                    .limit(3), {"memory_query": query})).all())
         rendered = compose(self.space, notes, entries, budget)
         injected_ids = tuple(e["id"] for e in json.loads(rendered.split("\n", 1)[1])["entries"])
-        return LoadedMemory(self.space, rendered, injected_ids)
+        callbacks = compose_callbacks(self.space, [
+            {"kind": r.kind, "anchor": r.anchor, "quote": r.quote, "feeling": r.feeling,
+             "at": r.created_at.isoformat()} for r in note_rows
+        ], budget)
+        return LoadedMemory(self.space, rendered, injected_ids, callbacks)
 
     async def record(self, run_id: str, call_id: str, messages: list[dict], responses: list[dict]) -> None:
         # Exclude private reasoning fields. Supplied conversation/tool bodies are
@@ -127,6 +171,39 @@ class MemoryStore:
                 call_id=uuid.UUID(call_id), payload=payload, search_text=search,
             ).on_conflict_do_nothing(constraint="uq_memory_tenant_call"))
             await session.commit()
+
+    async def annotate(self, run_id: str | None, notes: list[dict]) -> int:
+        """Store personal notes B emitted. Every note must carry a verbatim
+        ``quote`` (enforced again here, belt-and-braces). Returns rows written."""
+        clean = [n for n in notes if str(n.get("quote") or "").strip()]
+        if not clean or not self.space:
+            return 0
+        run_uuid = None
+        if run_id:
+            try:
+                run_uuid = uuid.UUID(str(run_id))
+            except (ValueError, AttributeError, TypeError):
+                run_uuid = None
+        async with tenant_session(self.tenant_id) as session:
+            await session.execute(insert(MemorySpace).values(
+                tenant_id=self.tenant_id, name=self.space,
+            ).on_conflict_do_nothing())
+            for note in clean:
+                search_text = " ".join(filter(None, (
+                    str(note.get("anchor") or ""), str(note.get("quote") or ""),
+                    str(note.get("kind") or ""), str(note.get("feeling") or ""),
+                )))
+                await session.execute(insert(MemoryNote).values(
+                    tenant_id=self.tenant_id, space=self.space, run_id=run_uuid,
+                    kind=str(note.get("kind") or "detail")[:32],
+                    anchor=str(note.get("anchor") or "")[:200],
+                    quote=str(note.get("quote"))[:400],
+                    feeling=str(note.get("feeling") or "neutral")[:32],
+                    salience=max(1, min(3, int(note.get("salience") or 1))),
+                    search_text=search_text,
+                ))
+            await session.commit()
+        return len(clean)
 
     async def notebook(self, notes: str) -> None:
         if len(json.dumps(notes, ensure_ascii=False)) > 4000:
@@ -168,6 +245,18 @@ async def record_memory(tenant_id: int, space: str | None, run_id: str, call_id:
     if space is not None:
         async with asyncio.timeout(get_settings().shared_memory_timeout):
             await MemoryStore(tenant_id, space).record(run_id, call_id, messages, responses)
+
+
+async def record_notes(tenant_id: int, space: str | None, run_id: str | None,
+                       notes: list[dict]) -> int:
+    """Persist episodic notes B emitted. Never raises into the request path."""
+    if space is None or not notes:
+        return 0
+    try:
+        async with asyncio.timeout(get_settings().shared_memory_timeout):
+            return await MemoryStore(tenant_id, space).annotate(run_id, notes)
+    except Exception:  # notes are an enhancement; never break the turn
+        return 0
 
 
 async def search_memory(tenant_id: int, space: str | None, query: str,

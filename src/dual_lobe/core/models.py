@@ -97,6 +97,35 @@ class MemoryEntry(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+NOTE_KINDS = ("affect", "preference", "callback", "plan", "detail")
+
+
+class MemoryNote(Base):
+    """A personal/emotional note B attaches to an event, for later resurfacing.
+
+    Distinct from :class:`MemoryEntry` (the raw journal): a note is a small,
+    salience-weighted, *verbatim-quoted* remark the user made, anchored to the
+    topic/event so it can be recalled when that topic returns. The quote is the
+    evidence — a note without the user's own words is rejected before storage.
+    """
+    __tablename__ = "memory_notes"
+    __table_args__ = (
+        CheckConstraint("kind IN ('affect','preference','callback','plan','detail')",
+                        name="ck_note_kind"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    space: Mapped[str] = mapped_column(Text, nullable=False)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id", ondelete="SET NULL"), nullable=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False, server_default="detail")
+    anchor: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    quote: Mapped[str] = mapped_column(Text, nullable=False)
+    feeling: Mapped[str] = mapped_column(Text, nullable=False, server_default="neutral")
+    salience: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    search_text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class DirectorSession(Base):
     __tablename__ = "director_sessions"
     __table_args__ = (UniqueConstraint("tenant_id", "run_id", name="uq_director_tenant_run"),)

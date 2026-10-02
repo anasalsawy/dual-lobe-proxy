@@ -428,6 +428,8 @@ async def chat_completions(
             try:
                 shared = await load_memory(principal.tenant_id, memory_space, messages)
                 shared_text, shared_entries = shared.text, len(shared.entry_ids)
+                if shared.callbacks:
+                    shared_text = (shared_text + "\n\n" + shared.callbacks) if shared_text else shared.callbacks
             except Exception:
                 LOG.warning("shared memory load failed run=%s; refusing a memory-backed request", run_id)
                 raise HTTPException(503, "Shared memory is unavailable; no model was invoked.") from None
@@ -516,6 +518,8 @@ async def chat_completions(
             try:
                 shared = await load_memory(principal.tenant_id, memory_space, messages)
                 shared_text, shared_entries = shared.text, len(shared.entry_ids)
+                if shared.callbacks:
+                    shared_text = (shared_text + "\n\n" + shared.callbacks) if shared_text else shared.callbacks
             except Exception:
                 LOG.warning("shared memory load failed run=%s; refusing a memory-backed request", run_id)
                 raise HTTPException(503, "Shared memory is unavailable; no model was invoked.") from None
@@ -598,7 +602,10 @@ async def chat_completions(
         shared = await load_memory(principal.tenant_id, memory_space, messages)
     except Exception:
         raise HTTPException(503, "Shared memory is unavailable; no model was invoked.") from None
-    req.messages = _effective_messages(messages, context, monitoring, s.monitoring_role, shared_text=shared.text)
+    shared_full_text = shared.text
+    if shared.callbacks:
+        shared_full_text = (shared_full_text + "\n\n" + shared.callbacks) if shared_full_text else shared.callbacks
+    req.messages = _effective_messages(messages, context, monitoring, s.monitoring_role, shared_text=shared_full_text)
     req.timeout = s.a_timeout
     adapter = get_registry().adapter(alias)
     context_text = head_tail(

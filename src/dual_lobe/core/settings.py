@@ -105,6 +105,8 @@ class Settings(BaseSettings):
     default_memory_id: str = Field(default="main", pattern=r"^([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})?$", validation_alias="DUAL_LOBE_DEFAULT_MEMORY_ID")
     shared_memory_max_chars: int = Field(default=10000, ge=6000, le=40000, validation_alias="DUAL_LOBE_SHARED_MEMORY_MAX_CHARS")
     shared_memory_timeout: float = Field(default=5, gt=0, le=30, validation_alias="DUAL_LOBE_SHARED_MEMORY_TIMEOUT")
+    episodic_memory_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_EPISODIC_MEMORY")
+    episodic_notes_max: int = Field(default=5, ge=1, le=10, validation_alias="DUAL_LOBE_EPISODIC_NOTES_MAX")
 
     worker_poll_seconds: float = Field(default=1.0, gt=0, validation_alias="DUAL_LOBE_WORKER_POLL_SECONDS")
     worker_max_concurrency: int = Field(default=2, ge=1, le=16, validation_alias="DUAL_LOBE_WORKER_MAX_CONCURRENCY")

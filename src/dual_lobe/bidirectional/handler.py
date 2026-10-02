@@ -415,6 +415,47 @@ def _tag_tool_calls(calls: list[dict[str, Any]], speaker: str) -> list[dict[str,
     return tagged
 
 
+async def _capture_notes(*, speaker: str, verifier: str, secure: bool, dialogue: list[dict],
+                         latest: str, answer: str, run_id: str, tenant_id: int,
+                         shared_space: str, guard: Any = None, vault: Any = None) -> None:
+    """Ask B (the observer) for small personal notes, then store them verbatim.
+
+    Runs at turn end, after the verification call. B is asked a second, separate
+    question; Python validates and persists. Nothing here speaks to the user.
+    """
+    from ..b.notebook import build_notes_prompt, parse_notes
+    from ..provider.adapters import NormalizedRequest, response_dict
+    from ..provider.registry import get_registry
+    from ..state.memory import record_notes
+
+    s = get_settings()
+    transcript_messages = deepcopy(dialogue)
+    transcript_messages.append({"role": "assistant", "content": answer})
+    if secure and guard is not None:
+        # Never send raw private values to the note-taker.
+        transcript, _ = guard.sanitize(json.dumps(transcript_messages, ensure_ascii=False),
+                                       vault=vault)
+    else:
+        transcript = json.dumps(transcript_messages, ensure_ascii=False, separators=(",", ":"))
+    prompt = build_notes_prompt(transcript=transcript)
+    target_alias = _role_alias("B", secure=secure)
+    adapter = get_registry().adapter(target_alias)
+    async with asyncio.timeout(s.b_timeout if target_alias.startswith("lobe-b") else s.a_timeout):
+        response = await adapter.buffered(NormalizedRequest(
+            messages=[{"role": "system", "content": "You return JSON only."},
+                      {"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=min(1000, s.b_max_output_tokens),
+            response_format={"type": "json_object"},
+        ))
+    data = response_dict(response)
+    content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    notes = parse_notes(content, known_texts=[transcript, latest, answer])
+    if notes:
+        written = await record_notes(tenant_id, shared_space, run_id, notes)
+        LOG.info("episodic notes stored run=%s count=%s", run_id, written)
+
+
 async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
                shared_text: str | None = None, shared_space: str | None = None,
                secure: bool = False) -> tuple[str | None, list[dict[str, Any]], dict[str, Any]]:
@@ -651,6 +692,14 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
             "rationale": "The independent verification call failed; the answer remains unverified.",
             "meter_rationale": "The independent verification call failed; the answer remains unverified.",
             "missing": [], "unverified": ["Verifier call failed."], "concerns": []}
+    if get_settings().episodic_memory_enabled and shared_space and tenant_id:
+        try:
+            await _capture_notes(speaker=speaker, verifier=verifier, secure=secure,
+                                 dialogue=dialogue, latest=latest, answer=answer,
+                                 run_id=run_id, tenant_id=tenant_id, shared_space=shared_space,
+                                 guard=guard, vault=vault)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("episodic note capture failed run=%s error=%s", run_id, type(exc).__name__)
     if run_id and verdict:
         _set_meter(run_id, {"deception_level": verdict["deception_level"],
                             "meter_rationale": verdict["rationale"], "timestamp": time.time(),
