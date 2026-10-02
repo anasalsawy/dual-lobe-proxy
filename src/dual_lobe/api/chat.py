@@ -12,7 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from starlette.background import BackgroundTask
+from starlette.background import BackgroundTask, BackgroundTasks
 
 from ..b.outbox import shadow_job_key, shadow_payload
 from ..b.channels import ObserverContext, prepare_context
@@ -136,6 +136,26 @@ async def _record_memory_now(tenant_id: int, space: str | None, run_id: str,
         await record_memory(tenant_id, space, run_id, str(uuid.uuid4()), messages, responses)
     except Exception:
         LOG.warning("shared memory record failed run=%s", run_id)
+
+
+async def _persist_gated_call(tenant_id: int, run_id: str, model_alias: str,
+                              data: dict[str, Any], latency_ms: int) -> None:
+    """Record the A call that the inline gated path actually observed."""
+    message = ((data.get("choices") or [{}])[0].get("message") or {})
+    output = message.get("content") or ""
+    status = "FAILED" if data.get("error") else "SUCCESS"
+    try:
+        async with asyncio.timeout(5):
+            async with tenant_session(tenant_id) as session:
+                await repo.append_event(
+                    session, "worker_call", tenant_id, run_id=run_id, actor=model_alias,
+                    payload={"source": "proxy_observed", "call_id": str(uuid.uuid4()),
+                             "status": status, "latency_ms": latency_ms,
+                             "output_excerpt": redact_payload(output)[:1500]},
+                )
+                await session.commit()
+    except Exception as exc:
+        LOG.warning("Gated call event lost run=%s error_type=%s", run_id, type(exc).__name__)
 
 
 def _record_background(tenant_id: int, space: str | None, run_id: str,
@@ -506,8 +526,9 @@ async def chat_completions(
                 await _record_memory_now(principal.tenant_id, memory_space, run_id, messages, responses)
 
             return StreamingResponse(
-                gated_stream(payload, run_id, principal.tenant_id, alias, shared_text=shared_text,
-                             shared_space=memory_space, on_done=_record),
+                gated_stream(payload, run_id, principal.tenant_id, alias,
+                             shared_text=shared_text, shared_space=memory_space,
+                             on_done=_record),
                 media_type="text/event-stream",
                 headers=_headers({"X-Dual-Lobe-Run-Id": run_id,
                                   "X-Dual-Lobe-Gated": "on", "X-Dual-Lobe-Streaming": "live",
@@ -515,6 +536,7 @@ async def chat_completions(
                                   "X-Dual-Lobe-Shared-Entries": shared_entries,
                                   "Cache-Control": "no-cache", "X-Accel-Buffering": "no"}),
             )
+        started = time.monotonic()
         data, gate_headers = await gated_response(
             payload, run_id, principal.tenant_id, alias,
             shared_text=shared_text, shared_space=memory_space,
@@ -528,6 +550,19 @@ async def chat_completions(
         gate_headers["X-Dual-Lobe-Shared-Entries"] = str(shared_entries)
         gate_background = _record_background(
             principal.tenant_id, memory_space, run_id, messages, data)
+        event_background = BackgroundTask(
+            _persist_gated_call, principal.tenant_id, run_id, alias, data,
+            int((time.monotonic() - started) * 1000),
+        )
+        buffered_background = BackgroundTasks()
+        buffered_background.add_task(
+            _persist_gated_call, principal.tenant_id, run_id, alias, data,
+            int((time.monotonic() - started) * 1000),
+        )
+        if gate_background is not None:
+            buffered_background.add_task(
+                gate_background.func, *gate_background.args, **gate_background.kwargs,
+            )
         # If Hermes requested streaming, convert the buffered response to SSE
         if payload.get("stream", False):
             import json as _json
@@ -543,12 +578,13 @@ async def chat_completions(
             return StreamingResponse(
                 _gated_stream(), media_type="text/event-stream",
                 headers={**gate_headers, "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-                background=gate_background,
+                background=event_background,
             )
         if "error" in data:
-            return JSONResponse(data, status_code=502, headers=gate_headers)
+            return JSONResponse(data, status_code=502, headers=gate_headers,
+                                background=event_background)
         return JSONResponse(data, status_code=200, headers=gate_headers,
-                            background=gate_background)
+                            background=buffered_background)
 
     # No transaction or B model call is held across A's provider operation.
     context = ObserverContext(memory_status="disabled", claim_status="disabled", status="disabled")
