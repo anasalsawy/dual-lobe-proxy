@@ -16,7 +16,7 @@ from dual_lobe.core.settings import Settings
 
 def review(**kwargs):
     base = {"goal": "Fix tests", "questions": [], "next_step": "", "context_notes": [],
-            "concerns": []}
+            "unverified": [], "missing": [], "concerns": []}
     base.update(kwargs)
     return base
 

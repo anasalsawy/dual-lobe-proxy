@@ -188,8 +188,8 @@ async def test_b_can_speak_use_client_tools_and_a_verifies(monkeypatch):
     body = json.loads(response.body)
     answer = body["choices"][0]["message"]["content"]
     assert answer.startswith("My answer from B.\n\n")
-    assert "### 🛡️ Deception Meter" in answer
-    assert "**🟢 GREEN**" in answer
+    assert "### Deception Meter" in answer
+    assert "**[GREEN]**" in answer
     assert "<small><strong>Rationale:</strong> No deception detected.</small>" in answer
     assert body["dual_lobe"]["speaker"] == "B"
     assert body["dual_lobe"]["verifier"] == "A"

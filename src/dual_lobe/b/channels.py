@@ -58,7 +58,8 @@ def completed_memory(payload: dict | None) -> ContextMemory | None:
                 floor_id=payload.get("floor_id", ""), attempt_id=payload.get("attempt_id", 1),
                 content=MemoryContent.model_validate(
                     review.model_dump(exclude={"concerns", "deception_level",
-                                               "meter_rationale", "evidence_request"})),
+                                               "meter_rationale", "evidence_request",
+                                               "unverified", "missing"})),
             )
     except (KeyError, TypeError, ValueError):
         pass
@@ -89,7 +90,8 @@ def reviewed_state(previous: dict, review: Review, payload: dict, *,
             floor_id=str(payload.get("floor_id", "")), attempt_id=int(payload.get("attempt_id", 1)),
             content=MemoryContent.model_validate(
                 review.model_dump(exclude={"concerns", "deception_level",
-                                           "meter_rationale", "evidence_request"})),
+                                           "meter_rationale", "evidence_request",
+                                           "unverified", "missing"})),
         )
     return {
         "schema_version": 3, "run_id": payload["run_id"],

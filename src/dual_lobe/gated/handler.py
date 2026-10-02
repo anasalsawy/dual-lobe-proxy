@@ -976,7 +976,9 @@ async def _complete(
 
     if has_user_content:
         meter_line = "\n\n" + format_deception_meter(
-            deception_level, meter_rationale, concerns)
+            deception_level, meter_rationale, concerns,
+            unverified=(b_downstream.get("unverified") or []) if isinstance(b_downstream, dict) else [],
+            missing=(b_downstream.get("missing") or []) if isinstance(b_downstream, dict) else [])
 
         for choice in a_data.get("choices", []):
             msg = choice.get("message", {})

@@ -47,6 +47,11 @@ class Review(BaseModel):
     questions: list[Short] = Field(max_length=2)
     next_step: Annotated[str, StringConstraints(max_length=500)]
     context_notes: list[Short] = Field(default_factory=list, max_length=2)
+    # Claims B could not ground in the record, and material facts whose absence
+    # would change the answer. These keep a meter informative even when GREEN
+    # (nothing to flag) by showing what was checked and left unverified.
+    unverified: list[Short] = Field(default_factory=list, max_length=3)
+    missing: list[Short] = Field(default_factory=list, max_length=2)
     concerns: list[Concern] = Field(max_length=2)
 
 

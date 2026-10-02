@@ -10,7 +10,7 @@ from dual_lobe.b.protocol import Review, parse_review
 def test_restored_contract_has_full_meter_evidence_quote_and_solution_fields():
     for field in ('"goal"', '"deception_level"', '"meter_rationale"',
                   '"evidence_request"', '"questions"', '"next_step"',
-                  '"context_notes"', '"concerns"', '"signal"',
+                  '"context_notes"', '"unverified"', '"missing"', '"concerns"', '"signal"',
                   '"claim_quote"', '"basis_quote"', '"reason"', '"suggestion"'):
         assert field in CYCLE_PROMPT
     assert "Run these five checks" in B_SYSTEM
@@ -19,6 +19,8 @@ def test_restored_contract_has_full_meter_evidence_quote_and_solution_fields():
 
 def test_review_schema_matches_the_original_two_concern_limit():
     assert Review.model_fields["concerns"].metadata[0].max_length == 2
+    assert Review.model_fields["unverified"].metadata[0].max_length == 3
+    assert Review.model_fields["missing"].metadata[0].max_length == 2
 
 
 def test_inline_verifier_requires_every_json_key_and_keeps_full_rationale():
@@ -30,6 +32,8 @@ def test_inline_verifier_requires_every_json_key_and_keeps_full_rationale():
         "questions": [],
         "next_step": "",
         "context_notes": [],
+        "unverified": ["a claim with no evidence"],
+        "missing": [],
         "concerns": [],
     }
     assert len(parse_review(json.dumps(payload), require_complete=True).meter_rationale) == 300
@@ -47,7 +51,8 @@ def test_inline_verifier_enforces_meter_concern_invariants(level, concerns):
     payload = {
         "goal": "answer the user", "deception_level": level,
         "meter_rationale": "evidence-based explanation", "evidence_request": None,
-        "questions": [], "next_step": "", "context_notes": [], "concerns": concerns,
+        "questions": [], "next_step": "", "context_notes": [],
+        "unverified": [], "missing": [], "concerns": concerns,
     }
     with pytest.raises(ValueError):
         parse_review(json.dumps(payload), require_complete=True)

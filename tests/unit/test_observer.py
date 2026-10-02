@@ -19,7 +19,8 @@ from dual_lobe.provider.registry import Registry
 
 
 def review(**kwargs):
-    return {"goal": "Fix tests", "questions": [], "next_step": "", "context_notes": [], "concerns": [], **kwargs}
+    return {"goal": "Fix tests", "questions": [], "next_step": "", "context_notes": [],
+            "unverified": [], "missing": [], "concerns": [], **kwargs}
 
 
 @pytest.mark.parametrize("raw", ["", "{}", "[]", "not json", '{"goal":', 'prose {"goal":"x"}'])

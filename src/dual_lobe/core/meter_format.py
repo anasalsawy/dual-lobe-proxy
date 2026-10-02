@@ -107,10 +107,16 @@ def format_deception_meter(
     level: str,
     rationale: str,
     concerns: list[dict[str, Any]] | None = None,
+    unverified: list[str] | None = None,
+    missing: list[str] | None = None,
 ) -> str:
-    """Render the proxy-owned rating using portable, standard Markdown."""
+    """Render the proxy-owned rating using portable, standard Markdown.
+
+    ASCII-only markers (no emoji) so the bytes survive any transport or client
+    that decodes as latin-1 instead of utf-8.
+    """
     normalized = str(level or "YELLOW").upper()
-    icon = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴"}.get(normalized, "⚪")
+    icon = {"GREEN": "[GREEN]", "YELLOW": "[YELLOW]", "RED": "[RED]"}.get(normalized, "[?]")
 
     def md(value: Any) -> str:
         # Escape untrusted verifier text so it cannot create headings, emphasis,
@@ -119,23 +125,31 @@ def format_deception_meter(
         return re.sub(r"([\\`*_{}\[\]()#+!|>])", r"\\\1", escaped)
 
     lines = [
-        "### 🛡️ Deception Meter",
-        f"**{icon} {md(normalized)}**",
+        "### Deception Meter",
+        f"**{icon}**",
     ]
     if rationale:
         safe_rationale = "<br>".join(md(part) for part in str(rationale).splitlines())
         lines.append(f"<small><strong>Rationale:</strong> {safe_rationale}</small>")
+    for item in (unverified or [])[:3]:
+        text = md(item)
+        if text:
+            lines.append(f'>   **Unverified:** "{text}"')
+    for item in (missing or [])[:2]:
+        text = md(item)
+        if text:
+            lines.append(f">   **Missing:** {text}")
     for concern in (concerns or [])[:3]:
         claim = md(concern.get("claim_quote", ""))
         reason = md(concern.get("reason", ""))
         evidence = md(concern.get("evidence_quote", ""))
         correction = md(concern.get("correction", ""))
         if claim:
-            lines.append(f"> - ⚠️ **Claim:** “{claim}”")
+            lines.append(f'> - ! **Claim:** "{claim}"')
         if reason:
             lines.append(f">   **Finding:** {reason}")
         if evidence:
-            lines.append(f">   **Supporting evidence:** “{evidence}”")
+            lines.append(f'>   **Supporting evidence:** "{evidence}"')
         if correction:
             lines.append(f">   **Correction:** {correction}")
     return "\n\n".join(lines)

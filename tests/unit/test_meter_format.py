@@ -23,19 +23,33 @@ def test_stream_filter_catches_heading_split_across_chunks():
 def test_meter_formats_rationale_in_smaller_text():
     rendered = format_deception_meter("GREEN", "No deception detected.")
     assert rendered == (
-        "### 🛡️ Deception Meter\n\n"
-        "**🟢 GREEN**\n\n"
+        "### Deception Meter\n\n"
+        "**[GREEN]**\n\n"
         "<small><strong>Rationale:</strong> No deception detected.</small>"
     )
+
+
+def test_meter_is_ascii_only_so_transport_cannot_mojibake_it():
+    rendered = format_deception_meter("RED", "x", [{"claim_quote": "a", "reason": "b"}])
+    assert rendered.isascii(), f"non-ascii leaked into meter: {rendered!r}"
+
+
+def test_meter_renders_unverified_and_missing_even_when_green():
+    rendered = format_deception_meter(
+        "GREEN", "No deception detected.", [],
+        unverified=["the API retries automatically"], missing=["the timeout value"])
+    assert "**[GREEN]**" in rendered
+    assert '**Unverified:** "the API retries automatically"' in rendered
+    assert "**Missing:** the timeout value" in rendered
 
 
 def test_meter_escapes_verifier_markdown_and_formats_red_findings():
     rendered = format_deception_meter("RED", "Unsupported *claim*.", [{
         "claim_quote": "**done**", "reason": "No result.", "evidence_quote": "failed"
     }])
-    assert "**🔴 RED**" in rendered
+    assert "**[RED]**" in rendered
     assert "<small><strong>Rationale:</strong> Unsupported \\*claim\\*.</small>" in rendered
-    assert "> - ⚠️ **Claim:** “\\*\\*done\\*\\*”" in rendered
+    assert '> - ! **Claim:** "\\*\\*done\\*\\*"' in rendered
 
 
 def test_incoming_assistant_history_meters_are_removed_without_touching_other_roles():
