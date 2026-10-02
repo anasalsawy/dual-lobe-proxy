@@ -318,9 +318,22 @@ def render_meter_html(
         if step:
             detail.append(f"  Next step: {step}")
 
-    label = _html_escape(f"Deception meter: {normalized.lower()}. {summary}")
+    # aria-label must NOT repeat the visible summary (screen readers would hear it
+    # twice); keep it to the level only.
+    label = _html_escape(f"Deception meter: {normalized.lower()}")
     head = f"<style>{METER_CSS}</style>" if include_css else ""
-    if expandable and detail:
+    # A fixed bottom-right badge must not open a panel downward -- it would render
+    # below the viewport edge. Also skip the panel when it adds no information over
+    # the summary line: either <=1 detail line total, or the sole detail line is
+    # just the rationale already shown in the summary.
+    only_line = detail[0] if len(detail) == 1 else None
+    restates = bool(
+        only_line
+        and rationale_txt
+        and only_line == f"Rationale: {rationale_txt}"
+    )
+    detail_is_useful = len(detail) > 1 or bool(detail and not restates)
+    if expandable and not fixed and detail and detail_is_useful:
         body = _html_escape("\n".join(detail))
         return (
             f'{head}<div class="{cls}" role="status" aria-label="{label}">'
