@@ -17,6 +17,7 @@ from typing import Any
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..core.settings import get_settings
+from ..state.memory import note_query_terms
 from ..core.meter_format import (
     choose_meter,
     format_deception_meter,
@@ -418,7 +419,9 @@ def _tag_tool_calls(calls: list[dict[str, Any]], speaker: str) -> list[dict[str,
 
 async def _capture_notes(*, speaker: str, verifier: str, secure: bool, dialogue: list[dict],
                          latest: str, answer: str, run_id: str, tenant_id: int,
-                         shared_space: str, guard: Any = None, vault: Any = None) -> None:
+                         shared_space: str, guard: Any = None, vault: Any = None,
+                         surface_device: str = "", surface_app: str = "",
+                         revision_note: dict | None = None) -> None:
     """Ask brain C (the emotional observer) for small personal notes, then store
     them verbatim.
 
@@ -456,14 +459,18 @@ async def _capture_notes(*, speaker: str, verifier: str, secure: bool, dialogue:
     data = response_dict(response)
     content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
     notes = parse_notes(content, known_texts=[transcript, latest, answer])[:s.episodic_notes_max]
+    if revision_note:
+        notes.append(revision_note)
     if notes:
-        written = await record_notes(tenant_id, shared_space, run_id, notes)
+        written = await record_notes(tenant_id, shared_space, run_id, notes,
+                                     surface_device=surface_device, surface_app=surface_app)
         LOG.info("episodic notes stored run=%s count=%s", run_id, written)
 
 
 async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
                shared_text: str | None = None, shared_space: str | None = None,
-               secure: bool = False) -> tuple[str | None, list[dict[str, Any]], dict[str, Any]]:
+               secure: bool = False, surface_device: str = "", surface_app: str = ""
+               ) -> tuple[str | None, list[dict[str, Any]], dict[str, Any]]:
     from ..gated.handler import _set_meter
     messages = list(payload.get("messages") or [])
     messages = inject_shared_memory(messages, shared_text)
@@ -697,12 +704,31 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
             "rationale": "The independent verification call failed; the answer remains unverified.",
             "meter_rationale": "The independent verification call failed; the answer remains unverified.",
             "missing": [], "unverified": ["Verifier call failed."], "concerns": []}
+    revision_note: dict | None = None
     if get_settings().episodic_memory_enabled and shared_space and tenant_id:
+        try:
+            from ..state.memory import find_revision, record_verdict
+            level = verdict["deception_level"]
+            terms = note_query_terms(dialogue)
+            if terms and level:
+                await record_verdict(tenant_id, shared_space, run_id, level, terms)
+                prior = await find_revision(tenant_id, shared_space, level, terms)
+                if prior and latest:
+                    # Revisit-and-revise: the data line changed its mind on an
+                    # overlapping topic. The quote is the user's own words from
+                    # this turn, so A can only raise what actually happened.
+                    revision_note = {"kind": "callback",
+                                     "anchor": f"verdict revision: previously {prior}, now {level}",
+                                     "quote": latest[:400],
+                                     "feeling": "neutral", "salience": 2}
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("verdict snapshot failed run=%s error=%s", run_id, type(exc).__name__)
         try:
             await _capture_notes(speaker=speaker, verifier=verifier, secure=secure,
                                  dialogue=dialogue, latest=latest, answer=answer,
                                  run_id=run_id, tenant_id=tenant_id, shared_space=shared_space,
-                                 guard=guard, vault=vault)
+                                 guard=guard, vault=vault, surface_device=surface_device,
+                                 surface_app=surface_app, revision_note=revision_note)
         except Exception as exc:  # noqa: BLE001
             LOG.warning("episodic note capture failed run=%s error=%s", run_id, type(exc).__name__)
     if run_id and verdict:
@@ -740,11 +766,13 @@ async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,
 
 async def bidirectional_response(payload: dict[str, Any], run_id: str = "", tenant_id: int = 0,
                                  shared_text: str | None = None, shared_space: str | None = None,
-                                 secure: bool = False):
+                                 secure: bool = False, surface_device: str = "",
+                                 surface_app: str = ""):
     started = time.time()
     answer, tool_calls, extra = await _run(payload, run_id=run_id, tenant_id=tenant_id,
                                            shared_text=shared_text, shared_space=shared_space,
-                                           secure=secure)
+                                           secure=secure, surface_device=surface_device,
+                                           surface_app=surface_app)
     extra["calls"] = calltrace.snapshot()
     extra["model_calls"] = len(extra["calls"])
     if tool_calls:

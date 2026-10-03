@@ -11,13 +11,13 @@ import re
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import select, text, func
+from sqlalchemy import select, text, func, update as sa_update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import load_only
 
 from ..b.prompts import head_tail
 from ..core.engine import tenant_session
-from ..core.models import MemorySpace, MemoryEntry, MemoryNote
+from ..core.models import MemorySpace, MemoryEntry, MemoryNote, VerdictSnapshot
 from ..core.settings import get_settings
 
 
@@ -132,6 +132,25 @@ class LoadedMemory:
     text: str | None = None
     entry_ids: tuple[int, ...] = ()
     callbacks: str | None = None
+    mood: str | None = None
+
+
+def compose_mood_advisory(feelings: list[str]) -> str | None:
+    """Render the space's recent mood as a style advisory for A.
+
+    Deterministic: only the last few feeling tags C stored. This is tone
+    guidance only - it must never reach the meter or change verification.
+    """
+    meaningful = [f for f in feelings if f and f != "neutral"]
+    if len(meaningful) < 3:
+        return None
+    head = meaningful[:3]
+    if len(set(head)) != 1:
+        return None
+    feeling = head[0]
+    return ("Recent session mood: the user's recent turns have felt "
+            f"'{feeling}'. Match that tone in your reply. This is style "
+            "guidance only; it never changes verification or the meter.")
 
 
 class MemoryStore:
@@ -142,7 +161,12 @@ class MemoryStore:
         return select(MemoryEntry).where(MemoryEntry.tenant_id == self.tenant_id,
                                          MemoryEntry.space == self.space)
 
+    def notes(self):
+        return select(MemoryNote).where(MemoryNote.tenant_id == self.tenant_id,
+                                        MemoryNote.space == self.space)
+
     async def load(self, messages: list[dict], budget: int) -> LoadedMemory:
+        settings = get_settings()
         async with tenant_session(self.tenant_id) as session:
             retrieval = self.entries().options(load_only(MemoryEntry.id, MemoryEntry.run_id,
                                                          MemoryEntry.created_at, MemoryEntry.search_text))
@@ -175,15 +199,60 @@ class MemoryStore:
                     .where(text("to_tsvector('simple', search_text) @@ websearch_to_tsquery('simple', :memory_query)"))
                     .order_by(text("ts_rank_cd(to_tsvector('simple', search_text), "
                                    "websearch_to_tsquery('simple', :memory_query)) "
-                                   "+ salience * 0.2 DESC"), MemoryNote.id.desc())
-                    .limit(3), {"memory_query": note_query})).all())
+                                   "+ salience * 0.2 "
+                                   "+ CASE WHEN resurfaced_at IS NULL "
+                                   "AND created_at < now() - make_interval(days => :stale_days) "
+                                   "THEN 1 ELSE 0 END DESC"), MemoryNote.id.desc())
+                    .limit(3), {"memory_query": note_query,
+                                "stale_days": settings.episodic_unaddressed_days})).all())
+            matched_ids = {r.id for r in note_rows}
+            recent_feelings = list((await session.execute(
+                select(MemoryNote.feeling).order_by(MemoryNote.id.desc()).limit(4)
+            )).scalars())
+            mood_note = None
+            if settings.episodic_mood_recall_enabled and recent_feelings:
+                current_mood = recent_feelings[0]
+                if current_mood and current_mood != "neutral":
+                    mood_note = (await session.execute(
+                        select(MemoryNote.id, MemoryNote.kind, MemoryNote.anchor, MemoryNote.quote,
+                               MemoryNote.feeling, MemoryNote.created_at, MemoryNote.salience)
+                        .where(MemoryNote.tenant_id == self.tenant_id, MemoryNote.space == self.space,
+                               MemoryNote.feeling == current_mood, MemoryNote.salience >= 2,
+                               ~MemoryNote.id.in_(matched_ids) if matched_ids else True)
+                        .order_by(MemoryNote.id.desc()).limit(1))).first()
+            unaddressed_note = None
+            if note_rows:
+                # One old aside that never resurfaced may surface even off-topic:
+                # the companion eventually follows up on what it noticed.
+                unaddressed_note = (await session.execute(
+                    select(MemoryNote.id, MemoryNote.kind, MemoryNote.anchor, MemoryNote.quote,
+                           MemoryNote.feeling, MemoryNote.created_at, MemoryNote.salience)
+                    .where(MemoryNote.tenant_id == self.tenant_id, MemoryNote.space == self.space,
+                           MemoryNote.salience >= 2, MemoryNote.resurfaced_at.is_(None),
+                           MemoryNote.created_at < text("now() - make_interval(days => :stale_days)"),
+                           ~MemoryNote.id.in_(matched_ids) if matched_ids else True)
+                    .order_by(MemoryNote.id.desc()).limit(1),
+                    {"stale_days": settings.episodic_unaddressed_days})).first()
+            resurface_ids = {r.id for r in [mood_note, unaddressed_note] if r} | matched_ids
+            if resurface_ids:
+                await session.execute(
+                    sa_update(MemoryNote).where(MemoryNote.id.in_(resurface_ids))
+                    .values(resurfaced_at=func.now()))
         rendered = compose(self.space, notes, entries, budget)
         injected_ids = tuple(e["id"] for e in json.loads(rendered.split("\n", 1)[1])["entries"])
-        callbacks = compose_callbacks(self.space, [
+        note_items = [
             {"kind": r.kind, "anchor": r.anchor, "quote": r.quote, "feeling": r.feeling,
              "at": r.created_at.isoformat()} for r in note_rows
-        ], budget)
-        return LoadedMemory(self.space, rendered, injected_ids, callbacks)
+        ]
+        for extra, reason in ((mood_note, "mood"), (unaddressed_note, "never followed up")):
+            if extra and extra.id not in matched_ids:
+                note_items.append({"kind": extra.kind, "anchor": extra.anchor,
+                                   "quote": extra.quote, "feeling": extra.feeling,
+                                   "at": extra.created_at.isoformat(),
+                                   "surfaced_by": reason})
+        callbacks = compose_callbacks(self.space, note_items, budget)
+        mood = compose_mood_advisory(recent_feelings)
+        return LoadedMemory(self.space, rendered, injected_ids, callbacks, mood)
 
     async def record(self, run_id: str, call_id: str, messages: list[dict], responses: list[dict]) -> None:
         # Exclude private reasoning fields. Supplied conversation/tool bodies are
@@ -200,7 +269,8 @@ class MemoryStore:
             ).on_conflict_do_nothing(constraint="uq_memory_tenant_call"))
             await session.commit()
 
-    async def annotate(self, run_id: str | None, notes: list[dict]) -> int:
+    async def annotate(self, run_id: str | None, notes: list[dict],
+                       surface_device: str = "", surface_app: str = "") -> int:
         """Store personal notes B emitted. Every note must carry a verbatim
         ``quote`` (enforced again here, belt-and-braces). Returns rows written."""
         clean = [n for n in notes if str(n.get("quote") or "").strip()]
@@ -229,9 +299,55 @@ class MemoryStore:
                     feeling=str(note.get("feeling") or "neutral")[:32],
                     salience=max(1, min(3, int(note.get("salience") or 1))),
                     search_text=search_text,
+                    surface_device=str(surface_device or "")[:64],
+                    surface_app=str(surface_app or "")[:64],
                 ))
             await session.commit()
         return len(clean)
+
+    async def record_verdict(self, run_id: str | None, level: str,
+                             topic_terms: list[str]) -> None:
+        """Store the data line's own conclusion for this turn."""
+        if not self.space or not level:
+            return
+        run_uuid = None
+        if run_id:
+            try:
+                run_uuid = uuid.UUID(str(run_id))
+            except (ValueError, AttributeError, TypeError):
+                run_uuid = None
+        async with tenant_session(self.tenant_id) as session:
+            await session.execute(insert(VerdictSnapshot).values(
+                tenant_id=self.tenant_id, space=self.space, run_id=run_uuid,
+                level=str(level)[:16],
+                topic_terms=" ".join(dict.fromkeys(t for t in topic_terms if t))[:512],
+            ))
+            await session.commit()
+
+    async def find_revision(self, level: str, topic_terms: list[str],
+                            *, fresh_days: int = 14) -> str | None:
+        """Return the prior differing verdict on an overlapping topic, if any.
+
+        This is the revisit-and-revise beat: "last time this came up I called
+        it X; now I see Y." Only recent snapshots are considered, and only
+        differing levels count - agreement is not news.
+        """
+        if not self.space or not topic_terms:
+            return None
+        query = " OR ".join(dict.fromkeys(t for t in topic_terms if t))
+        if not query:
+            return None
+        async with tenant_session(self.tenant_id) as session:
+            row = (await session.execute(
+                select(VerdictSnapshot.level)
+                .where(VerdictSnapshot.tenant_id == self.tenant_id,
+                       VerdictSnapshot.space == self.space,
+                       VerdictSnapshot.level != str(level)[:16],
+                       text("to_tsvector('simple', topic_terms) @@ websearch_to_tsquery('simple', :q)"),
+                       VerdictSnapshot.created_at > text("now() - make_interval(days => :d)"))
+                .order_by(VerdictSnapshot.id.desc()).limit(1),
+                {"q": query, "d": fresh_days})).scalar_one_or_none()
+        return row
 
     async def notebook(self, notes: str) -> None:
         if len(json.dumps(notes, ensure_ascii=False)) > 4000:
@@ -276,15 +392,42 @@ async def record_memory(tenant_id: int, space: str | None, run_id: str, call_id:
 
 
 async def record_notes(tenant_id: int, space: str | None, run_id: str | None,
-                       notes: list[dict]) -> int:
+                       notes: list[dict], surface_device: str = "",
+                       surface_app: str = "") -> int:
     """Persist episodic notes B emitted. Never raises into the request path."""
     if space is None or not notes:
         return 0
     try:
         async with asyncio.timeout(get_settings().shared_memory_timeout):
-            return await MemoryStore(tenant_id, space).annotate(run_id, notes)
+            return await MemoryStore(tenant_id, space).annotate(
+                run_id, notes, surface_device=surface_device, surface_app=surface_app)
     except Exception:  # notes are an enhancement; never break the turn
         return 0
+
+
+async def record_verdict(tenant_id: int, space: str | None, run_id: str | None,
+                         level: str, topic_terms: list[str]) -> None:
+    """Persist the data line's verdict for this turn. Never raises."""
+    if space is None or not level:
+        return
+    try:
+        async with asyncio.timeout(get_settings().shared_memory_timeout):
+            await MemoryStore(tenant_id, space).record_verdict(run_id, level, topic_terms)
+    except Exception:  # verdict memory is an enhancement; never break the turn
+        pass
+
+
+async def find_revision(tenant_id: int, space: str | None, level: str,
+                        topic_terms: list[str], *, fresh_days: int = 14) -> str | None:
+    """Prior differing verdict on an overlapping topic, or None. Never raises."""
+    if space is None:
+        return None
+    try:
+        async with asyncio.timeout(get_settings().shared_memory_timeout):
+            return await MemoryStore(tenant_id, space).find_revision(
+                level, topic_terms, fresh_days=fresh_days)
+    except Exception:
+        return None
 
 
 async def search_memory(tenant_id: int, space: str | None, query: str,

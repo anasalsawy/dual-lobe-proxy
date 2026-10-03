@@ -113,6 +113,14 @@ class Settings(BaseSettings):
     shared_memory_max_chars: int = Field(default=10000, ge=6000, le=40000, validation_alias="DUAL_LOBE_SHARED_MEMORY_MAX_CHARS")
     shared_memory_timeout: float = Field(default=5, gt=0, le=30, validation_alias="DUAL_LOBE_SHARED_MEMORY_TIMEOUT")
     episodic_memory_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_EPISODIC_MEMORY")
+    # The unaddressed-question queue: an aside never resurfaced for this many
+    # days becomes eligible to surface even off-topic (companion follow-up).
+    episodic_unaddressed_days: int = Field(
+        default=7, ge=1, le=90, validation_alias="DUAL_LOBE_EPISODIC_UNADDRESSED_DAYS")
+    # Mood-gated associative recall: a past note whose feeling matches the
+    # space's current mood may surface even off-topic (mechanical, no embeddings).
+    episodic_mood_recall_enabled: bool = Field(
+        default=True, validation_alias="DUAL_LOBE_EPISODIC_MOOD_RECALL")
     episodic_notes_max: int = Field(default=5, ge=1, le=10, validation_alias="DUAL_LOBE_EPISODIC_NOTES_MAX")
 
     worker_poll_seconds: float = Field(default=1.0, gt=0, validation_alias="DUAL_LOBE_WORKER_POLL_SECONDS")

@@ -28,6 +28,7 @@ from ..provider.adapters import resolve_request, response_dict
 from ..provider.registry import get_registry
 from ..state import repositories as repo
 from ..state.memory import load_memory, record_memory, validate_space
+from . import surface as surface_context
 from ..provider.streaming import Completion
 from ..bidirectional.routing import routing_requested
 from . import auth, correlation, limits
@@ -331,6 +332,7 @@ async def chat_completions(
             raise HTTPException(status_code=400, detail="image/audio input is disabled; text only")
     alias = payload["model"]
     corr = correlation.parse_headers(request.headers)
+    surface = surface_context.parse_surface(request.headers)
     if alias not in {"sawii/dl-bidirectional", "sawii/dl-secure"}:
         raise HTTPException(status_code=400, detail=f"unsupported model: {alias}")
     target_alias = alias
@@ -435,12 +437,18 @@ async def chat_completions(
                 shared_text, shared_entries = shared.text, len(shared.entry_ids)
                 if shared.callbacks:
                     shared_text = (shared_text + "\n\n" + shared.callbacks) if shared_text else shared.callbacks
+                if shared.mood:
+                    shared_text = (shared_text + "\n\n" + shared.mood) if shared_text else shared.mood
+                if surface:
+                    shared_text = (shared_text + "\n\n" + surface.ephemeral_line()) if shared_text else surface.ephemeral_line()
             except Exception:
                 LOG.warning("shared memory load failed run=%s; refusing a memory-backed request", run_id)
                 raise HTTPException(503, "Shared memory is unavailable; no model was invoked.") from None
         try:
             result = await bidirectional_response({**payload, "stream": False}, run_id, principal.tenant_id, shared_text,
-                                                  shared_space=memory_space, secure=secure_model)
+                                                  shared_space=memory_space, secure=secure_model,
+                                                  surface_device=surface.device,
+                                                  surface_app=surface.app)
         except Exception as exc:
             LOG.warning("bidirectional upstream failed model=%s error=%s", alias, type(exc).__name__)
             return JSONResponse({"error": {"type": "upstream_error",
@@ -525,6 +533,10 @@ async def chat_completions(
                 shared_text, shared_entries = shared.text, len(shared.entry_ids)
                 if shared.callbacks:
                     shared_text = (shared_text + "\n\n" + shared.callbacks) if shared_text else shared.callbacks
+                if shared.mood:
+                    shared_text = (shared_text + "\n\n" + shared.mood) if shared_text else shared.mood
+                if surface:
+                    shared_text = (shared_text + "\n\n" + surface.ephemeral_line()) if shared_text else surface.ephemeral_line()
             except Exception:
                 LOG.warning("shared memory load failed run=%s; refusing a memory-backed request", run_id)
                 raise HTTPException(503, "Shared memory is unavailable; no model was invoked.") from None

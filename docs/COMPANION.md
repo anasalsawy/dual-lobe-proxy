@@ -50,9 +50,15 @@ the user said; surface is where they said it.*
 ## Layers
 
 1. **Identity** - persona (= key) scopes all memory. *Phase 1.*
-2. **Surface tagging** - the client sends `(device, app)`; stored ephemeral. *Phase 2.*
+2. **Surface tagging** - the client sends `(device, app)`; stored ephemeral.
+   **Built:** `X-DL-Surface-Device` / `X-DL-Surface-App` headers, validated to
+   64 safe chars, appended to A's per-turn context as one ephemeral line, and
+   recorded on notes as provenance (`surface_device`, `surface_app`) - the
+   surface never becomes memory content.
 3. **Cross-surface continuity** - "on your PC you were looking at X", via the
-   episodic layer's anchors. *Phase 3.*
+   episodic layer's anchors + surface provenance columns. **Built (data side):**
+   notes carry surface provenance; rendering "you were on your phone when..."
+   is a future composer step over that data.
 4. **Proactive companion** - B decides to surface a memory unprompted, through a
    scheduler + a notification channel. *Phase 4. Highest risk of feeling spammy;
    gate hard on relevance and rate.*
@@ -89,12 +95,36 @@ the meter, or memory changes.
 ## Build order
 
 ```
-Phase 1  persona-as-key          identity scopes memory        <- start here
-Phase 2  surface tagging         device/app as ephemeral ctx
-Phase 3  cross-surface recall    "on your PC you were..."
-Phase 4  proactive companion     scheduler + notify (gated)
+Phase 1  persona-as-key          identity scopes memory        <- built
+Phase 2  surface tagging         device/app as ephemeral ctx   <- built
+Phase 3  cross-surface recall    "on your PC you were..."      <- provenance built
+Phase 4  proactive companion     scheduler + notify (gated)    <- first beat built:
+         the unaddressed-question queue (an aside never resurfaced for
+         DUAL_LOBE_EPISODIC_UNADDRESSED_DAYS days may surface once, off-topic,
+         capped at one; surfaced_by: "never followed up")
 Phase 5  interaction adapters    voice / image / tools
 ```
+
+## Interaction beats (built)
+
+Beyond the phases, four interaction features ride the same seams. All are
+deterministic, all fail-open, none touch the meter:
+
+- **Revisit-and-revise** - every verified turn stores a verdict snapshot
+  (`verdict_snapshots`); when a later turn on an overlapping topic reaches a
+  *different* level, a callback note records it ("previously GREEN, now YELLOW")
+  with the user's own words from the current turn as the quote. The companion
+  can change its mind and say so.
+- **Mood-gated associative recall** - a past note whose feeling matches the
+  space's current mood (C's most recent tag) may surface even off-topic, once,
+  salience >= 2 (`DUAL_LOBE_EPISODIC_MOOD_RECALL`). Mechanical, no embeddings.
+- **Session mood advisory** - when the last three meaningful feeling tags
+  agree, A receives a one-line tone advisory ("recent turns have felt
+  'tired'"). Style only; it never changes verification.
+- **Unaddressed-question queue** - see Phase 4 above.
+
+Every note that surfaces records `resurfaced_at`, so "did we ever get back to
+that?" is answerable from data rather than vibes.
 
 Phase 1 is the load-bearing one: everything else assumes the persona is the
 memory scope.

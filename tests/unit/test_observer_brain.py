@@ -84,7 +84,7 @@ async def test_capture_notes_routes_through_the_observer_brain(monkeypatch):
 
     recorded = {}
 
-    async def fake_record_notes(tenant_id, space, run_id, notes):
+    async def fake_record_notes(tenant_id, space, run_id, notes, **kwargs):
         recorded["notes"] = notes
         recorded["space"] = space
         return len(notes)
@@ -118,7 +118,7 @@ async def test_capture_notes_enforces_episodic_notes_max(monkeypatch):
                                                          "content": note_json}}]}))))
     recorded = {}
 
-    async def fake_record_notes(tenant_id, space, run_id, notes):
+    async def fake_record_notes(tenant_id, space, run_id, notes, **kwargs):
         recorded["count"] = len(notes)
         return len(notes)
 

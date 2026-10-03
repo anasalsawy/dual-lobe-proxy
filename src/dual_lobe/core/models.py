@@ -127,6 +127,29 @@ class MemoryNote(Base):
     feeling: Mapped[str] = mapped_column(Text, nullable=False, server_default="neutral")
     salience: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     search_text: Mapped[str] = mapped_column(Text, nullable=False)
+    # Provenance for cross-surface recall: where the user said it (never memory
+    # content). resurfaced_at records when a note last reached A's context, so
+    # the unaddressed-question queue can find never-resurfaced asides.
+    surface_device: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    surface_app: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    resurfaced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class VerdictSnapshot(Base):
+    """One row per verified turn: the data line's own memory of what it
+    concluded, so a later turn can notice the system changed its mind.
+
+    Deliberately separate from MemoryNote (the affect line): verdicts are the
+    data line, and mixing them would let affect contaminate verification.
+    """
+    __tablename__ = "verdict_snapshots"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    space: Mapped[str] = mapped_column(Text, nullable=False)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id", ondelete="SET NULL"), nullable=True)
+    level: Mapped[str] = mapped_column(Text, nullable=False)
+    topic_terms: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
