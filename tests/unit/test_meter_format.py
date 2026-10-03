@@ -20,13 +20,17 @@ def test_stream_filter_catches_heading_split_across_chunks():
     assert output == "A grounded answer."
 
 
-def test_meter_formats_rationale_in_smaller_text():
+def test_meter_renders_rationale_as_plain_markdown():
     rendered = format_deception_meter("GREEN", "No deception detected.")
     assert rendered == (
-        "### Deception Meter\n\n"
-        "**[GREEN]**\n\n"
-        "<small><strong>Rationale:</strong> No deception detected.</small>"
+        "### Deception Meter\n"
+        "**[GREEN]**\n"
+        "**Rationale:** No deception detected."
     )
+    # No raw HTML tags: chat clients strip or show them literally.
+    assert "<" not in rendered and ">" not in rendered
+    # No blockquote spam: each item renders as a labeled line, not a quote bar.
+    assert not any(line.lstrip().startswith(">") for line in rendered.splitlines())
 
 
 def test_meter_is_ascii_only_so_transport_cannot_mojibake_it():
@@ -39,8 +43,10 @@ def test_meter_renders_unverified_and_missing_even_when_green():
         "GREEN", "No deception detected.", [],
         unverified=["the API retries automatically"], missing=["the timeout value"])
     assert "**[GREEN]**" in rendered
-    assert '**Unverified:** "the API retries automatically"' in rendered
-    assert "**Missing:** the timeout value" in rendered
+    assert '**Unverified:**' in rendered
+    assert '- "the API retries automatically"' in rendered
+    assert "**Missing:**" in rendered
+    assert "- the timeout value" in rendered
 
 
 def test_meter_renders_observer_notes_so_b_is_visibly_sighted():
@@ -49,10 +55,10 @@ def test_meter_renders_observer_notes_so_b_is_visibly_sighted():
         notes=["Compared Tokyo metro scope with the Osaka figure."],
         questions=["Does the user mean city proper or metro area?"],
         next_step="State the population scope explicitly.")
-    assert "<small><strong>Observer notes:</strong></small>" in rendered
-    assert "Compared Tokyo metro scope with the Osaka figure." in rendered
-    assert "**Question:** Does the user mean city proper or metro area?" in rendered
-    assert "**Next step:** State the population scope explicitly." in rendered
+    assert "**Observer notes:**" in rendered
+    assert "- Compared Tokyo metro scope with the Osaka figure." in rendered
+    assert "- Question: Does the user mean city proper or metro area?" in rendered
+    assert "- Next step: State the population scope explicitly." in rendered
 
 
 def test_meter_omits_notes_block_when_verifier_reports_none():
@@ -60,13 +66,25 @@ def test_meter_omits_notes_block_when_verifier_reports_none():
     assert "Observer notes" not in rendered
 
 
-def test_meter_escapes_verifier_markdown_and_formats_red_findings():
-    rendered = format_deception_meter("RED", "Unsupported *claim*.", [{
-        "claim_quote": "**done**", "reason": "No result.", "evidence_quote": "failed"
+def test_meter_formats_red_findings_as_labeled_lists():
+    rendered = format_deception_meter("RED", "Unsupported claim.", [{
+        "claim_quote": "I finished it", "reason": "No result in the record.",
+        "evidence_quote": "log shows no run", "correction": "Run it and quote the tail."
     }])
     assert "**[RED]**" in rendered
-    assert "<small><strong>Rationale:</strong> Unsupported \\*claim\\*.</small>" in rendered
-    assert '> - ! **Claim:** "\\*\\*done\\*\\*"' in rendered
+    assert "**Rationale:** Unsupported claim." in rendered
+    assert '**Finding:**' in rendered
+    assert '- Claim: "I finished it"' in rendered
+    assert "- Problem: No result in the record." in rendered
+    assert '- Evidence: "log shows no run"' in rendered
+    assert "- Correction: Run it and quote the tail." in rendered
+
+
+def test_meter_neutralises_line_starting_markers_from_verifier_text():
+    rendered = format_deception_meter("YELLOW", "ok", [], notes=["- actually a list item", "# not a heading"])
+    assert "\\-" not in rendered or rendered.count("-") >= 3  # structure kept readable
+    # A note that starts with '#': must not become a heading inside the meter.
+    assert "## not a heading" not in rendered
 
 
 def test_incoming_assistant_history_meters_are_removed_without_touching_other_roles():

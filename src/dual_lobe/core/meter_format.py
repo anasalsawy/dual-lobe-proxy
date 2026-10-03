@@ -113,69 +113,70 @@ def format_deception_meter(
     questions: list[str] | None = None,
     next_step: str | None = None,
 ) -> str:
-    """Render the proxy-owned rating using portable, standard Markdown.
+    """Render the proxy-owned rating in portable, standard Markdown.
 
-    ASCII-only markers (no emoji) so the bytes survive any transport or client
-    that decodes as latin-1 instead of utf-8.
-
-    ``notes``/``questions``/``next_step`` surface what B actually examined and
-    concluded, so even a clean GREEN shows the verifier was sighted rather than
-    silent.
+    No raw HTML tags (most chat clients strip them), no blockquote spam, and
+    only structure-breaking characters are escaped so real list markers work.
+    Every verifier field renders in a labeled section so even a clean GREEN
+    shows the verifier was sighted rather than silent.
     """
     normalized = str(level or "YELLOW").upper()
     icon = {"GREEN": "[GREEN]", "YELLOW": "[YELLOW]", "RED": "[RED]"}.get(normalized, "[?]")
 
     def md(value: Any) -> str:
-        # Escape untrusted verifier text so it cannot create headings, emphasis,
-        # lists, or HTML in clients with different Markdown implementations.
-        escaped = escape(str(value), quote=False)
-        return re.sub(r"([\\`*_{}\[\]()#+!|>])", r"\\\1", escaped)
+        # Neutralise only characters that could start a line-level structure
+        # (headings, lists, quotes) when verifier text lands at line start.
+        text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+        text = re.sub(r"(?m)^([#>*+-]|[0-9]+[.)])", r"\\\1", text)
+        return text.replace("\n", " ")
 
     lines = [
         "### Deception Meter",
         f"**{icon}**",
     ]
     if rationale:
-        safe_rationale = "<br>".join(md(part) for part in str(rationale).splitlines())
-        lines.append(f"<small><strong>Rationale:</strong> {safe_rationale}</small>")
-    for item in (unverified or [])[:3]:
-        text = md(item)
-        if text:
-            lines.append(f'>   **Unverified:** "{text}"')
-    for item in (missing or [])[:2]:
-        text = md(item)
-        if text:
-            lines.append(f'>   **Missing:** {text}')
+        lines.append(f"**Rationale:** {md(rationale)}")
+    unverified_items = [md(item) for item in (unverified or [])[:3]]
+    unverified_items = [t for t in unverified_items if t]
+    if unverified_items:
+        lines.append("**Unverified:**")
+        lines.extend(f'- "{t}"' for t in unverified_items)
+    missing_items = [md(item) for item in (missing or [])[:2]]
+    missing_items = [t for t in missing_items if t]
+    if missing_items:
+        lines.append("**Missing:**")
+        lines.extend(f"- {t}" for t in missing_items)
+    findings: list[str] = []
     for concern in (concerns or [])[:3]:
         claim = md(concern.get("claim_quote", ""))
         reason = md(concern.get("reason", ""))
         evidence = md(concern.get("evidence_quote", ""))
         correction = md(concern.get("correction", ""))
+        if not (claim or reason or evidence or correction):
+            continue
+        findings.append("**Finding:**")
         if claim:
-            lines.append(f'> - ! **Claim:** "{claim}"')
+            findings.append(f'- Claim: "{claim}"')
         if reason:
-            lines.append(f">   **Finding:** {reason}")
+            findings.append(f"- Problem: {reason}")
         if evidence:
-            lines.append(f'>   **Supporting evidence:** "{evidence}"')
+            findings.append(f'- Evidence: "{evidence}"')
         if correction:
-            lines.append(f">   **Correction:** {correction}")
-    # Observer notes: what B actually examined/concluded. Shown even on a clean
-    # GREEN so the verifier reads as sighted, not silent.
+            findings.append(f"- Correction: {correction}")
+    lines.extend(findings)
     note_lines = [md(item) for item in (notes or [])[:3]]
     note_lines = [n for n in note_lines if n]
     q_lines = [md(item) for item in (questions or [])[:2]]
     q_lines = [q for q in q_lines if q]
     step = md(next_step) if next_step else ""
     if note_lines or q_lines or step:
-        block = ["<small><strong>Observer notes:</strong></small>"]
-        for n in note_lines:
-            block.append(f">   {n}")
-        for q in q_lines:
-            block.append(f">   **Question:** {q}")
+        lines.append("**Observer notes:**")
+        lines.extend(f"- {n}" for n in note_lines)
+        lines.extend(f"- Question: {q}" for q in q_lines)
         if step:
-            block.append(f">   **Next step:** {step}")
-        lines.append("\n".join(block))
-    return "\n\n".join(lines)
+            lines.append(f"- Next step: {step}")
+    return "\n".join(lines)
+
 
 
 # ---------------------------------------------------------------------------

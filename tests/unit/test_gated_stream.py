@@ -40,7 +40,7 @@ async def test_gated_stream_sends_text_before_b_and_meter_last(monkeypatch):
     assert visible.startswith("Canberra is the capital.")
     assert visible.count("Deception Meter") == 1  # only the proxy-owned meter is visible
     assert "self-rating" not in visible
-    assert "<small><strong>Rationale:</strong> No deception detected.</small>" in visible
+    assert "**Rationale:** No deception detected." in visible
     assert chunks[-1]["dual_lobe"]["meter"] == "GREEN"
     assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
     assert fake.order[0] == ("a-stream", "lobe-a")
