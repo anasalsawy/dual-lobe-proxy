@@ -58,7 +58,7 @@ _HANDOFF_TOOL = {
         },
     },
 }
-_ROLES = {"A": "lobe-a", "B": "lobe-b"}
+_ROLES = {"A": "lobe-a", "B": "lobe-b", "C": "lobe-observer"}
 
 
 def _privacy_view(messages: list[dict[str, Any]], guard, vault) -> list[dict[str, Any]]:
@@ -419,10 +419,14 @@ def _tag_tool_calls(calls: list[dict[str, Any]], speaker: str) -> list[dict[str,
 async def _capture_notes(*, speaker: str, verifier: str, secure: bool, dialogue: list[dict],
                          latest: str, answer: str, run_id: str, tenant_id: int,
                          shared_space: str, guard: Any = None, vault: Any = None) -> None:
-    """Ask B (the observer) for small personal notes, then store them verbatim.
+    """Ask brain C (the emotional observer) for small personal notes, then store
+    them verbatim.
 
-    Runs at turn end, after the verification call. B is asked a second, separate
-    question; Python validates and persists. Nothing here speaks to the user.
+    Runs at turn end, after the verification call. C is a dedicated brain whose
+    only job is the affect line: it never verifies claims and never speaks to
+    the user. Python validates and persists. Unset DUAL_LOBE_OBSERVER_* config
+    inherits B's provider, so the default deployment matches the previous
+    B-wears-two-hats behavior exactly.
     """
     from ..b.notebook import build_notes_prompt, parse_notes
     from ..provider.adapters import NormalizedRequest, response_dict
@@ -439,9 +443,9 @@ async def _capture_notes(*, speaker: str, verifier: str, secure: bool, dialogue:
     else:
         transcript = json.dumps(transcript_messages, ensure_ascii=False, separators=(",", ":"))
     prompt = build_notes_prompt(transcript=transcript)
-    target_alias = _role_alias("B", secure=secure)
+    target_alias = _role_alias("C", secure=secure)
     adapter = get_registry().adapter(target_alias)
-    async with asyncio.timeout(s.b_timeout if target_alias.startswith("lobe-b") else s.a_timeout):
+    async with asyncio.timeout(s.b_timeout):
         response = await adapter.buffered(NormalizedRequest(
             messages=[{"role": "system", "content": "You return JSON only."},
                       {"role": "user", "content": prompt}],
@@ -451,7 +455,7 @@ async def _capture_notes(*, speaker: str, verifier: str, secure: bool, dialogue:
         ))
     data = response_dict(response)
     content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-    notes = parse_notes(content, known_texts=[transcript, latest, answer])
+    notes = parse_notes(content, known_texts=[transcript, latest, answer])[:s.episodic_notes_max]
     if notes:
         written = await record_notes(tenant_id, shared_space, run_id, notes)
         LOG.info("episodic notes stored run=%s count=%s", run_id, written)

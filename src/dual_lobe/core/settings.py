@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     secure_b_model: str | None = Field(default=None, validation_alias="DUAL_LOBE_SECURE_B_MODEL")
     secure_b_base_url: str | None = Field(default=None, validation_alias="DUAL_LOBE_SECURE_B_BASE_URL")
     secure_b_api_key: str | None = Field(default=None, validation_alias="DUAL_LOBE_SECURE_B_API_KEY")
+    # Brain C, the emotional observer: authors episodic notes at turn end.
+    # Unset inherits B's resolved provider, so the default deployment is
+    # byte-identical to today's two-lobe behavior.
+    observer_model: str | None = Field(default=None, validation_alias="DUAL_LOBE_OBSERVER_MODEL")
+    observer_base_url: str | None = Field(default=None, validation_alias="DUAL_LOBE_OBSERVER_BASE_URL")
+    observer_api_key: str | None = Field(default=None, validation_alias="DUAL_LOBE_OBSERVER_API_KEY")
+    observer_dialect: str = Field(default="chat_completions", validation_alias="DUAL_LOBE_OBSERVER_DIALECT")
     testing_mode: bool = Field(default=False, validation_alias="DUAL_LOBE_TESTING_MODE")
     secure_b_local_only: bool = Field(default=True, validation_alias="DUAL_LOBE_SECURE_B_LOCAL_ONLY")
 
@@ -170,6 +177,18 @@ class Settings(BaseSettings):
     @property
     def resolved_b_api_key(self) -> str:
         return self.b_api_key if self.b_api_key is not None else self.a_api_key
+
+    @property
+    def resolved_observer_model(self) -> str:
+        return self.observer_model or self.resolved_b_model
+
+    @property
+    def resolved_observer_base_url(self) -> str:
+        return self.observer_base_url or self.resolved_b_base_url
+
+    @property
+    def resolved_observer_api_key(self) -> str:
+        return self.observer_api_key if self.observer_api_key is not None else self.resolved_b_api_key
 
 
 @lru_cache

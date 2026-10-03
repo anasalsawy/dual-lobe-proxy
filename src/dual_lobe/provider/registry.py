@@ -61,8 +61,20 @@ def env_targets() -> dict[str, ProviderTarget]:
         kind=s.b_dialect,
         capabilities={"stream": False, "tools": True, "responses": False},
     )
+    # Brain C, the emotional observer: authors episodic notes at turn end.
+    # Unset inherits B's resolved provider; it never joins hub rotation, so the
+    # dedicated-affect model cannot be pulled into A/B load balancing.
+    lobe_observer = ProviderTarget(
+        alias="lobe-observer",
+        base_url=s.resolved_observer_base_url,
+        api_key=s.resolved_observer_api_key,
+        model=s.resolved_observer_model,
+        kind=s.observer_dialect,
+        capabilities={"stream": False, "tools": True, "responses": False},
+    )
     return {
         "lobe-b-secure": lobe_b_secure,
+        "lobe-observer": lobe_observer,
         "sawii/dl-bidirectional": bidirectional,
         "sawii/dl-secure": secure,
         "lobe-a": lobe_a,

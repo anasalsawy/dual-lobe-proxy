@@ -73,6 +73,13 @@ answered.
   substance of the answer, not over how it feels.
 - **The emotional brain is the separate affect line** (the episodic notebook). It
   does not reason about data and never touches the meter.
+- **Brain C is a new, dedicated brain - not a second hat worn by B.** A stays
+  the speaker, B stays the verifier, and C is the emotional observer whose only
+  job is authoring episodic notes at turn end. The promotion from "B also takes
+  notes" to a dedicated brain makes the affect/verification separation
+  structural: C is incapable of touching the meter, not merely instructed not
+  to. The two-parallel-reasoners idea above remains parked until its convergence
+  and divergence questions are answered.
 
 The payoff ties directly into dual-perspective memory: because both non-emotional
 brains reason about data, **recall carries valuable data too** - when A recalls a
@@ -80,13 +87,26 @@ moment he gets his own memory, the *other data-brain's angle* on the same moment
 and the observer's affect fragment. Recall is therefore a source of new *facts*,
 not only new feeling.
 
+## The config seam (built)
+
+Brain C exists as a config seam today - `lobe-observer` in the provider registry,
+resolved from `DUAL_LOBE_OBSERVER_MODEL` / `DUAL_LOBE_OBSERVER_BASE_URL` /
+`DUAL_LOBE_OBSERVER_API_KEY` / `DUAL_LOBE_OBSERVER_DIALECT`. Unset, it inherits
+B's resolved provider, so a deployment that configures nothing behaves exactly
+like the previous two-lobe pipeline. The observer never joins hub rotation, so a
+dedicated affect model cannot be pulled into A/B load balancing. `_capture_notes`
+routes through C, keeps the secure-mode sanitization path (raw private values
+never reach the note-taker), and enforces `episodic_notes_max` on what gets
+stored.
+
 ## Decisions still open
 
 1. Convergence: **agreement vote**, **one adjudicating**, or **surface the
    disagreement to the user**?
-2. Does B *become* the observer, or is the observer a new brain with B staying as
-   verifier?
-3. Which models back the two data reasoners (they must differ - different model,
+2. Which models back the two data reasoners (they must differ - different model,
    temperature, or reasoning path - for divergence to be real).
+3. Which model backs brain C - a smaller, warmer model fits the affect line, but
+   the choice is empirical.
 
-Until these are answered, only the config seam should be built.
+~~Until these are answered, only the config seam should be built.~~ The C seam
+is built; the reasoner pair stays parked until 1 and 2 are answered.
