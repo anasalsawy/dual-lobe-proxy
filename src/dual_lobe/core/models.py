@@ -129,6 +129,9 @@ class MemoryNote(Base):
     # vocabulary ({"joy": 0.8, "sadness": 0.5}). The feeling tag is its
     # human-readable rendering; recall works on the geometry, not the word.
     chord: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    # Candidate-lane vector from the in-perimeter embedder ([] when
+    # unembedded). Never a decider; length mismatch = stale embedder = skip.
+    embedding: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
     salience: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     search_text: Mapped[str] = mapped_column(Text, nullable=False)
     # Provenance for cross-surface recall: where the user said it (never memory

@@ -113,10 +113,25 @@ ride in through the existing injection channel.
 ### `src/dual_lobe/core/models.py` + `alembic/versions/0005_episodic_memory.py`
 
 **`MemoryNote`** - the table: `id, tenant_id, space, run_id, kind, anchor, quote,
-feeling, chord, salience, search_text, created_at`, indexed on `(tenant_id, space)`
-(`chord` added by `0008_emotional_chord`; rows predating it store `{}` and fall
-back to tag-based recall). It
+feeling, chord, embedding, salience, search_text, created_at`, indexed on `(tenant_id, space)`
+(`chord` added by `0008_emotional_chord`; `embedding` by `0009_note_embeddings`;
+rows predating them store `{}` / `[]` and fall back to tag-based recall). It
 sits beside `MemoryEntry` (the technical journal) as the affective companion.
+
+**Candidate lanes.** A note can reach A four ways: the exact-word query, chord
+resonance (needs `salience >= 2`), the unaddressed-aside queue, and the
+paraphrase lane (`state/embedding.py`). That last one is a *candidate generator,
+never a decider*: the default embedder is a pure-Python signed feature hash
+(words + character trigrams, L2-normalized, no model, no network, deterministic),
+so it catches only what a boolean word query provably misses - unstemmed forms
+like "weding" vs "wedding". Measured with the default embedder, genuine
+morphology scores ~0.27 and unrelated text tops out ~0.20, a band too thin to
+fire on, which is why the default threshold is 0.45 and the lane stays near
+silent until a semantic model is dropped in through `set_embedder()`. Swapping
+embedders is safe by construction: a stored vector whose length differs from the
+active embedder's is treated as absent, so recall degrades to the old behavior
+instead of comparing incompatible geometries. External embedding APIs are out of
+policy - the lane exists to keep user text inside the perimeter.
 
 ### `src/dual_lobe/core/settings.py`
 

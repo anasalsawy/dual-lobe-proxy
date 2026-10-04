@@ -66,6 +66,58 @@ def test_lexical_match_carries_the_chord_of_the_memory(tenant):
                for i in items)
 
 
+def test_paraphrase_lane_surfaces_what_the_word_query_misses(tenant, monkeypatch):
+    """The lane exists for what the boolean word query provably cannot do:
+    recall with zero shared exact token ("weding" never matches "wedding" -
+    websearch_to_tsquery('simple') does not stem).
+
+    Measured behavior of the default hash embedder: genuine morphology
+    (weding/wedding) lands ~0.27 while unrelated text tops out ~0.20 - a
+    thin band. The default threshold (0.45) therefore keeps the lane near
+    silent until a semantic model is swapped in through the seam; this
+    test lowers the configured threshold to exercise the real code path
+    (pool, ordering, dedup, chord-travels) with the real embedder.
+    """
+    tid, _ = tenant
+    from dual_lobe.core.settings import get_settings
+    monkeypatch.setattr(get_settings(), "episodic_paraphrase_threshold", 0.2)
+
+    async def _run():
+        store = mem.MemoryStore(tid, "chord-paraphrase")
+        await store.annotate(None, [{
+            "kind": "affect", "anchor": "the wedding",
+            "quote": "we attended the wedding last week",
+            "feeling": "warm", "chord": {"joy": 0.7, "tenderness": 0.5},
+            "salience": 1}])
+        return await store.load(
+            [{"role": "user", "content": "all the weding jitters"}], 8000)
+
+    loaded = asyncio.run(_run())
+    items = _extract_callbacks(loaded)
+    surfaced = [i for i in items if i.get("surfaced_by") == "near paraphrase"]
+    assert len(surfaced) == 1
+    assert surfaced[0]["quote"] == "we attended the wedding last week"
+    assert surfaced[0]["chord"] == {"joy": 0.7, "tenderness": 0.5}  # chord travels
+
+
+def test_unrelated_turn_does_not_trigger_the_paraphrase_lane(tenant):
+    tid, _ = tenant
+
+    async def _run():
+        store = mem.MemoryStore(tid, "chord-paraphrase-neg")
+        await store.annotate(None, [{
+            "kind": "affect", "anchor": "errand",
+            "quote": "hospital parking is impossible today",
+            "feeling": "tired", "chord": {"anger": 0.6, "sadness": 0.4},
+            "salience": 3}])
+        return await store.load(
+            [{"role": "user", "content": "can you summarize the quarterly numbers"}], 8000)
+
+    loaded = asyncio.run(_run())
+    items = _extract_callbacks(loaded)
+    assert not [i for i in items if i.get("surfaced_by") == "near paraphrase"]
+
+
 def test_notes_without_chords_keep_the_tag_fallback(tenant):
     """Pre-backfill rows (chord {}) still drive the mood path, never crash it."""
     tid, _ = tenant

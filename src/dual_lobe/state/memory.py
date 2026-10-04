@@ -18,6 +18,7 @@ from sqlalchemy.orm import load_only
 from ..b.chord import (average as chord_average, cosine as chord_cosine,
                        describe as chord_describe, parse_chord)
 from ..b.prompts import head_tail
+from .embedding import cosine as vec_cosine, embed
 from ..core.engine import tenant_session
 from ..core.models import MemorySpace, MemoryEntry, MemoryNote, VerdictSnapshot
 from ..core.settings import get_settings
@@ -282,6 +283,31 @@ class MemoryStore:
                                    MemoryNote.feeling == current_mood, MemoryNote.salience >= 2,
                                    ~MemoryNote.id.in_(matched_ids) if matched_ids else True)
                             .order_by(MemoryNote.id.desc()).limit(1))).first()
+            paraphrase_note = None
+            if settings.episodic_paraphrase_recall_enabled:
+                # Candidate lane, not a decider: the boolean word query needs an
+                # exact term, so near forms and reworded asides only meet here,
+                # in vector space. Quotes stay verbatim either way - widening
+                # candidates cannot widen what may actually be said.
+                qvec = embed(next((m["content"] for m in reversed(messages)
+                                      if m.get("role") == "user"
+                                      and isinstance(m.get("content"), str)), ""))
+                if qvec:
+                    pool = list((await session.execute(
+                        select(MemoryNote.id, MemoryNote.kind, MemoryNote.anchor,
+                               MemoryNote.quote, MemoryNote.feeling, MemoryNote.chord,
+                               MemoryNote.embedding, MemoryNote.created_at,
+                               MemoryNote.salience)
+                        .where(MemoryNote.tenant_id == self.tenant_id,
+                               MemoryNote.space == self.space)
+                        .order_by(MemoryNote.id.desc()).limit(50))).all())
+                    scored = [(vec_cosine(qvec, r.embedding or []), r) for r in pool]
+                    scored = [(s, r) for s, r in scored
+                              if s >= settings.episodic_paraphrase_threshold
+                              and r.id not in matched_ids]
+                    scored.sort(key=lambda sr: (-sr[0], -sr[1].salience, -sr[1].id))
+                    if scored:
+                        paraphrase_note = scored[0][1]
             unaddressed_note = None
             if note_rows:
                 # One old aside that never resurfaced may surface even off-topic:
@@ -296,7 +322,8 @@ class MemoryStore:
                            ~MemoryNote.id.in_(matched_ids) if matched_ids else True)
                     .order_by(MemoryNote.id.desc()).limit(1),
                     {"stale_days": settings.episodic_unaddressed_days})).first()
-            resurface_ids = {r.id for r in [mood_note, unaddressed_note] if r} | matched_ids
+            resurface_ids = {r.id for r in [mood_note, paraphrase_note, unaddressed_note]
+                             if r} | matched_ids
             if resurface_ids:
                 await session.execute(
                     sa_update(MemoryNote).where(MemoryNote.id.in_(resurface_ids))
@@ -309,9 +336,12 @@ class MemoryStore:
             {"kind": r.kind, "anchor": r.anchor, "quote": r.quote, "feeling": r.feeling,
              "chord": dict(r.chord or {}), "at": r.created_at.isoformat()} for r in note_rows
         ]
+        seen_ids = set(matched_ids)
         for extra, reason in ((mood_note, "emotional resonance"),
+                              (paraphrase_note, "near paraphrase"),
                               (unaddressed_note, "never followed up")):
-            if extra and extra.id not in matched_ids:
+            if extra and extra.id not in seen_ids:
+                seen_ids.add(extra.id)
                 note_items.append({"kind": extra.kind, "anchor": extra.anchor,
                                    "quote": extra.quote, "feeling": extra.feeling,
                                    "chord": dict(extra.chord or {}),
@@ -368,6 +398,8 @@ class MemoryStore:
                     quote=str(note.get("quote"))[:400],
                     feeling=str(note.get("feeling") or "neutral")[:32],
                     chord=parse_chord(note.get("chord")),
+                    embedding=embed(" ".join(filter(None, (
+                        str(note.get("anchor") or ""), str(note.get("quote") or ""))))),
                     salience=max(1, min(3, int(note.get("salience") or 1))),
                     search_text=search_text,
                     surface_device=str(surface_device or "")[:64],

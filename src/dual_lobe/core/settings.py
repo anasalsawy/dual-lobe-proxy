@@ -117,10 +117,16 @@ class Settings(BaseSettings):
     # days becomes eligible to surface even off-topic (companion follow-up).
     episodic_unaddressed_days: int = Field(
         default=7, ge=1, le=90, validation_alias="DUAL_LOBE_EPISODIC_UNADDRESSED_DAYS")
-    # Mood-gated associative recall: a past note whose feeling matches the
-    # space's current mood may surface even off-topic (mechanical, no embeddings).
+    # Chord-gated associative recall: a past note whose chord resonates with
+    # the space's current chord state may surface even off-topic.
     episodic_mood_recall_enabled: bool = Field(
         default=True, validation_alias="DUAL_LOBE_EPISODIC_MOOD_RECALL")
+    # Paraphrase candidate lane: near-form/subset matches the boolean word
+    # query misses may surface as notes, in-perimeter embeddings only.
+    episodic_paraphrase_recall_enabled: bool = Field(
+        default=True, validation_alias="DUAL_LOBE_EPISODIC_PARAPHRASE_RECALL")
+    episodic_paraphrase_threshold: float = Field(
+        default=0.45, ge=0.0, le=1.0, validation_alias="DUAL_LOBE_EPISODIC_PARAPHRASE_THRESHOLD")
     episodic_notes_max: int = Field(default=5, ge=1, le=10, validation_alias="DUAL_LOBE_EPISODIC_NOTES_MAX")
 
     worker_poll_seconds: float = Field(default=1.0, gt=0, validation_alias="DUAL_LOBE_WORKER_POLL_SECONDS")
