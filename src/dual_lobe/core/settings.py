@@ -140,10 +140,27 @@ class Settings(BaseSettings):
     # Turns scoring below this are not stored at all (kept raw or dropped).
     ndsmc_variance_floor: float = Field(
         default=0.60, ge=0.0, le=1.0, validation_alias="DUAL_LOBE_NDSMC_VARIANCE_FLOOR")
-    # Hard row cap per space: the oldest rows are trimmed when exceeded, so a
-    # space that never consolidates cannot grow the buffer without bound.
+    # Overflow ceiling per space (rows). Nothing is deleted while the space
+    # sits under this line; past it, the bowl sheds its oldest compressed
+    # fragments first.
     ndsmc_buffer_rows: int = Field(
         default=2000, ge=10, le=100000, validation_alias="DUAL_LOBE_NDSMC_BUFFER_ROWS")
+    # Fraction of that ceiling at which FIFO eviction begins (the rim of the
+    # bowl). 0.9 evicts from 90% occupancy upward to hold the ceiling.
+    ndsmc_bowl_ratio: float = Field(
+        default=0.9, ge=0.1, le=1.0, validation_alias="DUAL_LOBE_NDSMC_BOWL_RATIO")
+    # Optional local distillation pass (a small local model behind a command):
+    # reads JSONL {"id","text"} on stdin, writes JSONL {"id","text"} with the
+    # minimum-fidelity text. Empty = no compression; rows stay verbatim.
+    # Local only - lossy compression of user text over an external API is out
+    # of policy for the same reason the privacy gate exists.
+    ndsmc_compressor_command: str = Field(
+        default="", validation_alias="DUAL_LOBE_NDSMC_COMPRESSOR_COMMAND")
+    ndsmc_compressor_timeout: int = Field(
+        default=600, ge=1, le=86400, validation_alias="DUAL_LOBE_NDSMC_COMPRESSOR_TIMEOUT")
+    # Max rows handed to one compressor invocation.
+    ndsmc_compressor_batch: int = Field(
+        default=200, ge=1, le=5000, validation_alias="DUAL_LOBE_NDSMC_COMPRESSOR_BATCH")
     # EMA rate for the subconscious baseline of ordinary interaction.
     ndsmc_baseline_alpha: float = Field(
         default=0.1, gt=0.0, lt=1.0, validation_alias="DUAL_LOBE_NDSMC_BASELINE_ALPHA")

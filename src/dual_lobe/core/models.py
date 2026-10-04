@@ -156,9 +156,20 @@ class RawInteraction(Base):
     summarizes, normalizes or corrects it. Low-variance turns are never
     stored, so a row here means C's scorer called it worth keeping.
 
-    `locked` is set only when the weekend consolidation has exported the
-    row to a training file; the purge deletes locked rows and nothing
-    else, so a failed consolidation can never destroy unwritten data.
+    Three tiers, always distinguishable, never silently mixed:
+
+    - **raw** (`raw_transcript` set, `compressed_at` null) - verbatim, the
+      training asset. No code path rewrites this column's contents.
+    - **exported** (`locked`) - copied into an export file, so the verbatim
+      copy exists there whatever happens to the row. **baked** (`baked`) -
+      the training step consumed that export; compression becomes allowed.
+    - **compressed** (`compressed_at` set) - post-bake lossy tier. The raw
+      payload is released to free the bytes, and the lossy text lives in
+      `compressed_transcript`, so a compressed row can never pretend to be
+      verbatim. Compression requires baked, baked requires exported.
+
+    Eviction (the bowl overflowing) deletes oldest-compressed first and never
+    touches a row that has not been exported.
     """
     __tablename__ = "raw_interactions"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -166,11 +177,21 @@ class RawInteraction(Base):
     space: Mapped[str] = mapped_column(Text, nullable=False)
     run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id", ondelete="SET NULL"), nullable=True)
     raw_transcript: Mapped[str] = mapped_column(Text, nullable=False)
+    compressed_transcript: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
     style_markers: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
     embedding: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
     variance: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
     locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    baked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    raw_chars: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    compressed_chars: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    compressed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    @property
+    def text(self) -> str:
+        """Whatever the row currently holds: verbatim, or its lossy stand-in."""
+        return self.raw_transcript or self.compressed_transcript
 
 
 class VerdictSnapshot(Base):

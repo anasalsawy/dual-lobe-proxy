@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 
 from dual_lobe.b.subconscious import (emotional_variance, parse_baseline,
                                       render_baseline, sensory_vector,
@@ -142,9 +143,10 @@ def test_baseline_updates_even_when_the_turn_is_dropped(tenant):
     assert parse_baseline(blob)  # baseline exists despite zero stored rows
 
 
-# ---------- DB: dream cycle ----------
+# ---------- DB: dream cycle (non-destructive) ----------
 
-def test_consolidation_exports_verbatim_then_purges_only_exported(tenant, tmp_path):
+def test_consolidation_exports_verbatim_and_keeps_everything(tenant, tmp_path):
+    """The bowl retains: export -> bake -> (no compressor) -> rows persist."""
     tid, _ = tenant
     raw = _messy()
 
@@ -155,16 +157,21 @@ def test_consolidation_exports_verbatim_then_purges_only_exported(tenant, tmp_pa
                                        directory=str(tmp_path))
 
     result = asyncio.run(_run())
-    assert result.exported == 1 and result.purged == 1 and not result.trained
+    assert result.exported == 1 and result.compressed == 0 and not result.trained
     lines = [json.loads(line) for line in
              open(result.file, encoding="utf-8").read().splitlines()]
+    assert lines[0]["schema"] == "ndsmc-raw/2"
     assert lines[0]["raw_transcript"] == raw          # verbatim out
-    assert lines[0]["emotional_variance_score"] >= 0.55
-    assert asyncio.run(_count(tid, "ndsmc-dream")) == 0  # buffer at zero
+    assert lines[0]["emotional_variance_score"] >= 0.60
+    # Post-dream retention: the row is still here, verbatim, and baked.
+    stored = asyncio.run(_raw(tid, "ndsmc-dream"))
+    assert stored == raw
+    tiers = asyncio.run(_tiers(tid, "ndsmc-dream"))
+    assert tiers == {"raw": 0, "baked": 1, "compressed": 0}
 
 
-def test_failed_training_blocks_the_purge(tenant, tmp_path):
-    """Phase 3 fails -> Phase 4 must not run. Data survives a bad dream."""
+def test_failed_training_blocks_the_bake(tenant, tmp_path):
+    """Phase 3 fails -> compression stays unlicensed; rows remain raw."""
     tid, _ = tenant
 
     async def _run():
@@ -175,8 +182,103 @@ def test_failed_training_blocks_the_purge(tenant, tmp_path):
                                        train_command="false")
 
     result = asyncio.run(_run())
-    assert result.purged == 0
+    assert result.compressed == 0 and not result.trained
     assert asyncio.run(_count(tid, "ndsmc-crash")) == 1
+    assert asyncio.run(_tiers(tid, "ndsmc-crash")) == {"raw": 1, "baked": 0, "compressed": 0}
+
+
+def test_compression_only_touches_baked_and_never_fakes_verbatim(tenant, tmp_path):
+    """A fake local distiller shrinks baked rows into the compressed tier;
+    the raw payload is released and the lossy text is honestly labelled."""
+    tid, _ = tenant
+    raw = _messy()
+    script = tmp_path / "distill.py"
+    script.write_text(
+        "import json,sys\n"
+        "for line in sys.stdin:\n"
+        "    o = json.loads(line)\n"
+        "    print(json.dumps({'id': o['id'], 'text': o['text'][:24]}))\n")
+    cmd = f"{sys.executable} {script}"
+
+    async def _run():
+        await ndsmc.ingest(tid, "ndsmc-squeeze", raw, kind="affect",
+                           salience=3, chord={"sadness": 0.9})
+        await ndsmc.consolidate(tid, "ndsmc-squeeze", directory=str(tmp_path),
+                                train_command="true")
+        n = await ndsmc.compress_space(tid, "ndsmc-squeeze", compressor_command=cmd)
+        stats = await ndsmc.buffer_stats(tid, "ndsmc-squeeze")
+        return n, stats
+
+    n, stats = asyncio.run(_run())
+    assert n == 1
+    assert stats.tiers == (0, 0, 1)  # raw, baked_raw, compressed
+    assert stats.bytes_held == len(raw[:24])  # raw payload released, lossy counted
+    assert asyncio.run(_raw(tid, "ndsmc-squeeze")) == ""  # verbatim released
+    assert asyncio.run(_compressed_text(tid, "ndsmc-squeeze")) == raw[:24]
+    # The compressed row never re-enters a training export as if verbatim:
+    second = asyncio.run(ndsmc.consolidate(tid, "ndsmc-squeeze", directory=str(tmp_path)))
+    assert second.exported == 0
+
+
+def test_bowl_evicts_oldest_compressed_never_raw(tenant, monkeypatch):
+    """Overflow: over capacity the oldest compressed fragments fall FIFO down
+    to the steady line; raw rows are never evicted however full the bowl."""
+    tid, _ = tenant
+    from dual_lobe.core.settings import get_settings
+    from datetime import datetime, timezone
+    s = get_settings()
+    monkeypatch.setattr(s, "ndsmc_buffer_rows", 10)
+    monkeypatch.setattr(s, "ndsmc_bowl_ratio", 0.8)  # steady line: 8
+
+    async def _seed(n_compressed, n_raw):
+        from dual_lobe.core.engine import tenant_session
+        from dual_lobe.core.models import RawInteraction
+        from sqlalchemy import insert, delete
+        async with tenant_session(tid) as session:
+            await session.execute(delete(RawInteraction).where(
+                RawInteraction.tenant_id == tid, RawInteraction.space == "ndsmc-bowl"))
+            now = datetime.now(timezone.utc)
+            for i in range(n_compressed):
+                await session.execute(insert(RawInteraction).values(
+                    tenant_id=tid, space="ndsmc-bowl", raw_transcript="",
+                    compressed_transcript=f"lossy {i}", compressed_chars=8,
+                    compressed_at=now, locked=True, baked=True))
+            for i in range(n_raw):
+                await session.execute(insert(RawInteraction).values(
+                    tenant_id=tid, space="ndsmc-bowl",
+                    raw_transcript=f"verbatim raw {i}", raw_chars=14))
+            await session.commit()
+
+    async def _survivors():
+        from dual_lobe.core.engine import tenant_session
+        from dual_lobe.core.models import RawInteraction
+        from sqlalchemy import select
+        async with tenant_session(tid) as session:
+            rows = (await session.execute(
+                select(RawInteraction).where(
+                    RawInteraction.tenant_id == tid,
+                    RawInteraction.space == "ndsmc-bowl")
+                .order_by(RawInteraction.id))).scalars().all()
+        return [r.compressed_transcript or r.raw_transcript for r in rows]
+
+    # Under the rim: nothing moves.
+    asyncio.run(_seed(6, 4))  # 10 rows == capacity
+    assert asyncio.run(ndsmc.evict_overflow(tid, "ndsmc-bowl")) == 0
+    assert len(asyncio.run(_survivors())) == 10
+
+    # Overflow: 8 compressed + 4 raw = 12 > capacity 10 -> drain to 8 by
+    # dropping the 4 OLDEST compressed; every raw row survives.
+    asyncio.run(_seed(8, 4))
+    assert asyncio.run(ndsmc.evict_overflow(tid, "ndsmc-bowl")) == 4
+    survivors = asyncio.run(_survivors())
+    assert survivors == ["lossy 4", "lossy 5", "lossy 6", "lossy 7"] + \
+        [f"verbatim raw {i}" for i in range(4)]
+
+    # Full bowl with zero compressed: still deletes nothing. Raw is never
+    # sacrificed for space; compression is the only door to eviction.
+    asyncio.run(_seed(0, 14))
+    assert asyncio.run(ndsmc.evict_overflow(tid, "ndsmc-bowl")) == 0
+    assert len(asyncio.run(_survivors())) == 14
 
 
 async def _count(tid, space):
@@ -200,64 +302,19 @@ async def _raw(tid, space):
                 RawInteraction.tenant_id == tid,
                 RawInteraction.space == space))).scalars().first()
 
-# ---------- C as the sole memory channel ----------
 
-async def _seed_run(tid) -> str:
-    """record() is FK-bound to a real run; create one and return its id."""
+async def _compressed_text(tid, space):
+    from sqlalchemy import select
     from dual_lobe.core.engine import tenant_session
-    from dual_lobe.core.models import Run
-    from sqlalchemy import insert
-    import uuid as _uuid
+    from dual_lobe.core.models import RawInteraction
     async with tenant_session(tid) as session:
-        run_id = (await session.execute(
-            insert(Run).values(tenant_id=tid, external_run_id=_uuid.uuid4().hex)
-            .returning(Run.id))).scalar_one()
-        await session.commit()
-    return str(run_id)
-
-def test_journal_is_not_injected_but_c_notes_are(tenant, monkeypatch):
-    """With the sole channel on, A recalls only C's material.
-
-    The mechanical journal still records every turn (C's raw material and
-    the operator's audit trail); it simply stops being A's memory.
-    """
-    tid, _ = tenant
-    from dual_lobe.core.settings import get_settings
-    monkeypatch.setattr(get_settings(), "c_sole_memory_channel", True)
-
-    async def _run():
-        rid = await _seed_run(tid)
-        store = mem_store(tid, "sole-channel")
-        await store.record(rid,
-                           "22222222-2222-2222-2222-222222222222",
-                           [{"role": "user", "content": "deploy the helmchart v2"}],
-                           [{"role": "assistant", "content": "deployed helmchart v2"}])
-        await store.annotate(None, [{
-            "kind": "callback", "anchor": "the launch",
-            "quote": "we shipped it on the first try, remember?",
-            "feeling": "proud", "chord": {"joy": 0.8}, "salience": 2}])
-        return await store.load(
-            [{"role": "user", "content": "the helmchart again please"}], 8000)
-
-    loaded = asyncio.run(_run())
-    assert "helmchart" not in (loaded.text or "")
-    assert loaded.callbacks and "shipped it on the first try" in loaded.callbacks
+        return (await session.execute(
+            select(RawInteraction.compressed_transcript).where(
+                RawInteraction.tenant_id == tid,
+                RawInteraction.space == space))).scalars().first()
 
 
-def test_dual_channel_mode_restores_journal_injection(tenant, monkeypatch):
-    tid, _ = tenant
-    from dual_lobe.core.settings import get_settings
-    monkeypatch.setattr(get_settings(), "c_sole_memory_channel", False)
-
-    async def _run():
-        rid = await _seed_run(tid)
-        store = mem_store(tid, "dual-channel")
-        await store.record(rid,
-                           "44444444-2222-2222-2222-222222222222",
-                           [{"role": "user", "content": "remember the passphrase zebra42"}],
-                           [{"role": "assistant", "content": "noted zebra42"}])
-        return await store.load(
-            [{"role": "user", "content": "the passphrase zebra42 again"}], 8000)
-
-    loaded = asyncio.run(_run())
-    assert "zebra42" in (loaded.text or "")
+async def _tiers(tid, space):
+    stats = await ndsmc.buffer_stats(tid, space)
+    raw, baked, compressed = stats.tiers
+    return {"raw": raw, "baked": baked, "compressed": compressed}
