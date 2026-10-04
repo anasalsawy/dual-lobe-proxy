@@ -18,7 +18,36 @@ def test_valid_note_with_verbatim_quote_is_kept():
                '"feeling":"warm","salience":2}]}')
     notes = parse_notes(content, known_texts=[transcript])
     assert notes == [{"kind": "detail", "anchor": "debugging",
-                      "quote": "my dog has a limp lol", "feeling": "warm", "salience": 2}]
+                      "quote": "my dog has a limp lol", "feeling": "warm",
+                      "chord": {}, "salience": 2}]
+
+
+def test_concurrent_feelings_survive_as_a_chord():
+    """C's multi-axis chord passes through parse_notes, clamped and validated."""
+    transcript = "user: she got the job but I will miss her every day"
+    content = ('{"notes":[{"kind":"affect","anchor":"her new job",'
+               '"quote":"she got the job but I will miss her every day",'
+               '"feeling":"warm","chord":{"joy":0.7,"sadness":0.8,"bogus":5,'
+               '"fear":1.9},"salience":3}]}')
+    notes = parse_notes(content, known_texts=[transcript])
+    chord = notes[0]["chord"]
+    assert chord == {"joy": 0.7, "sadness": 0.8, "fear": 1.0}  # bogus dropped, clamped
+
+
+def test_chord_int_weights_pass_strict_validation():
+    """A model emitting 1 (int) must not lose the whole note payload."""
+    content = ('{"notes":[{"kind":"affect","quote":"i love tabs over spaces",'
+               '"chord":{"joy":1,"pride":0.5}}]}')
+    notes = parse_notes(content)
+    assert notes[0]["chord"] == {"joy": 1.0, "pride": 0.5}
+
+
+def test_chord_over_max_voices_trims_to_loudest():
+    content = ('{"notes":[{"kind":"affect","quote":"i feel everything",'
+               '"chord":{"joy":0.2,"sadness":0.3,"fear":0.9,"anger":0.8,'
+               '"tenderness":0.95,"pride":0.7}}]}')
+    notes = parse_notes(content)
+    assert set(notes[0]["chord"]) == {"tenderness", "fear", "anger", "pride"}
 
 
 def test_hallucinated_quote_is_dropped():

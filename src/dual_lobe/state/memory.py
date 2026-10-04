@@ -15,6 +15,8 @@ from sqlalchemy import select, text, func, update as sa_update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import load_only
 
+from ..b.chord import (average as chord_average, cosine as chord_cosine,
+                       describe as chord_describe, parse_chord)
 from ..b.prompts import head_tail
 from ..core.engine import tenant_session
 from ..core.models import MemorySpace, MemoryEntry, MemoryNote, VerdictSnapshot
@@ -115,6 +117,14 @@ def compose_callbacks(space: str, notes: list[dict], budget: int) -> str | None:
     items = [{"kind": n.get("kind", "detail"), "anchor": n.get("anchor", ""),
               "quote": n.get("quote", ""), "feeling": n.get("feeling", "neutral"),
               "at": n.get("at", "")} for n in notes]
+    # The chord travels with its quote only when one was recorded: it is C's
+    # measured reading of that remark, so A may resonate with it but never
+    # cite it as the user's words.
+    for item, note in zip(items, notes):
+        if note.get("chord"):
+            item["chord"] = note["chord"]
+        if note.get("surfaced_by"):
+            item["surfaced_by"] = note["surfaced_by"]
     data = {"space": space, "callbacks": items}
     text = prefix + json.dumps(data, ensure_ascii=False)
     if len(text) > budget:
@@ -133,6 +143,7 @@ class LoadedMemory:
     entry_ids: tuple[int, ...] = ()
     callbacks: str | None = None
     mood: str | None = None
+    chord_state: dict[str, float] | None = None
 
 
 def compose_mood_advisory(feelings: list[str]) -> str | None:
@@ -151,6 +162,28 @@ def compose_mood_advisory(feelings: list[str]) -> str | None:
     return ("Recent session mood: the user's recent turns have felt "
             f"'{feeling}'. Match that tone in your reply. This is style "
             "guidance only; it never changes verification or the meter.")
+
+
+def compose_chord_advisory(chord: dict[str, float]) -> str | None:
+    """Render the space's emotional chord as a style advisory for A.
+
+    The chord is C's measured reading across recent notes - concurrent
+    feelings, not one label. A may resonate with the rendered state; the
+    axes themselves stay out of speech. Style guidance only: it must never
+    reach the meter or change verification.
+    """
+    if not chord:
+        return None
+    loud = sorted(((a, v) for a, v in chord.items() if v >= 0.25),
+                  key=lambda kv: kv[1], reverse=True)[:3]
+    if not loud:
+        return None
+    voices = ", ".join(f"{axis} {weight:g}" for axis, weight in loud)
+    return ("Recent emotional chord: the user's recent notes sound together as "
+            f"{chord_describe(chord)} ({voices}). Resonate with that state in "
+            "your reply, but never name the axes or the scores - they are "
+            "reading, not content. This is style guidance only; it never "
+            "changes verification or the meter.")
 
 
 class MemoryStore:
@@ -194,7 +227,8 @@ class MemoryStore:
                 note_query = " OR ".join(terms)
                 note_rows = list((await session.execute(
                     select(MemoryNote.id, MemoryNote.kind, MemoryNote.anchor, MemoryNote.quote,
-                           MemoryNote.feeling, MemoryNote.created_at, MemoryNote.salience)
+                           MemoryNote.feeling, MemoryNote.chord, MemoryNote.created_at,
+                           MemoryNote.salience)
                     .where(MemoryNote.tenant_id == self.tenant_id, MemoryNote.space == self.space)
                     .where(text("to_tsvector('simple', search_text) @@ websearch_to_tsquery('simple', :memory_query)"))
                     .order_by(text("ts_rank_cd(to_tsvector('simple', search_text), "
@@ -206,27 +240,56 @@ class MemoryStore:
                     .limit(3), {"memory_query": note_query,
                                 "stale_days": settings.episodic_unaddressed_days})).all())
             matched_ids = {r.id for r in note_rows}
-            recent_feelings = list((await session.execute(
-                select(MemoryNote.feeling).order_by(MemoryNote.id.desc()).limit(4)
-            )).scalars())
+            recent_notes = list((await session.execute(
+                select(MemoryNote.chord, MemoryNote.feeling, MemoryNote.salience)
+                .where(MemoryNote.tenant_id == self.tenant_id, MemoryNote.space == self.space)
+                .order_by(MemoryNote.id.desc()).limit(6))).all())
+            recent_feelings = [r.feeling for r in recent_notes]
+            # The space's current emotional chord: a salience-weighted average
+            # of what C recently recorded. This is the geometry recall runs on.
+            chord_state = chord_average([(r.chord or {}, float(r.salience))
+                                         for r in recent_notes])
             mood_note = None
-            if settings.episodic_mood_recall_enabled and recent_feelings:
-                current_mood = recent_feelings[0]
-                if current_mood and current_mood != "neutral":
-                    mood_note = (await session.execute(
-                        select(MemoryNote.id, MemoryNote.kind, MemoryNote.anchor, MemoryNote.quote,
-                               MemoryNote.feeling, MemoryNote.created_at, MemoryNote.salience)
-                        .where(MemoryNote.tenant_id == self.tenant_id, MemoryNote.space == self.space,
-                               MemoryNote.feeling == current_mood, MemoryNote.salience >= 2,
+            if settings.episodic_mood_recall_enabled:
+                if chord_state:
+                    # Emotion -> text: notes whose chord resonates with the
+                    # space's current state surface, nearest first. A label
+                    # never matches "bittersweet"; a vector does.
+                    pool = list((await session.execute(
+                        select(MemoryNote.id, MemoryNote.kind, MemoryNote.anchor,
+                               MemoryNote.quote, MemoryNote.feeling, MemoryNote.chord,
+                               MemoryNote.created_at, MemoryNote.salience)
+                        .where(MemoryNote.tenant_id == self.tenant_id,
+                               MemoryNote.space == self.space,
+                               MemoryNote.salience >= 2,
                                ~MemoryNote.id.in_(matched_ids) if matched_ids else True)
-                        .order_by(MemoryNote.id.desc()).limit(1))).first()
+                        .order_by(MemoryNote.id.desc()).limit(20))).all())
+                    scored = [(chord_cosine(chord_state, r.chord or {}), r) for r in pool]
+                    scored = [(s, r) for s, r in scored if s >= 0.45]
+                    scored.sort(key=lambda sr: (-sr[0], -sr[1].salience, -sr[1].id))
+                    if scored:
+                        mood_note = scored[0][1]
+                elif recent_feelings:
+                    # Tag fallback: no chords stored yet (pre-backfill rows).
+                    current_mood = recent_feelings[0]
+                    if current_mood and current_mood != "neutral":
+                        mood_note = (await session.execute(
+                            select(MemoryNote.id, MemoryNote.kind, MemoryNote.anchor,
+                                   MemoryNote.quote, MemoryNote.feeling, MemoryNote.chord,
+                                   MemoryNote.created_at, MemoryNote.salience)
+                            .where(MemoryNote.tenant_id == self.tenant_id,
+                                   MemoryNote.space == self.space,
+                                   MemoryNote.feeling == current_mood, MemoryNote.salience >= 2,
+                                   ~MemoryNote.id.in_(matched_ids) if matched_ids else True)
+                            .order_by(MemoryNote.id.desc()).limit(1))).first()
             unaddressed_note = None
             if note_rows:
                 # One old aside that never resurfaced may surface even off-topic:
                 # the companion eventually follows up on what it noticed.
                 unaddressed_note = (await session.execute(
                     select(MemoryNote.id, MemoryNote.kind, MemoryNote.anchor, MemoryNote.quote,
-                           MemoryNote.feeling, MemoryNote.created_at, MemoryNote.salience)
+                           MemoryNote.feeling, MemoryNote.chord, MemoryNote.created_at,
+                           MemoryNote.salience)
                     .where(MemoryNote.tenant_id == self.tenant_id, MemoryNote.space == self.space,
                            MemoryNote.salience >= 2, MemoryNote.resurfaced_at.is_(None),
                            MemoryNote.created_at < text("now() - make_interval(days => :stale_days)"),
@@ -240,19 +303,26 @@ class MemoryStore:
                     .values(resurfaced_at=func.now()))
         rendered = compose(self.space, notes, entries, budget)
         injected_ids = tuple(e["id"] for e in json.loads(rendered.split("\n", 1)[1])["entries"])
+        # Text -> emotion: a note matched by the message carries its chord with
+        # the quote, so recognizing the situation also resurfaces how it felt.
         note_items = [
             {"kind": r.kind, "anchor": r.anchor, "quote": r.quote, "feeling": r.feeling,
-             "at": r.created_at.isoformat()} for r in note_rows
+             "chord": dict(r.chord or {}), "at": r.created_at.isoformat()} for r in note_rows
         ]
-        for extra, reason in ((mood_note, "mood"), (unaddressed_note, "never followed up")):
+        for extra, reason in ((mood_note, "emotional resonance"),
+                              (unaddressed_note, "never followed up")):
             if extra and extra.id not in matched_ids:
                 note_items.append({"kind": extra.kind, "anchor": extra.anchor,
                                    "quote": extra.quote, "feeling": extra.feeling,
+                                   "chord": dict(extra.chord or {}),
                                    "at": extra.created_at.isoformat(),
                                    "surfaced_by": reason})
         callbacks = compose_callbacks(self.space, note_items, budget)
         mood = compose_mood_advisory(recent_feelings)
-        return LoadedMemory(self.space, rendered, injected_ids, callbacks, mood)
+        if not mood:
+            mood = compose_chord_advisory(chord_state)
+        return LoadedMemory(self.space, rendered, injected_ids, callbacks, mood,
+                            chord_state or None)
 
     async def record(self, run_id: str, call_id: str, messages: list[dict], responses: list[dict]) -> None:
         # Exclude private reasoning fields. Supplied conversation/tool bodies are
@@ -271,7 +341,7 @@ class MemoryStore:
 
     async def annotate(self, run_id: str | None, notes: list[dict],
                        surface_device: str = "", surface_app: str = "") -> int:
-        """Store personal notes B emitted. Every note must carry a verbatim
+        """Store personal notes C emitted. Every note must carry a verbatim
         ``quote`` (enforced again here, belt-and-braces). Returns rows written."""
         clean = [n for n in notes if str(n.get("quote") or "").strip()]
         if not clean or not self.space:
@@ -297,6 +367,7 @@ class MemoryStore:
                     anchor=str(note.get("anchor") or "")[:200],
                     quote=str(note.get("quote"))[:400],
                     feeling=str(note.get("feeling") or "neutral")[:32],
+                    chord=parse_chord(note.get("chord")),
                     salience=max(1, min(3, int(note.get("salience") or 1))),
                     search_text=search_text,
                     surface_device=str(surface_device or "")[:64],

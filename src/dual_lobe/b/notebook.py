@@ -18,6 +18,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 from typing_extensions import Annotated
 
+from .chord import CHORD_AXES, MAX_AXES, parse_chord
+
 NOTE_KINDS = ("affect", "preference", "callback", "plan", "detail")
 MAX_NOTES = 5
 MAX_QUOTE = 400
@@ -34,6 +36,9 @@ class Note(BaseModel):
     anchor: _Anchor = ""
     quote: _Snippet
     feeling: str = Field(default="neutral")
+    # Wire type stays loose on purpose: strict int/float distinctions would
+    # reject "joy": 1 from C. parse_chord clamps and validates downstream.
+    chord: dict = Field(default_factory=dict)
     salience: int = Field(default=1, ge=1, le=3)
 
 
@@ -49,7 +54,7 @@ notice small, *personal* things the user said that nobody followed up on, so the
 can be remembered and perhaps raised later.
 
 Return JSON only, exactly:
-{{"notes": [{{"kind": "...", "anchor": "...", "quote": "...", "feeling": "...", "salience": 1}}]}}
+{{"notes": [{{"kind": "...", "anchor": "...", "quote": "...", "feeling": "...", "chord": {{...}}, "salience": 1}}]}}
 
 Rules:
 - kind is one of: {", ".join(NOTE_KINDS)}.
@@ -58,6 +63,10 @@ Rules:
 - anchor is the topic/event the note attaches to (what we were doing), so it can
   be recalled when that topic returns.
 - feeling is one of: warm, amused, concerned, proud, tired, neutral.
+- chord is what they felt, as weights that may sound TOGETHER: an object over
+  {", ".join(CHORD_AXES)} with weights 0-1. People feel several at once —
+  bittersweet is {{"joy": 0.6, "sadness": 0.7}}, not one word. Use at most
+  {MAX_AXES} voices; omit the chord (or {{}}) when the remark is flat/neutral.
 - salience is 1 (small aside) to 3 (clearly important to the user).
 - Only personal, human remarks (a preference, a life detail, a mood, a plan, a
   joke, a callback). Never ordinary task content, never a factual claim to verify.
@@ -133,6 +142,7 @@ def parse_notes(content: str, *, known_texts: list[str] | None = None) -> list[d
             "anchor": note.anchor.strip(),
             "quote": quote,
             "feeling": note.feeling.strip() or "neutral",
+            "chord": parse_chord(note.chord),
             "salience": int(note.salience),
         })
     return clean

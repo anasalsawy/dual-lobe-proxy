@@ -38,9 +38,23 @@ rendering are deterministic.
 (affect / preference / callback / plan / detail), `anchor` (the topic or event
 the note attaches to, so it can be recalled when that topic returns), `quote`
 (the user's verbatim words, required), `feeling` (warm / amused / concerned /
-proud / tired / neutral), and `salience` (1-3). `extra="forbid", strict=True`
+proud / tired / neutral), `chord` (concurrent affect as weights over a fixed
+axis vocabulary - see below), and `salience` (1-3). `extra="forbid", strict=True`
 means a stray field or wrong type fails the whole payload - fail-safe, nothing
-half-parsed.
+half-parsed. The chord's wire type is deliberately loose (`dict`, not
+`dict[str, float]`): strict mode would reject `"joy": 1` for being an int and
+drop the entire payload. `chord.parse_chord` does the real validation -
+unknown axes dropped, weights clamped to 0-1, more than four voices trimmed to
+the loudest.
+
+**Emotional chord** (`b/chord.py`) - a feeling word is one bucket and people are
+never in one bucket. The chord is a non-negative vector over a closed vocabulary
+(joy, sadness, fear, anger, tenderness, pride): bittersweet is
+`{"joy": 0.6, "sadness": 0.7}`, not a coin flip between the words. The `feeling`
+tag stays as the human/prompt rendering (`describe()`), but recall works on the
+geometry. `cosine()` drives emotion-to-text resonance; `average()` folds recent
+notes into the space's current chord state, salience-weighted and renormalized.
+All pure functions - C proposes numbers, this module makes them safe to trust.
 
 **`NOTES_SYSTEM` / `build_notes_prompt(transcript)`** - the system prompt that
 makes B a note-taker without giving it a voice to the user. It states B's job
@@ -99,7 +113,9 @@ ride in through the existing injection channel.
 ### `src/dual_lobe/core/models.py` + `alembic/versions/0005_episodic_memory.py`
 
 **`MemoryNote`** - the table: `id, tenant_id, space, run_id, kind, anchor, quote,
-feeling, salience, search_text, created_at`, indexed on `(tenant_id, space)`. It
+feeling, chord, salience, search_text, created_at`, indexed on `(tenant_id, space)`
+(`chord` added by `0008_emotional_chord`; rows predating it store `{}` and fall
+back to tag-based recall). It
 sits beside `MemoryEntry` (the technical journal) as the affective companion.
 
 ### `src/dual_lobe/core/settings.py`
