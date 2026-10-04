@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.redact import redact_payload
 from ..state.memory import MemoryStore, validate_space
+from ..state.ndsmc import buffer_stats, consolidate
 from . import auth
 
 router = APIRouter()
@@ -19,6 +20,24 @@ def checked(space):
 class Notebook(BaseModel):
     model_config = ConfigDict(extra="forbid")
     notes: str = Field(max_length=4000)
+
+
+@router.get("/v1/dual-lobe/memory/{space}/buffer")
+async def buffer(space: str,
+                 principal: auth.Principal = Depends(auth.require_scope(auth.SCOPE_STATE_READ))):
+    """ND-SMC daily-buffer occupancy: the number the dock reads before sleeping."""
+    stats = await buffer_stats(principal.tenant_id, checked(space))
+    return {"space": space, "rows": stats.kept, "utilization": round(stats.utilization, 4)}
+
+
+@router.post("/v1/dual-lobe/memory/{space}/consolidate")
+async def dream(space: str, principal: auth.Principal = Depends(
+        auth.require_scope(auth.SCOPE_STATE_DEBUG))):
+    """Nightly consolidation: export verbatim, train if configured, purge only
+    what the export proved. Safe to call repeatedly; no-op when the buffer is empty."""
+    result = await consolidate(principal.tenant_id, checked(space))
+    return {"space": space, "exported": result.exported, "purged": result.purged,
+            "trained": result.trained, "file": result.file}
 
 
 @router.get("/v1/dual-lobe/memory/{space}")

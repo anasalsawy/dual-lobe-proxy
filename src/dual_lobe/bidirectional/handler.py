@@ -465,6 +465,37 @@ async def _capture_notes(*, speaker: str, verifier: str, secure: bool, dialogue:
         written = await record_notes(tenant_id, shared_space, run_id, notes,
                                      surface_device=surface_device, surface_app=surface_app)
         LOG.info("episodic notes stored run=%s count=%s", run_id, written)
+    await _ndsmc_buffer(tenant_id, shared_space, run_id, latest, notes,
+                      secure=secure, guard=guard, vault=vault)
+
+
+async def _ndsmc_buffer(tenant_id: int, space: str, run_id: str,
+                        latest: str, notes: list[dict], *,
+                        secure: bool = False, guard: Any = None,
+                        vault: Any = None) -> None:
+    """ND-SMC Phases 1-2, riding the C-capture path.
+
+    What gets buffered is the human's own turn, byte-exact - never the
+    conversation JSON (that would duplicate every earlier turn into the
+    buffer on every turn). On the secure model the turn is vault-tokenized
+    first, so the buffer inherits the privacy gate instead of bypassing it.
+    C's top note supplies the affect prior (kind/salience/chord) the juice
+    filter weighs against the space's baseline.
+    """
+    from ..core.settings import get_settings
+    from ..state.ndsmc import ingest
+
+    s = get_settings()
+    if not s.ndsmc_enabled or not (latest or "").strip():
+        return
+    turn = latest
+    if secure and guard is not None:
+        turn, _ = guard.sanitize(latest, vault=vault)
+    top = max(notes, key=lambda n: int(n.get("salience") or 1), default=None) or {}
+    await ingest(tenant_id, space, turn, run_id=run_id,
+                 kind=str(top.get("kind") or "detail"),
+                 salience=int(top.get("salience") or 1),
+                 chord=top.get("chord") if isinstance(top.get("chord"), dict) else None)
 
 
 async def _run(payload: dict[str, Any], *, run_id: str = "", tenant_id: int = 0,

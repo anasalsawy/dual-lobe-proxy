@@ -219,6 +219,12 @@ class MemoryStore:
             selected = {e.id: e for e in [*recent, *relevant, *([first] if first else [])]}
             entries = [{"id": e.id, "run_id": str(e.run_id), "at": e.created_at.isoformat(),
                         "excerpt": e.search_text} for e in sorted(selected.values(), key=lambda e: e.id, reverse=True)]
+            if settings.c_sole_memory_channel:
+                # C is the sole memory channel: the mechanical journal stays
+                # raw storage (C's material, operator audit), never A's recall.
+                # What A "remembers" is only C's notes - and every rewrite of
+                # them on the way in remains forbidden.
+                entries = []
             # Personal/emotional notes: eligible only when a MEANINGFUL term of
             # the current message (no stopwords, >=4 chars) appears in the note.
             # This keeps an unrelated turn from dredging up a past memory.

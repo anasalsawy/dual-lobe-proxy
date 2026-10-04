@@ -128,6 +128,31 @@ class Settings(BaseSettings):
     episodic_paraphrase_threshold: float = Field(
         default=0.45, ge=0.0, le=1.0, validation_alias="DUAL_LOBE_EPISODIC_PARAPHRASE_THRESHOLD")
     episodic_notes_max: int = Field(default=5, ge=1, le=10, validation_alias="DUAL_LOBE_EPISODIC_NOTES_MAX")
+    # C is the sole memory channel into A's context: recall serves C's notes
+    # and callbacks only; the mechanical journal stays as C's raw material and
+    # operator audit, never injected. Flip false to restore the dual-channel
+    # (journal-injected) behavior.
+    c_sole_memory_channel: bool = Field(
+        default=True, validation_alias="DUAL_LOBE_C_SOLE_MEMORY_CHANNEL")
+
+    # ND-SMC: raw high-variance buffer, weekly verbatim export, purge-on-success.
+    ndsmc_enabled: bool = Field(default=True, validation_alias="DUAL_LOBE_NDSMC")
+    # Turns scoring below this are not stored at all (kept raw or dropped).
+    ndsmc_variance_floor: float = Field(
+        default=0.60, ge=0.0, le=1.0, validation_alias="DUAL_LOBE_NDSMC_VARIANCE_FLOOR")
+    # Hard row cap per space: the oldest rows are trimmed when exceeded, so a
+    # space that never consolidates cannot grow the buffer without bound.
+    ndsmc_buffer_rows: int = Field(
+        default=2000, ge=10, le=100000, validation_alias="DUAL_LOBE_NDSMC_BUFFER_ROWS")
+    # EMA rate for the subconscious baseline of ordinary interaction.
+    ndsmc_baseline_alpha: float = Field(
+        default=0.1, gt=0.0, lt=1.0, validation_alias="DUAL_LOBE_NDSMC_BASELINE_ALPHA")
+    ndsmc_export_dir: str = Field(default=".ndsmc", validation_alias="DUAL_LOBE_NDSMC_EXPORT_DIR")
+    # Optional operator pipeline (LoRA/QLoRA); receives the exported JSONL path
+    # as its last argument. Empty = export + purge only, no training step.
+    ndsmc_train_command: str = Field(default="", validation_alias="DUAL_LOBE_NDSMC_TRAIN_COMMAND")
+    ndsmc_train_timeout: int = Field(
+        default=3600, ge=1, le=86400, validation_alias="DUAL_LOBE_NDSMC_TRAIN_TIMEOUT")
 
     worker_poll_seconds: float = Field(default=1.0, gt=0, validation_alias="DUAL_LOBE_WORKER_POLL_SECONDS")
     worker_max_concurrency: int = Field(default=2, ge=1, le=16, validation_alias="DUAL_LOBE_WORKER_MAX_CONCURRENCY")

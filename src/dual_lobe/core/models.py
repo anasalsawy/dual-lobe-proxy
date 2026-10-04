@@ -14,6 +14,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     SmallInteger,
@@ -85,6 +86,10 @@ class MemorySpace(Base):
     tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True)
     name: Mapped[str] = mapped_column(Text, primary_key=True)
     notes: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    # ND-SMC subconscious state: the space's running baseline of ordinary
+    # interaction (JSON vector) that variance is measured against. Not
+    # memory content; never injected into any prompt.
+    subconscious: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
@@ -140,6 +145,31 @@ class MemoryNote(Base):
     surface_device: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     surface_app: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     resurfaced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class RawInteraction(Base):
+    """ND-SMC buffer: one turn kept exactly as said, or not kept at all.
+
+    The storage invariant in table form. `raw_transcript` is the turn as
+    received - stutters, slang, casing, typos and all - and no code path
+    summarizes, normalizes or corrects it. Low-variance turns are never
+    stored, so a row here means C's scorer called it worth keeping.
+
+    `locked` is set only when the weekend consolidation has exported the
+    row to a training file; the purge deletes locked rows and nothing
+    else, so a failed consolidation can never destroy unwritten data.
+    """
+    __tablename__ = "raw_interactions"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    space: Mapped[str] = mapped_column(Text, nullable=False)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id", ondelete="SET NULL"), nullable=True)
+    raw_transcript: Mapped[str] = mapped_column(Text, nullable=False)
+    style_markers: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    embedding: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    variance: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
