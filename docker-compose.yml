@@ -52,5 +52,31 @@ services:
       initialize:
         condition: service_completed_successfully
 
+  # Persona runtime: the persona's body. One container IS the sandbox —
+  # its terminal, files, and workspace all live server-side inside this
+  # container, never on user machines. Its mind is the proxy: every agent
+  # LLM call goes through gateway:8801, so A speaks, B verifies, C observes.
+  persona:
+    build:
+      context: .
+      dockerfile: persona/Dockerfile
+    environment:
+      DUAL_LOBE_PROXY_URL: http://gateway:8801/v1
+      DUAL_LOBE_PERSONA_MODEL: openai/sawii/dl-bidirectional
+      DUAL_LOBE_PERSONA_PORT: "8802"
+    ports:
+      - "127.0.0.1:${DUAL_LOBE_PERSONA_PORT:-8802}:8802"
+    volumes:
+      - persona_workspaces:/var/lib/dual-lobe-persona
+    depends_on:
+      gateway:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8802/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
 volumes:
   pg_data:
+  persona_workspaces:

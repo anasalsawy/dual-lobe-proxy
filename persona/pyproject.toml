@@ -1,0 +1,31 @@
+[project]
+name = "dual-lobe-persona"
+version = "0.1.0"
+description = "Server-side OpenHands agent runtime for dual-lobe personas: the persona's body, using the dual-lobe proxy as its mind."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
+    "pydantic>=2.7,<3",
+    "structlog>=24,<25",
+    "httpx>=0.27,<1",
+    "openhands-sdk",
+    "openhands-tools",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.24,<1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dual_lobe_persona"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
